@@ -39,7 +39,7 @@
 
     <!-- Actuator -->
     <actuator>
-        <motor name="slide" joint="slider" ctrllimited="true" ctrlrange="-1 1" gear="100"/>
+        <motor name="slide" joint="slider"/>
     </actuator>
 
     <!-- default configuration (when you press "Load key" button) -->

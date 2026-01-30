@@ -20,17 +20,28 @@ import mujoco.mjx as mjx
 # PARALLEL DYNAMICS ROLLOUT CLASS
 #############################################################
 
-# struct to hold the parallel sim config
+# model configuration
+@dataclass
+class ModelConfig:
+
+    # model parameters
+    xml_path: str          # path to the mujoco xml model
+
+    # PD control parameters
+    Kp: jnp.array          # proportional gains for each joint
+    Kd: jnp.array          # derivative gain for each joint
+
+    # max and minimum torques
+    u_lb: jnp.array       # minimum torques
+    u_ub: jnp.array       # maximum torques
+
+# parallel sim config
 @dataclass
 class ParallelSimConfig:
 
-    # model parameters
-    xml_path: str             # path to the mujoco xml model
-    
     # simulation parameters
     batch_size: int           # batch size for parallel rollout
     rng: jax.random.PRNGKey   # random number generator key
-
 
 # MJX Rollout class
 class ParallelSim():
@@ -42,20 +53,20 @@ class ParallelSim():
     """
 
     # initialize the class
-    def __init__(self, config: ParallelSimConfig):
+    def __init__(self, sim_config: ParallelSimConfig,
+                       model_config: ModelConfig):
 
         # set some config params for the class
-        self.rng = config.rng
-        self.batch_size = config.batch_size
+        self.rng = sim_config.rng
+        self.B = sim_config.batch_size
 
         # load the model from XML
-        self._initialize_model(config.xml_path)
+        self._initialize_model(model_config.xml_path)
 
         # initialize the jit functions
         self._initialize_jit_functions()
 
     ####################################### INITIALIZATION #######################################
-
 
     # initialize the mujoco model
     def _initialize_model(self, xml_path: str):
@@ -89,7 +100,6 @@ class ParallelSim():
         print(f"   [nv: {self.nv}]")
         print(f"   [nu: {self.nu}]")
 
-
     # initialize the jit functions
     def _initialize_jit_functions(self):
         """
@@ -99,8 +109,7 @@ class ParallelSim():
         # jit the rollout function
         self.rollout = jax.jit(self.rollout)
 
-        # TODO: there may be other functions to jit in the future
-
+        print("JIT compilation of parallel sim function complete.")
 
     ####################################### ROLLOUTS #######################################
 
@@ -112,9 +121,8 @@ class ParallelSim():
         Args:
             q0: jnp.array, shape (nq, ), initial position state
             v0: jnp.array, shape (nv, ), initial velocity state
-            U:  jnp.array, shape (B, N, nu),  batch of action sequences, 
-                                                which could be torque or position commands
-
+            U:  jnp.array, shape (B, N, nu),  batch of control sequences
+                                              
         Returns:
             q_log: jnp.array, logged positions,  shape (B, N+1, nq)
             v_log: jnp.array, logged velocities, shape (B, N+1, nv)
@@ -153,18 +161,18 @@ class ParallelSim():
         return q_log, v_log
     
 
-
 #############################################################
 # EXAMPLE USAGE
 #############################################################
 
 import numpy as np
 import matplotlib.pyplot as plt
+import time
 
 if __name__ == "__main__":
 
     # xml model path
-    xml_path = "./models/cartpole.xml"
+    xml_path = "./models/biped.xml"
 
     # parallel sim config
     config = ParallelSimConfig(
@@ -192,7 +200,22 @@ if __name__ == "__main__":
     U = 0.1 * jax.random.normal(subkey, (B, N, nu))  # small random torques
 
     # run rollout
+    t0 = time.time()
     q_log, v_log = parallel_sim.rollout(q0, v0, U)
+    t1 = time.time()
+    print(f"Rolled out {B} trajectories of length {N} in {t1 - t0:.4f} seconds.")
+    q_log, v_log = parallel_sim.rollout(q0, v0, U*0.2)
+    t2 = time.time()
+    print(f"Rolled out {B} trajectories of length {N} in {t2 - t1:.4f} seconds.")
+    q_log, v_log = parallel_sim.rollout(q0, v0, U*0.2)
+    t3 = time.time()
+    print(f"Rolled out {B} trajectories of length {N} in {t3 - t2:.4f} seconds.")
+    q_log, v_log = parallel_sim.rollout(q0, v0, U*0.2)
+    t4 = time.time()
+    print(f"Rolled out {B} trajectories of length {N} in {t4 - t3:.4f} seconds.")
+    q_log, v_log = parallel_sim.rollout(q0, v0, U*0.2)
+    t5 = time.time()
+    print(f"Rolled out {B} trajectories of length {N} in {t5 - t4:.4f} seconds.")
 
     # choose a few trajectories to plot
     B = q_log.shape[0]
