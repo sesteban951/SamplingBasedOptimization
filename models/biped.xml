@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="utf-8"?>
+<mujoco model="biped">
+
+	<!-- Simulation Parameters -->
+	<option solver="Newton" integrator="RK4" timestep="0.005" iterations="20" ls_iterations="20" cone="elliptic">
+		<flag eulerdamp="disable"/>
+	</option>
+
+    <!-- Inertia is computed from geometry -->
+    <compiler inertiafromgeom="true" />
+
+	<!-- Default properties -->
+    <default>
+        <joint damping="1.0" armature="0.00" frictionloss="0.1"/>
+        <geom contype="0" conaffinity="0"/>
+    </default>
+
+    <asset>
+        <texture type="skybox" builtin="flat" rgb1="0 0 0" rgb2="0 0 0" width="512" height="512"/>
+        <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.9 0.9 0.9" width="300" height="300"/>
+        <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
+    </asset>
+
+    <!-- Memory settings (default is 1000) -->
+    <size nstack="3000" />
+
+	<!-- Robot -->
+	<worldbody>
+
+        <!-- Add light -->
+        <light pos="-0.5 0.0 2.0" dir="0 0 -1" directional="true"/>  
+
+        <!-- Ground -->
+        <geom name="ground" type="plane" size="0 0 0.01" material="groundplane" contype="1" conaffinity="6"/>
+	
+        <!-- Torso -->
+        <body name="torso" pos="0 0 0">
+            <geom name="torso" type="capsule" size="0.045 0.25" pos="0 0 0.25" density="2500" rgba="0.9 0.9 0.9 0.5"/> 
+            <joint name="torso_x" type="slide" axis="1 0 0"/>
+            <joint name="torso_z" type="slide" axis="0 0 1"/>
+            <joint name="torso_pitch" type="hinge" axis="0 -1 0"/>
+
+            <!-- Left leg -->
+            <body name="left_thigh" pos="0 0.09 0">
+                <geom name="left_thigh" type="capsule" size="0.045 0.2" pos="0 0 -0.2" density="500" rgba="0.9 0.9 0.9 0.5"/>
+                <joint name="left_hip_joint" type="hinge" axis="0 -1 0" pos="0 0 0" range="-90.0 90.0"/>
+
+                <!-- Left Shin -->
+                <body name="left_shin" pos="0 0 -0.4">
+                    <geom name="left_shin" type="capsule" size="0.045 0.2" pos="0 0 -0.2" density="500" rgba="0.9 0.9 0.9 0.5"/>
+                    <joint name="left_knee_joint" type="hinge" axis="0 -1 0" pos="0 0 0" range="-140.0 0.0"/>
+
+                    <!-- Left Foot -->
+                    <geom name="left_foot" type="sphere" size="0.046" pos="0 0 -0.4" rgba="0 0 0 1" contype="2" conaffinity="1"/>
+                    <site name="left_foot_site" pos="0 0 -0.4" size="0.047" type="sphere" rgba="0 0 0 0"/>
+
+                </body>
+
+            </body>
+
+            <!-- Right leg -->
+            <body name="right_thigh" pos="0 -0.09 0">
+                <geom name="right_thigh" type="capsule" size="0.045 0.2" pos="0 0 -0.2" density="500" rgba="0.9 0.9 0.9 0.5"/>
+                <joint name="right_hip_joint" type="hinge" axis="0 -1 0" pos="0 0 0" range="-90.0 90.0"/>
+
+                <!-- Right Shin -->
+                <body name="right_shin" pos="0 0 -0.4">
+                    <geom name="right_shin" type="capsule" size="0.045 0.2" pos="0 0 -0.2" density="500" rgba="0.9 0.9 0.9 0.5"/>
+                    <joint name="right_knee_joint" type="hinge" axis="0 -1 0" pos="0 0 0" range="-140.0 0.0"/>
+                    
+                    <!-- Right Foot -->
+                    <geom name="right_foot" type="sphere" size="0.046" pos="0 0 -0.4" rgba="0 0 0 1" contype="4" conaffinity="1"/>
+                    <site name="right_foot_site" pos="0 0 -0.4" size="0.047" type="sphere" rgba="0 0 0 0"/>
+
+                </body>
+
+            </body>
+
+        </body>
+	</worldbody>
+
+    <!-- Sensors -->
+    <sensor>
+        <!-- foot contact sensor -->
+        <touch name="left_foot_touch"  site="left_foot_site"/>          
+        <touch name="right_foot_touch" site="right_foot_site"/>
+
+        <!-- foot linear velocity in global coord-->
+        <framelinvel name="left_foot_linvel"  objtype="site" objname="left_foot_site"/>
+        <framelinvel name="right_foot_linvel" objtype="site" objname="right_foot_site"/>
+
+        <!-- foot world position -->
+        <framepos name="left_foot_pos"  objtype="site" objname="left_foot_site"/>
+        <framepos name="right_foot_pos" objtype="site" objname="right_foot_site"/>
+    </sensor>
+
+    <!-- Actuators -->
+	<actuator>
+		<motor name="hip_left_motor" joint="left_hip_joint" ctrllimited="true" ctrlrange="-1 1" gear="75"/>
+    	<motor name="knee_left_motor" joint="left_knee_joint" ctrllimited="true" ctrlrange="-1 1" gear="75"/>
+		<motor name="hip_right_motor" joint="right_hip_joint" ctrllimited="true" ctrlrange="-1 1" gear="75"/>
+		<motor name="knee_right_motor" joint="right_knee_joint" ctrllimited="true" ctrlrange="-1 1" gear="75"/>
+	</actuator>
+
+    <!-- default configuration (when you press "Load key" button) -->
+    <keyframe>
+        <key name="default" qpos="0 0.85 0 0 0 0 0" qvel="0 0 0 0 0 0 0"/>
+        <key name="standing" qpos="0 0.83 0 0.22 -0.415 0.22 -0.415 " qvel="0 0 0 0 0 0 0"/>
+    </keyframe>
+
+</mujoco>
