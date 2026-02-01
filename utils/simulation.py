@@ -12,7 +12,6 @@ from typing import List
 import jax
 import jax.numpy as jnp
 from jax import lax
-from jax import tree_util
 
 # mujoco imports
 import mujoco
@@ -48,8 +47,6 @@ class ParallelSimConfig:
 
     # simulation parameters
     batch_size: int           # batch size for parallel rollout
-    rng: jax.random.PRNGKey   # random number generator key
-
 
 # MJX Rollout class
 class ParallelSim():
@@ -66,7 +63,6 @@ class ParallelSim():
                        sim_config: ParallelSimConfig,):
 
         # set some config params for the class
-        self.rng = sim_config.rng
         self.B = sim_config.batch_size
 
         # load the model from XML
@@ -74,6 +70,8 @@ class ParallelSim():
 
         # initialize the jit functions
         self._initialize_jit_functions()
+
+        print("Parallel sim initialized.")
 
     ####################################### INITIALIZATION #######################################
 
@@ -99,6 +97,9 @@ class ParallelSim():
         self.nv = self.mjx_model.nv
         self.nu = self.mjx_model.nu
 
+        # load simulation dt (rounded) # NOTE: can change integrator and sim_dt here
+        self.dt = round(float(self.mjx_model.opt.timestep), 6)
+
         # action mode
         self.use_pd = (model_config.action_mode == "pos")
         self.q_actuated_idx = tuple(model_config.q_actuated_idx)
@@ -112,6 +113,13 @@ class ParallelSim():
         assert len(model_config.Kd) == self.nu, "Kd length does not match nu."
         self.Kp = jnp.array(model_config.Kp)
         self.Kd = jnp.array(model_config.Kd)
+
+        # grab position limits at the actuated joints, (if at nq[i] = [0., 0.] then no limits)
+        joint_id_per_act = mj_model.actuator_trnid[:, 0].astype(int)  # shape (nu,)
+        self.pos_limits = jnp.array(mj_model.jnt_range[joint_id_per_act, :])  # (nu, 2)
+
+        # grab actuation limits, (if at nu[i] = [0., 0.] then no limits)
+        self.ctrl_limits = jnp.array(mj_model.actuator_ctrlrange) # shape (nu, 2)
 
         # print message
         print(f"Initialized batched MJX model from [{model_config.xml_path}].")
@@ -131,10 +139,6 @@ class ParallelSim():
         )
 
         # create a batched template of mjx_data 
-        # self.data_batch0 = tree_util.tree_map(
-        #     lambda x: jnp.broadcast_to(x, (self.B,) + x.shape),
-        #     self.mjx_data
-        # )
         self.data_batch0 = jax.vmap(lambda _: self.mjx_data)(jnp.arange(self.B))
 
         # pre-broadcast control gains
@@ -235,11 +239,11 @@ class ParallelSim():
 # EXAMPLE USAGE
 #############################################################
 
-import numpy as np
-import matplotlib.pyplot as plt
-import time
-
 if __name__ == "__main__":
+
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import time
 
     # print deivce that we will use
     print(f"Using device: {jax.default_backend()}")
@@ -248,30 +252,29 @@ if __name__ == "__main__":
         print(f"GPU device: {gpu_info}")
 
     # fix the random seed
-    np.random.seed(0)
+    # np.random.seed(0)
 
     # model config
-    # model_config = ModelConfig(
-    #     xml_path="./models/cartpole.xml",
-    #     Kp=[300.0], 
-    #     Kd=[40.0],  
-    #     q_actuated_idx=[0],
-    #     v_actuated_idx=[0],
-    #     action_mode="pos"
-    # )
     model_config = ModelConfig(
-        xml_path="./models/biped.xml",
-        Kp=[100.0, 100.0, 100.0, 100.0], 
-        Kd=[5.0, 5.0, 5.0, 5.0],  
-        q_actuated_idx=[3, 4, 5, 6],
-        v_actuated_idx=[3, 4, 5, 6],
+        xml_path="./models/cartpole.xml",
+        Kp=[400.0], 
+        Kd=[50.0],  
+        q_actuated_idx=[0],
+        v_actuated_idx=[0],
         action_mode="pos"
     )
+    # model_config = ModelConfig(
+    #     xml_path="./models/biped.xml",
+    #     Kp=[100.0, 100.0, 100.0, 100.0], 
+    #     Kd=[5.0, 5.0, 5.0, 5.0],  
+    #     q_actuated_idx=[3, 4, 5, 6],
+    #     v_actuated_idx=[3, 4, 5, 6],
+    #     action_mode="pos"
+    # )
 
     # parallel sim config
     sim_config = ParallelSimConfig(
         batch_size = 512,
-        rng = jax.random.PRNGKey(0)
     )
 
     # create the parallel sim object
@@ -282,15 +285,15 @@ if __name__ == "__main__":
     dt = float(parallel_sim.mjx_model.opt.timestep)
 
     # initial conditions
-    # q0 = jnp.array([0.0, jnp.pi])  # slight offset from upright
-    q0 = jnp.array([0, 0.83, 0, 0.22, -0.415, 0.22, -0.415])  # slight offset from upright
+    q0 = jnp.array([0.0, jnp.pi])  # slight offset from upright
+    # q0 = jnp.array([0, 0.83, 0, 0.22, -0.415, 0.22, -0.415])  # slight offset from upright
     v0 = jnp.zeros((parallel_sim.nv,))
 
     # random controls: (B, N, nu)
     B = sim_config.batch_size
     nu = parallel_sim.nu
 
-    key = sim_config.rng
+    key = jax.random.PRNGKey(int(time.time()))
     key, subkey = jax.random.split(key)
     U_B = jax.random.uniform(subkey, shape=(B, nu), minval=-1.0, maxval=1.0)   # (B, nu)
     U = jnp.broadcast_to(U_B[:, None, :], (B, N, nu))
@@ -298,12 +301,21 @@ if __name__ == "__main__":
     # run rollout
     t0 = time.time()
     q_log, v_log, tau_log = parallel_sim.rollout(q0, v0, U)
+    q_log.block_until_ready()
+    v_log.block_until_ready()
+    tau_log.block_until_ready()
     t1 = time.time()
     print(f"Rolled out {B} trajectories of length {N} in {t1 - t0:.4f} seconds.")
     q_log, v_log, tau_log = parallel_sim.rollout(q0, v0, U)
+    q_log.block_until_ready()
+    v_log.block_until_ready()
+    tau_log.block_until_ready()
     t2 = time.time()
     print(f"Rolled out {B} trajectories of length {N} in {t2 - t1:.4f} seconds.")
     q_log, v_log, tau_log = parallel_sim.rollout(q0, v0, U)
+    q_log.block_until_ready()
+    v_log.block_until_ready()
+    tau_log.block_until_ready()
     t3 = time.time()
     print(f"Rolled out {B} trajectories of length {N} in {t3 - t2:.4f} seconds.")
 

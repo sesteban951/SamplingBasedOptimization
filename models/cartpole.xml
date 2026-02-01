@@ -1,14 +1,14 @@
 <mujoco model="cart_pole">
     <!-- Simulation settings, NOTE: the timestep seemed to make a huge difference -->
-    <option solver="Newton" integrator="implicitfast" timestep="0.01" iterations="5" ls_iterations="5"/>
+    <option solver="Newton" integrator="implicitfast" timestep="0.02" iterations="5" ls_iterations="5"/>
 
     <!-- Inertia is computed from geometry -->
     <compiler inertiafromgeom="true" />
 
     <!-- Default properties -->
     <default>
-        <joint armature="0.0" damping="0.05" limited="true" />
-        <geom contype="0" friction="0.01 0.01 0.01" />
+        <joint armature="0.0" damping="0.1" limited="true" />
+        <geom contype="0" friction="0.1 0.1 0.1" />
     </default>
 
     <!-- Memory settings (default is 1000) -->
