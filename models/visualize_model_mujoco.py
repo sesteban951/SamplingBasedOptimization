@@ -9,8 +9,8 @@ from mujoco.viewer import launch
 import numpy as np
 
 # Load the model from XML
-xml_file = "./models/cartpole.xml"
-# xml_file = "./models/biped.xml"
+# xml_file = "./models/cartpole.xml"
+xml_file = "./models/biped.xml"
 
 # load and launch the model
 model =  mujoco.MjModel.from_xml_path(xml_file)

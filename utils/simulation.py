@@ -1,6 +1,6 @@
 ##
 #
-#  Perform Parallel MJX Rollouts
+#  Parallel MJX Rollouts
 #  
 ##
 
@@ -131,22 +131,25 @@ class ParallelSim():
         )
 
         # create a batched template of mjx_data 
-        self.data_batch0 = tree_util.tree_map(
-            lambda x: jnp.broadcast_to(x, (self.B,) + x.shape),
-            self.mjx_data
-        )
+        # self.data_batch0 = tree_util.tree_map(
+        #     lambda x: jnp.broadcast_to(x, (self.B,) + x.shape),
+        #     self.mjx_data
+        # )
+        self.data_batch0 = jax.vmap(lambda _: self.mjx_data)(jnp.arange(self.B))
+
+        # pre-broadcast control gains
+        self.Kp_batched = self.Kp[None, :]  # Pre-broadcast
+        self.Kd_batched = self.Kd[None, :]
         
         # jit the rollout function
-        self.rollout = jax.jit(
-            self.rollout
-        )
+        self.rollout = jax.jit(self._rollout)
 
-        print("JIT compilation of parallel sim function complete.")
+        print("JIT compilation of simulation functions complete.")
 
     ####################################### ROLLOUTS #######################################
 
     # rollout with given inputs
-    def rollout(self, q0, v0, U):
+    def _rollout(self, q0, v0, U):
         """
         Perform parallel rollouts with a given initial state and action sequences.
         
@@ -189,10 +192,7 @@ class ParallelSim():
             data = data.replace(ctrl=tau)        # set the control
             data = self.step_fn_batched(data)    # step
 
-            # effective applied torque (takes torque limits into account)
-            tau_effective = data.actuator_force
-
-            return data, (data.qpos, data.qvel, tau_effective)
+            return data, (data.qpos, data.qvel, data.actuator_force) # NOTE: takes torque limits into account
 
         # forward propagate
         _, (q_hist, v_hist, tau_hist) = lax.scan(integration_step, data0, U, length=N)
@@ -207,6 +207,8 @@ class ParallelSim():
         tau_log = jnp.swapaxes(tau_hist, 0, 1)
 
         return q_log, v_log, tau_log
+
+    ####################################### AUXILLARY #######################################
     
     # compute PD torques
     def _compute_pd_torque(self, q, v, q_des):
@@ -224,7 +226,7 @@ class ParallelSim():
         v_act = v[:, self.v_actuated_idx]  # (B, nu)
 
         # compute PD torques
-        tau = self.Kp[None, :] * (q_des - q_act) + self.Kd[None, :] * (-v_act) # (B, nu)
+        tau = self.Kp_batched * (q_des - q_act) + self.Kd_batched * (-v_act) # (B, nu)
 
         return tau
 
@@ -239,22 +241,36 @@ import time
 
 if __name__ == "__main__":
 
+    # print deivce that we will use
+    print(f"Using device: {jax.default_backend()}")
+    if jax.default_backend() == "gpu":
+        gpu_info = jax.devices("gpu")[0]
+        print(f"GPU device: {gpu_info}")
+
     # fix the random seed
     np.random.seed(0)
 
     # model config
+    # model_config = ModelConfig(
+    #     xml_path="./models/cartpole.xml",
+    #     Kp=[300.0], 
+    #     Kd=[40.0],  
+    #     q_actuated_idx=[0],
+    #     v_actuated_idx=[0],
+    #     action_mode="pos"
+    # )
     model_config = ModelConfig(
-        xml_path="./models/cartpole.xml",
-        Kp=[300.0], 
-        Kd=[40.0],  
-        q_actuated_idx=[0],
-        v_actuated_idx=[0],
+        xml_path="./models/biped.xml",
+        Kp=[100.0, 100.0, 100.0, 100.0], 
+        Kd=[5.0, 5.0, 5.0, 5.0],  
+        q_actuated_idx=[3, 4, 5, 6],
+        v_actuated_idx=[3, 4, 5, 6],
         action_mode="pos"
     )
 
     # parallel sim config
     sim_config = ParallelSimConfig(
-        batch_size = 1024,
+        batch_size = 512,
         rng = jax.random.PRNGKey(0)
     )
 
@@ -262,10 +278,12 @@ if __name__ == "__main__":
     parallel_sim = ParallelSim(model_config, sim_config)
 
     # integration steps
-    N = 1000
+    N = 300
+    dt = float(parallel_sim.mjx_model.opt.timestep)
 
-    # initial conditions (cartpole: usually nq=2, nv=2)
-    q0 = jnp.array([0.0, jnp.pi])  # slight offset from upright
+    # initial conditions
+    # q0 = jnp.array([0.0, jnp.pi])  # slight offset from upright
+    q0 = jnp.array([0, 0.83, 0, 0.22, -0.415, 0.22, -0.415])  # slight offset from upright
     v0 = jnp.zeros((parallel_sim.nv,))
 
     # random controls: (B, N, nu)
@@ -304,7 +322,6 @@ if __name__ == "__main__":
     idx = np.random.choice(B, K, replace=False)  # or random subset
 
     # time axis (optional)
-    dt = float(parallel_sim.mjx_model.opt.timestep)
     t = np.arange(q_log.shape[1]) * dt  # (N+1,)
 
     plt.figure()
