@@ -34,7 +34,7 @@
 
             <!-- Pole -->
             <body name="pole" pos="0 0 0">
-                <geom name="pole" fromto="0 0 0 0.001 0 0.6" size="0.04 0.36" type="capsule" rgba="0.6 0.6 0.6 0.5"/>
+                <geom name="pole" fromto="0 0 0 0 0 0.6" size="0.04 0.36" type="capsule" rgba="0.6 0.6 0.6 0.5"/>
                 <joint axis="0 -1 0" name="hinge" pos="0 0 0" range="-inf inf" type="hinge" />
             </body>
 
@@ -44,7 +44,7 @@
 
     <!-- Actuator -->
     <actuator>
-        <motor name="slide" joint="slider"/>
+        <motor name="slide" joint="slider" ctrllimited="true" ctrlrange="-200 200"/>
     </actuator>
 
     <!-- default configuration (when you press "Load key" button) -->

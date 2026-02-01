@@ -42,7 +42,7 @@ class ModelConfig:
     v_actuated_idx: List[int]   # indices of actuated velocities
 
     # action mode
-    action_mode: str = "pos"   # action mode: "tau" or "pos"
+    action_mode: str = "tau"   # action mode: "tau" or "pos"
 
 
 # parallel sim config
@@ -122,8 +122,8 @@ class ParallelSim():
         self.tau_ub = jnp.array(model_config.tau_ub)
 
         # create the batched step function
-        # self.step_fn_batched = jax.jit(jax.vmap(lambda d: mjx.step(self.mjx_model, d), in_axes=0))
-        self.step_fn_batched = jax.vmap(lambda d: mjx.step(self.mjx_model, d))
+        self.step_fn_batched = jax.jit(jax.vmap(lambda d: mjx.step(self.mjx_model, d), in_axes=0))
+        # self.step_fn_batched = jax.vmap(lambda d: mjx.step(self.mjx_model, d))
 
         # print message
         print(f"Initialized batched MJX model from [{model_config.xml_path}].")
@@ -160,6 +160,7 @@ class ParallelSim():
         Returns:
             q_log: jnp.array, logged positions,  shape (B, N+1, nq)
             v_log: jnp.array, logged velocities, shape (B, N+1, nv)
+            tau_log: jnp.array, logged torques, shape (N, B, nu)
         """
 
         # get sizes
@@ -190,10 +191,10 @@ class ParallelSim():
             data = data.replace(ctrl=tau)        # set the control
             data = self.step_fn_batched(data)    # step
 
-            return data, (data.qpos, data.qvel)
+            return data, (data.qpos, data.qvel, tau)
 
         # forward propagate
-        _, (q_hist, v_hist) = lax.scan(integration_step, data0, U, length=N)
+        _, (q_hist, v_hist, tau_hist) = lax.scan(integration_step, data0, U, length=N)
 
         # q_hist, v_hist: (N, B, nq/nv) -> (B, N, nq/nv)
         q_hist = jnp.swapaxes(q_hist, 0, 1)
@@ -203,7 +204,7 @@ class ParallelSim():
         q_log = jnp.concatenate([q0_batch[:, None, :], q_hist], axis=1)
         v_log = jnp.concatenate([v0_batch[:, None, :], v_hist], axis=1)
 
-        return q_log, v_log
+        return q_log, v_log, tau_hist
     
     # compute PD torques
     def _compute_pd_torque(self, q, v, q_des):
@@ -247,11 +248,11 @@ if __name__ == "__main__":
     # model config
     model_config = ModelConfig(
         xml_path="./models/cartpole.xml",
-        Kp=[200.0], 
-        Kd=[10.0],  
+        Kp=[300.0], 
+        Kd=[20.0],  
         tau_limit=False,
-        tau_lb=[-200.0],
-        tau_ub=[ 200.0],
+        tau_lb=[-500.0],
+        tau_ub=[ 500.0],
         q_actuated_idx=[0],
         v_actuated_idx=[0],
         action_mode="pos"
@@ -267,10 +268,10 @@ if __name__ == "__main__":
     parallel_sim = ParallelSim(model_config, sim_config)
 
     # integration steps
-    N = 1000
+    N = 2000
 
     # initial conditions (cartpole: usually nq=2, nv=2)
-    q0 = jnp.zeros((parallel_sim.nq,))
+    q0 = jnp.array([0.0, jnp.pi])  # slight offset from upright
     v0 = jnp.zeros((parallel_sim.nv,))
 
     # random controls: (B, N, nu)
@@ -279,24 +280,24 @@ if __name__ == "__main__":
 
     key = sim_config.rng
     key, subkey = jax.random.split(key)
-    # U = 0.5 * jax.random.normal(subkey, (B, N, nu))  # small random torques
-    U = 0.5 * jnp.ones((B, N, nu))  
+    U_B = jax.random.uniform(subkey, shape=(B, nu), minval=-1.0, maxval=1.0)   # (B, nu)
+    U = jnp.broadcast_to(U_B[:, None, :], (B, N, nu))
 
     # run rollout
     t0 = time.time()
-    q_log, v_log = parallel_sim.rollout(q0, v0, U)
+    q_log, v_log, tau_log = parallel_sim.rollout(q0, v0, U)
     t1 = time.time()
     print(f"Rolled out {B} trajectories of length {N} in {t1 - t0:.4f} seconds.")
-    q_log, v_log = parallel_sim.rollout(q0, v0, U*0.2)
+    q_log, v_log, tau_log = parallel_sim.rollout(q0, v0, U)
     t2 = time.time()
     print(f"Rolled out {B} trajectories of length {N} in {t2 - t1:.4f} seconds.")
-    q_log, v_log = parallel_sim.rollout(q0, v0, U*0.2)
+    q_log, v_log, tau_log = parallel_sim.rollout(q0, v0, U)
     t3 = time.time()
     print(f"Rolled out {B} trajectories of length {N} in {t3 - t2:.4f} seconds.")
-    q_log, v_log = parallel_sim.rollout(q0, v0, U*0.2)
+    q_log, v_log, tau_log = parallel_sim.rollout(q0, v0, U)
     t4 = time.time()
     print(f"Rolled out {B} trajectories of length {N} in {t4 - t3:.4f} seconds.")
-    q_log, v_log = parallel_sim.rollout(q0, v0, U*0.2)
+    q_log, v_log, tau_log = parallel_sim.rollout(q0, v0, U)
     t5 = time.time()
     print(f"Rolled out {B} trajectories of length {N} in {t5 - t4:.4f} seconds.")
 
@@ -312,7 +313,10 @@ if __name__ == "__main__":
     plt.figure()
     for k in idx:
         plt.plot(t, q_log[k, :, 0], alpha=0.7)
-        plt.plot(t, q_log[k, :, 1], alpha=0.7)
+        # plt.plot(t, q_log[k, :, 1], alpha=0.7)
+        # plt.plot(t[:-1], tau_log[:, k, 0], alpha=0.7)
+    plt.xlabel("Time (s)")
+    plt.ylabel("Positions")
 
     plt.show()
     
