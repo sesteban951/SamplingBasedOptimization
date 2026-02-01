@@ -1,20 +1,25 @@
 <mujoco model="cart_pole">
     <!-- Simulation settings, NOTE: the timestep seemed to make a huge difference -->
-    <option solver="Newton" timestep="0.02" iterations="1" ls_iterations="4"/>
+    <option solver="Newton" timestep="0.01" iterations="10" ls_iterations="10"/>
 
     <!-- Inertia is computed from geometry -->
     <compiler inertiafromgeom="true" />
 
     <!-- Default properties -->
     <default>
-        <joint armature="0.0" damping="0.3" limited="true" />
-        <geom contype="0" friction="1.0 0.1 0.1" />
+        <joint armature="0.0" damping="0.05" limited="true" />
+        <geom contype="0" friction="0.01 0.01 0.01" />
     </default>
 
     <!-- Memory settings (default is 1000) -->
     <size nstack="3000" />
 
     <worldbody>
+        <!-- Add light -->
+        <light pos="1.0 0.5 0.0" dir="0 0 -1" directional="true"/>  
+    
+        <!-- Add the Floor -->
+        <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
 
         <!-- Origin -->
         <geom name="ball" pos="0 0 0.8" type="sphere" size="0.03" rgba="1.0 0.424 0.047 1"/>
@@ -53,13 +58,5 @@
         <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.9 0.9 0.9" width="300" height="300"/>
         <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
     </asset>
-
-    <worldbody>
-        <!-- Add light -->
-        <light pos="1.0 0.5 0.0" dir="0 0 -1" directional="true"/>  
-    
-        <!-- Add the Floor -->
-        <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
-    </worldbody>
 
 </mujoco>

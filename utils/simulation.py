@@ -6,6 +6,7 @@
 
 # standard imports
 from dataclasses import dataclass
+from typing import List
 
 # jax imports
 import jax
@@ -25,15 +26,24 @@ import mujoco.mjx as mjx
 class ModelConfig:
 
     # model parameters
-    xml_path: str          # path to the mujoco xml model
+    xml_path: str            # path to the mujoco xml model
 
     # PD control parameters
-    Kp: jnp.array          # proportional gains for each joint
-    Kd: jnp.array          # derivative gain for each joint
+    Kp: List[float]          # proportional gains for each joint
+    Kd: List[float]          # derivative gain for each joint
 
     # max and minimum torques
-    u_lb: jnp.array       # minimum torques
-    u_ub: jnp.array       # maximum torques
+    tau_limit: bool           # whether to use torque limits
+    tau_lb: List[float]       # minimum torques
+    tau_ub: List[float]       # maximum torques
+
+    # actuated state indices
+    q_actuated_idx: List[int]   # indices of actuated positions
+    v_actuated_idx: List[int]   # indices of actuated velocities
+
+    # action mode
+    action_mode: str = "pos"   # action mode: "tau" or "pos"
+
 
 # parallel sim config
 @dataclass
@@ -43,25 +53,27 @@ class ParallelSimConfig:
     batch_size: int           # batch size for parallel rollout
     rng: jax.random.PRNGKey   # random number generator key
 
+
 # MJX Rollout class
 class ParallelSim():
     """
     Class to perform parallel rollouts using mujoco mjx on GPU.
 
     Args:
-        config: ParallelSimConfig, configuration for the parallel sim
+        model_config: ModelConfig, configuration for the mujoco model
+        sim_config: ParallelSimConfig, configuration for the parallel sim
     """
 
     # initialize the class
-    def __init__(self, sim_config: ParallelSimConfig,
-                       model_config: ModelConfig):
+    def __init__(self, model_config: ModelConfig,
+                       sim_config: ParallelSimConfig,):
 
         # set some config params for the class
         self.rng = sim_config.rng
         self.B = sim_config.batch_size
 
         # load the model from XML
-        self._initialize_model(model_config.xml_path)
+        self._initialize_model(model_config)
 
         # initialize the jit functions
         self._initialize_jit_functions()
@@ -69,16 +81,16 @@ class ParallelSim():
     ####################################### INITIALIZATION #######################################
 
     # initialize the mujoco model
-    def _initialize_model(self, xml_path: str):
+    def _initialize_model(self, model_config: ModelConfig):
         """
         Initialize the mujoco model and data for parallel rollout on GPU.
         
         Args:
-            xml_path: str, path to the mujoco xml model
+            model_config: ModelConfig, configuration for the mujoco model
         """
 
         # mujoco model
-        mj_model = mujoco.MjModel.from_xml_path(xml_path)
+        mj_model = mujoco.MjModel.from_xml_path(model_config.xml_path)
         mj_data = mujoco.MjData(mj_model)
 
         # put the model on GPU
@@ -90,12 +102,31 @@ class ParallelSim():
         self.nv = self.mjx_model.nv
         self.nu = self.mjx_model.nu
 
+        # action mode
+        self.use_pd = (model_config.action_mode == "pos")
+        self.q_actuated_idx = jnp.asarray(model_config.q_actuated_idx, dtype=jnp.int32)
+        self.v_actuated_idx = jnp.asarray(model_config.v_actuated_idx, dtype=jnp.int32)
+        assert model_config.action_mode in ["tau", "pos"], "Invalid action mode."
+        assert len(self.q_actuated_idx) == self.nu, "q_actuated_idx length does not match nu."
+        assert len(self.v_actuated_idx) == self.nu, "v_actuated_idx length does not match nu."
+
+        # load control parameters
+        assert len(model_config.Kp) == self.nu, "Kp length does not match nu."
+        assert len(model_config.Kd) == self.nu, "Kd length does not match nu."
+        assert len(model_config.tau_lb) == self.nu, "tau_lb length does not match nu."
+        assert len(model_config.tau_ub) == self.nu, "tau_ub length does not match nu."
+        self.Kp = jnp.array(model_config.Kp)
+        self.Kd = jnp.array(model_config.Kd)
+        self.tau_limit = model_config.tau_limit
+        self.tau_lb = jnp.array(model_config.tau_lb)
+        self.tau_ub = jnp.array(model_config.tau_ub)
+
         # create the batched step function
-        self.step_fn_batched = jax.jit(jax.vmap(lambda d: mjx.step(self.mjx_model, d), in_axes=0))
-        # self.step_fn_batched = jax.vmap(lambda d: mjx.step(self.mjx_model, d))
+        # self.step_fn_batched = jax.jit(jax.vmap(lambda d: mjx.step(self.mjx_model, d), in_axes=0))
+        self.step_fn_batched = jax.vmap(lambda d: mjx.step(self.mjx_model, d))
 
         # print message
-        print(f"Initialized batched MJX model from [{xml_path}].")
+        print(f"Initialized batched MJX model from [{model_config.xml_path}].")
         print(f"   [nq: {self.nq}]")
         print(f"   [nv: {self.nv}]")
         print(f"   [nu: {self.nu}]")
@@ -109,6 +140,9 @@ class ParallelSim():
         # jit the rollout function
         self.rollout = jax.jit(self.rollout)
 
+        # jit the pd torque function
+        # self._compute_pd_torque = jax.jit(self._compute_pd_torque)
+
         print("JIT compilation of parallel sim function complete.")
 
     ####################################### ROLLOUTS #######################################
@@ -116,12 +150,12 @@ class ParallelSim():
     # rollout with given inputs
     def rollout(self, q0, v0, U):
         """
-        Perform parallel rollouts with a given initial state and control sequences
+        Perform parallel rollouts with a given initial state and action sequences.
         
         Args:
             q0: jnp.array, shape (nq, ), initial position state
             v0: jnp.array, shape (nv, ), initial velocity state
-            U:  jnp.array, shape (B, N, nu),  batch of control sequences
+            U:  jnp.array, shape (B, N, nu),  batch of  action sequences, either torques or desired positions
                                               
         Returns:
             q_log: jnp.array, logged positions,  shape (B, N+1, nq)
@@ -129,7 +163,7 @@ class ParallelSim():
         """
 
         # get sizes
-        B, N, nu = U.shape
+        B, N, _ = U.shape
 
         # batch the initial states
         q0_batch = jnp.broadcast_to(q0, (B, self.nq))    # (B, nq)
@@ -143,23 +177,62 @@ class ParallelSim():
 
         # main integration step body
         def integration_step(data, uk):
-            data = data.replace(ctrl=uk)      # set the control
-            data = self.step_fn_batched(data) # step the dynamics
+            
+            # compute the control based on action mode
+            tau = lax.cond(
+                self.use_pd,                                                 # condition
+                lambda _: self._compute_pd_torque(data.qpos, data.qvel, uk), # position target function
+                lambda _: uk,                                                # torque target function
+                operand=None
+            )
+
+            # step the dynamics
+            data = data.replace(ctrl=tau)        # set the control
+            data = self.step_fn_batched(data)    # step
+
             return data, (data.qpos, data.qvel)
 
         # forward propagate
-        data_last, (q_tail, v_tail) = lax.scan(integration_step, data0, U, length=N)
+        _, (q_hist, v_hist) = lax.scan(integration_step, data0, U, length=N)
 
-        # q_tail, v_tail: (N, B, nq/nv) -> (B, N, nq/nv)
-        q_tail = jnp.swapaxes(q_tail, 0, 1)
-        v_tail = jnp.swapaxes(v_tail, 0, 1)
+        # q_hist, v_hist: (N, B, nq/nv) -> (B, N, nq/nv)
+        q_hist = jnp.swapaxes(q_hist, 0, 1)
+        v_hist = jnp.swapaxes(v_hist, 0, 1)
 
         # prepend initial state so logs are N+1
-        q_log = jnp.concatenate([q0_batch[:, None, :], q_tail], axis=1)
-        v_log = jnp.concatenate([v0_batch[:, None, :], v_tail], axis=1)
+        q_log = jnp.concatenate([q0_batch[:, None, :], q_hist], axis=1)
+        v_log = jnp.concatenate([v0_batch[:, None, :], v_hist], axis=1)
 
         return q_log, v_log
     
+    # compute PD torques
+    def _compute_pd_torque(self, q, v, q_des):
+        """
+        Compute PD torques for given states and desired positions. Assume v_des = 0.
+        
+        Args:
+            q:      jnp.array, shape (B, nq), current positions
+            v:      jnp.array, shape (B, nv), current velocities
+            q_des:  jnp.array, shape (B, nu), desired positions
+        """
+
+        # extract actuated positions and velocities
+        q_act = jnp.take(q, self.q_actuated_idx, axis=1)  # (B, nu)
+        v_act = jnp.take(v, self.v_actuated_idx, axis=1)  # (B, nu)
+
+        # compute PD torques
+        tau = self.Kp[None, :] * (q_des - q_act) + self.Kd[None, :] * (-v_act) # (B, nu)
+
+        # clip the torques
+        tau = lax.cond(
+            self.tau_limit,  # Python bool (static)
+            lambda t: jnp.clip(t, self.tau_lb[None, :], self.tau_ub[None, :]),
+            lambda t: t,
+            tau
+        )
+
+        return tau
+
 
 #############################################################
 # EXAMPLE USAGE
@@ -171,33 +244,43 @@ import time
 
 if __name__ == "__main__":
 
-    # xml model path
-    xml_path = "./models/biped.xml"
+    # model config
+    model_config = ModelConfig(
+        xml_path="./models/cartpole.xml",
+        Kp=[200.0], 
+        Kd=[10.0],  
+        tau_limit=False,
+        tau_lb=[-200.0],
+        tau_ub=[ 200.0],
+        q_actuated_idx=[0],
+        v_actuated_idx=[0],
+        action_mode="pos"
+    )
 
     # parallel sim config
-    config = ParallelSimConfig(
-        xml_path = xml_path,
+    sim_config = ParallelSimConfig(
         batch_size = 1024,
         rng = jax.random.PRNGKey(0)
     )
 
     # create the parallel sim object
-    parallel_sim = ParallelSim(config)
+    parallel_sim = ParallelSim(model_config, sim_config)
 
-    # horizon
-    N = 200
+    # integration steps
+    N = 1000
 
     # initial conditions (cartpole: usually nq=2, nv=2)
     q0 = jnp.zeros((parallel_sim.nq,))
     v0 = jnp.zeros((parallel_sim.nv,))
 
     # random controls: (B, N, nu)
-    B = config.batch_size
+    B = sim_config.batch_size
     nu = parallel_sim.nu
 
-    key = config.rng
+    key = sim_config.rng
     key, subkey = jax.random.split(key)
-    U = 0.1 * jax.random.normal(subkey, (B, N, nu))  # small random torques
+    # U = 0.5 * jax.random.normal(subkey, (B, N, nu))  # small random torques
+    U = 0.5 * jnp.ones((B, N, nu))  
 
     # run rollout
     t0 = time.time()
@@ -220,36 +303,16 @@ if __name__ == "__main__":
     # choose a few trajectories to plot
     B = q_log.shape[0]
     K = 10  # number to plot
-    idx = np.linspace(0, B-1, K, dtype=int)   # evenly spaced
-    # idx = np.random.choice(B, K, replace=False)  # or random subset
+    idx = np.random.choice(B, K, replace=False)  # or random subset
 
     # time axis (optional)
     dt = float(parallel_sim.mjx_model.opt.timestep)
     t = np.arange(q_log.shape[1]) * dt  # (N+1,)
 
-    # ---- Plot qpos dims (e.g., cart position and pole angle if nq >= 2) ----
     plt.figure()
-    for i in idx:
-        plt.plot(t, np.array(q_log[i, :, 0]), alpha=0.8)
-    plt.title("Subset of trajectories: qpos[0]")
-    plt.xlabel("time [s]")
-    plt.ylabel("qpos[0]")
-    plt.show()
+    for k in idx:
+        plt.plot(t, q_log[k, :, 0], alpha=0.7)
+        plt.plot(t, q_log[k, :, 1], alpha=0.7)
 
-    if q_log.shape[2] > 1:
-        plt.figure()
-        for i in idx:
-            plt.plot(t, np.array(q_log[i, :, 1]), alpha=0.8)
-        plt.title("Subset of trajectories: qpos[1]")
-        plt.xlabel("time [s]")
-        plt.ylabel("qpos[1]")
-        plt.show()
-
-    # ---- Plot a velocity dim too (optional) ----
-    plt.figure()
-    for i in idx:
-        plt.plot(t, np.array(v_log[i, :, 0]), alpha=0.8)
-    plt.title("Subset of trajectories: vvel[0]")
-    plt.xlabel("time [s]")
-    plt.ylabel("vvel[0]")
     plt.show()
+    
