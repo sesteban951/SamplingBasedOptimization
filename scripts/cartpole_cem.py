@@ -59,7 +59,7 @@ class CEM_Optimizer:
         # initialize the spline knots points
         self._initialize_spline_knots()
 
-        # empty dsitribution
+        # empty distribution
         self.mu = None
         self.Sigma = None
 
@@ -68,10 +68,9 @@ class CEM_Optimizer:
     # check that the input params make sense
     def _check_valid_params(self):
 
-        # check that number of elite samples is less than batch size
-        if self.cem_config.N_elite > self.sim.B:
-            raise ValueError(f"Number of elite samples [N_elite = {self.cem_config.N_elite}]" 
-                             f" must be less than parallel sim envs [B = {self.sim.B}].")
+        # check that there is atleast two envs
+        if self.sim.B < 2:
+            raise ValueError(f"Batch size [B = {self.sim.B}] must be at least 2.")
         
         # check positive interval
         if self.cem_config.T <= 0.0:
@@ -81,6 +80,11 @@ class CEM_Optimizer:
         if self.cem_config.N_knots <= 1:
             raise ValueError(f"Number of knots [N_knots = {self.cem_config.N_knots}]"
                              f" must be greater than 1.")
+
+        # check that number of elite samples is less than batch size
+        if self.cem_config.N_elite > self.sim.B:
+            raise ValueError(f"Number of elite samples [N_elite = {self.cem_config.N_elite}]" 
+                             f" must be less than parallel sim envs [B = {self.sim.B}].")
 
     # initialize the spline knot points
     def _initialize_spline_knots(self):
@@ -153,18 +157,77 @@ class CEM_Optimizer:
         else:
             raise NotImplementedError(f"Spline type [{self.cem_config.spline_type}] not implemented.")
         
+        # construct the time array for simulation
+        self.t_sim = jnp.arange(0.0, self.cem_config.T, self.sim.dt)  # shape (N,)
+
         # update the spline knot points
         self.spline.update_knots(Y0)
+
+    # sample knot_points from the current distribution
+    def _sample_knot_points(self):
+        """
+        Sample knot points from the current distribution.
+
+        Returns:
+            Y_samples: jnp.array, shape (B, N_knots, nu) - sampled spline knot points.
+        """
+
+        # split the key
+        self.rng, subkey = jax.random.split(self.rng)
+
+        # numerical conditioning
+        epsilon = 1e-6
+        Sigma_cond = 0.5 * (self.Sigma + self.Sigma.T) + epsilon * jnp.eye(self.Sigma.shape[0], dtype=self.Sigma.dtype)
+
+        # cholesky decomposition of covariance
+        L = jnp.linalg.cholesky(Sigma_cond)  # shape (N_knots*nu, N_knots*nu)
+
+        # sample from standard normal
+        Y_std = jax.random.normal(
+            subkey,
+            shape=(self.sim.B, self.cem_config.N_knots * self.sim.nu)
+        )  # shape (B, N_knots*nu)
+
+        # transform to desired distribution
+        Y_flat = self.mu[None, :] + Y_std @ L.T  # shape (B, N_knots*nu)
+
+        # reshape back to knot point matrices
+        Y_samples = jnp.reshape(Y_flat, (self.sim.B, self.cem_config.N_knots, self.sim.nu)) # shape (B, N_knots, nu)
+
+        return Y_samples
 
     # update the distribution based on elite samples
     def _update_distribution(self, Y_elite):
         """
         Update the disitrbution based on elite samples.
         
-        :param self: Description
-        :param Y_elite: Description
+        Args:
+            Y_elite: jnp.array, shape (N_elite, N_knots, nu) - elite spline knot points.
         """
-        pass
+
+        # Flatten each elite's knot matrix (N_knots, nu) into a vector (N_knots*nu) in row-major order.
+        # Example: if Y_elite[k] = [[1,2,3],
+        #                           [4,5,6]]  (N_knots=2, nu=3)
+        # then Y_flat[k] = [1,2,3,4,5,6].
+        K = Y_elite.shape[0]
+        Y_flat = jnp.reshape(Y_elite, (K, -1))  # shape (N_elite, N_knots * nu)
+
+        # compute mean along the elite samples
+        mu_ = jnp.mean(Y_flat, axis=0)  # shape (N_knots * nu,)
+
+        # center the knots about the mean
+        Y_centered = Y_flat - mu_[None, :]  # shape (N_elite, N_knots * nu)
+
+        # compute the unbiased sample covariance
+        Sigma_ = (Y_centered.T @ Y_centered) / (K - 1)  # shape (N_knots * nu, N_knots * nu)
+
+        # for numerical stability, add a small value to the diagonal
+        epsilon = 1e-6
+        Sigma_ = Sigma_ + epsilon * jnp.eye(Sigma_.shape[0], dtype=Sigma_.dtype)
+
+        # store the updated distribution
+        self.mu = mu_
+        self.Sigma = Sigma_
 
     # running cost
     def _cost(self, q, v, tau):
@@ -214,14 +277,11 @@ class CEM_Optimizer:
     # perform CEM optimization
     def optimize(self, q0, v0):
 
-        # construct the time array for simulation
-        t_sim = jnp.arange(0.0, self.cem_config.T, self.sim.dt)  # shape (N,)
-
         # perform CEM iterations
         for itr in range(self.cem_config.iterations):
 
             # evaluate the spline at simulation times
-            y_val = self.spline.evaluate(t_sim)  # shape (B, N, nu)
+            y_val = self.spline.evaluate(self.t_sim)  # shape (B, N, nu)
 
             # do forward rollout
             q_log, v_log, tau_log = self.sim.rollout(q0, v0, y_val)
@@ -242,13 +302,28 @@ class CEM_Optimizer:
             self._update_distribution(Y_elite)
 
             # sample new knot points from the updated distribution
-            # ...
+            Y_samples = self._sample_knot_points()  # shape (B, N_knots, nu)
+            self.spline.update_knots(Y_samples)
+
+            # compute the norm of the covariance for monitoring
+            cov_norm = jnp.linalg.norm(self.Sigma, ord='fro')
+
+            print(f"Iteration {itr+1}/{self.cem_config.iterations}, Best Cost: {J.min():.4f}, Cov Norm: {cov_norm:.4f}")
+
+        # extract optimal solution
+        q_opt = q_log[jnp.argmin(J), :, :]
+        v_opt = v_log[jnp.argmin(J), :, :]
+        tau_opt = tau_log[jnp.argmin(J), :, :]
+
+        return q_opt, v_opt, tau_opt
 
 #############################################################
 # EXAMPLE USAGE
 #############################################################
 
 if __name__ == "__main__":
+
+    import matplotlib.pyplot as plt
 
     # print deivce that we will use
     print(f"Using device: {jax.default_backend()}")
@@ -262,7 +337,7 @@ if __name__ == "__main__":
     # model config
     model_config = ModelConfig(
         xml_path="./models/cartpole.xml",
-        Kp=[400.0], 
+        Kp=[500.0], 
         Kd=[50.0],  
         q_actuated_idx=[0],
         v_actuated_idx=[0],
@@ -271,17 +346,17 @@ if __name__ == "__main__":
 
     # parallel sim config
     sim_config = ParallelSimConfig(
-        batch_size = 16,
+        batch_size = 4096,
     )
 
     # cem config
     cem_rng = jax.random.PRNGKey(42)
     cem_config = CEM_Config(
         rng=cem_rng,
-        T=5.0,
-        N_knots=40,
-        iterations=10,
-        N_elite=4,
+        T=8.0,
+        N_knots=50*8,
+        iterations=100,
+        N_elite=2056,
         spline_type="ZOH",
     )
 
@@ -292,7 +367,20 @@ if __name__ == "__main__":
         cem_config=cem_config
     )
 
-    cem_optimizer.optimize(
+    # optimize from an initial state
+    q_opt, v_opt, tau_opt = cem_optimizer.optimize(
         q0=jnp.array([0.0, np.pi + 0.1]),   # initial position
         v0=jnp.array([0.0, 0.0])            # initial velocity
     )
+    times = cem_optimizer.t_sim
+
+    print(times.shape)
+    print(q_opt.shape)
+    print(v_opt.shape)
+    print(tau_opt.shape)
+
+    # plot the first two positions
+    plt.figure()
+    plt.plot(times, q_opt[:-1, 0], label="Cart Position")
+    plt.plot(times, q_opt[:-1, 1], label="Pole Angle")
+    plt.show()

@@ -44,7 +44,7 @@
 
     <!-- Actuator -->
     <actuator>
-        <motor name="slide" joint="slider" ctrllimited="true" ctrlrange="-50 50"/>
+        <motor name="slide" joint="slider" ctrllimited="true" ctrlrange="-250 250"/>
     </actuator>
 
     <!-- default configuration (when you press "Load key" button) -->

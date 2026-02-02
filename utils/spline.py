@@ -8,6 +8,8 @@
 import jax
 import jax.numpy as jnp
 
+import functools
+
 
 #############################################################
 # ZOH Spline
@@ -40,7 +42,8 @@ class ZOH_Spline:
         self.t_knots = jnp.linspace(0.0, T, self.K) # (K,)
 
         # initialize jit functions
-        self.evaluate = jax.jit(self._evaluate)
+        # self.evaluate = jax.jit(self._evaluate)
+        self.evaluate = self._evaluate
 
         print("ZOH Spline initialized.")
 
