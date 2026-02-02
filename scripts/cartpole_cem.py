@@ -243,34 +243,68 @@ class CEM_Optimizer:
         """
 
         # cost weights
-        w_pos = 1.0
+        w_pos = 10.0
         w_vel = 0.1
-        w_tau = 0.001
+        w_tau = 0.01
         wf_pos = 10.0 * w_pos 
         wf_vel = 10.0 * w_vel
-
-        # desired states
-        q_des = jnp.array([0.0, 0.0])  # shape (nq,)
-        v_des = jnp.array([0.0, 0.0])  # shape (nv,)
-
+    
         # running costs over t=0..N-1 (exclude terminal state)
         q_t = q[:, :-1, :]   # (B, N, nq)
         v_t = v[:, :-1, :]   # (B, N, nv)
 
-        running_pos = w_pos * jnp.sum((q_t - q_des) ** 2, axis=(1, 2))
-        running_vel = w_vel * jnp.sum((v_t - v_des) ** 2, axis=(1, 2))
-        running_tau = w_tau * jnp.sum(tau ** 2, axis=(1, 2))
-        running_cost = self.sim.dt * (running_pos + running_vel + running_tau)
+        # get pole angle positions
+        theta_t = q_t[:, :, 1]  # pole angle at time t
+        sin_t = jnp.sin(theta_t)
+        cos_t = jnp.cos(theta_t)
 
-        # terminal costs at t=N
-        q_T = q[:, -1, :]
-        v_T = v[:, -1, :]
-        terminal_cost = (wf_pos * jnp.sum((q_T - q_des) ** 2, axis=1)
-                       + wf_vel * jnp.sum((v_T - v_des) ** 2, axis=1)
+        # desired angles error
+        theta_des = 0.0
+        sin_des = jnp.sin(theta_des)
+        cos_des = jnp.cos(theta_des)
+        ang_err = jnp.stack([sin_t - sin_des, cos_t - cos_des], axis=-1)  # shape (B, N, 2)
+
+        # other desired states (cart position)
+        q_des_other = jnp.array([0.0])     # (1,)
+        q_other_t = q_t[:, :, 0:1]         # (B, N, 1)
+        other_err = q_other_t - q_des_other  # (B, N, 1)
+
+        # total running position penalty
+        running_pos = w_pos * (
+            jnp.sum(ang_err**2, axis=(1, 2)) +
+            jnp.sum(other_err**2, axis=(1, 2))
         )
 
-        # total cost
-        J = running_cost + terminal_cost
+        # ----------------------------
+        # velocity + control running cost
+        # ----------------------------
+        v_des = jnp.array([0.0, 0.0])  # cart vel, pole ang vel
+        running_vel = w_vel * jnp.sum((v_t - v_des) ** 2, axis=(1, 2))
+        running_tau = w_tau * jnp.sum(tau ** 2, axis=(1, 2))
+
+        running_cost = self.sim.dt * (running_pos + running_vel + running_tau)
+
+        # ----------------------------
+        # terminal cost at t = N
+        # ----------------------------
+        q_T = q[:, -1, :]   # (B, nq)
+        v_T = v[:, -1, :]   # (B, nv)
+
+        theta_T = q_T[:, 1]  # (B,)
+        ang_err_T = jnp.stack(
+            [jnp.sin(theta_T) - sin_des, jnp.cos(theta_T) - cos_des],
+            axis=-1
+        )  # (B, 2)
+
+        other_err_T = q_T[:, 0:1] - q_des_other  # (B, 1)
+
+        terminal_pos = wf_pos * (
+            jnp.sum(ang_err_T**2, axis=1) +
+            jnp.sum(other_err_T**2, axis=1)
+        )
+        terminal_vel = wf_vel * jnp.sum((v_T - v_des) ** 2, axis=1)
+
+        J = running_cost + terminal_pos + terminal_vel
 
         return J
 
@@ -353,9 +387,9 @@ if __name__ == "__main__":
     cem_rng = jax.random.PRNGKey(42)
     cem_config = CEM_Config(
         rng=cem_rng,
-        T=8.0,
-        N_knots=50*8,
-        iterations=100,
+        T=5.0,
+        N_knots=50*5,
+        iterations=150,
         N_elite=2056,
         spline_type="ZOH",
     )
@@ -374,6 +408,22 @@ if __name__ == "__main__":
     )
     times = cem_optimizer.t_sim
 
+    # convert to numpy for plotting
+    times = np.array(times)
+    q_opt = np.array(q_opt)
+    v_opt = np.array(v_opt)
+    tau_opt = np.array(tau_opt)
+
+    # save as csv files in the results folder
+    time_file = "./results/cartpole/times.csv"
+    q_file = "./results/cartpole/q_opt.csv"
+    v_file = "./results/cartpole/v_opt.csv"
+    tau_file = "./results/cartpole/tau_opt.csv"
+    np.savetxt(time_file, times, delimiter=",")
+    np.savetxt(q_file, q_opt, delimiter=",")
+    np.savetxt(v_file, v_opt, delimiter=",")
+    np.savetxt(tau_file, tau_opt, delimiter=",")
+
     print(times.shape)
     print(q_opt.shape)
     print(v_opt.shape)
@@ -383,4 +433,12 @@ if __name__ == "__main__":
     plt.figure()
     plt.plot(times, q_opt[:-1, 0], label="Cart Position")
     plt.plot(times, q_opt[:-1, 1], label="Pole Angle")
+
+    plt.figure()
+    plt.plot(times, v_opt[:-1, 0], label="Cart Vel")
+    plt.plot(times, v_opt[:-1, 1], label="Pole velocity")
+
+    plt.figure()
+    plt.plot(times, tau_opt[:, 0], label="Cart Force")
+
     plt.show()
