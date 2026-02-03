@@ -388,9 +388,9 @@ if __name__ == "__main__":
     cem_config = CEM_Config(
         rng=cem_rng,
         T=5.0,
-        N_knots=50*5,
-        iterations=150,
-        N_elite=2056,
+        N_knots=5*5,
+        iterations=400,
+        N_elite=2048,
         spline_type="ZOH",
     )
 
