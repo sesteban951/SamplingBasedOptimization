@@ -15,6 +15,7 @@ import mujoco.viewer
 
 # which data to load
 system = "cartpole"
+xml_path = f"./models/cartpole/cartpole.xml"
 
 # load data from csv files
 time_file = f"./results/{system}/times.csv"
@@ -35,7 +36,7 @@ print(f"  v_opt: {v_opt.shape}")
 print(f"  tau_opt: {tau_opt.shape}")
 
 # load the mujoco model
-model = mujoco.MjModel.from_xml_path(f"./models/{system}.xml")
+model = mujoco.MjModel.from_xml_path(xml_path)
 data = mujoco.MjData(model)
 
 # visualize the optimal trajectory

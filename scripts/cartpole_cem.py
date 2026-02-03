@@ -375,7 +375,7 @@ if __name__ == "__main__":
 
     # model config
     model_config = ModelConfig(
-        xml_path="./models/cartpole.xml",
+        xml_path="./models/cartpole/cartpole.xml",
         Kp=[500.0], 
         Kd=[50.0],  
         q_actuated_idx=[0],

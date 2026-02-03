@@ -256,7 +256,7 @@ if __name__ == "__main__":
 
     # model config
     model_config = ModelConfig(
-        xml_path="./models/cartpole.xml",
+        xml_path="./models/cartpole/cartpole.xml",
         Kp=[400.0], 
         Kd=[50.0],  
         q_actuated_idx=[0],
@@ -264,7 +264,7 @@ if __name__ == "__main__":
         action_mode="pos"
     )
     # model_config = ModelConfig(
-    #     xml_path="./models/biped.xml",
+    #     xml_path="./models/biped/biped.xml",
     #     Kp=[100.0, 100.0, 100.0, 100.0], 
     #     Kd=[5.0, 5.0, 5.0, 5.0],  
     #     q_actuated_idx=[3, 4, 5, 6],
