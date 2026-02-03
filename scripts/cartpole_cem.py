@@ -7,14 +7,17 @@
 # standard imports
 import numpy as np
 from dataclasses import dataclass
+import time
 
 # jax imports
 import jax
 import jax.numpy as jnp
 
 # cusotm imports
-from utils.simulation import *
-from utils.spline import *
+from utils.simulation.simulation import *
+from utils.spline.bezier import *
+from utils.spline.zoh import *
+
 
 #############################################################
 # CEM Optimizer
@@ -35,7 +38,7 @@ class CEM_Config:
     N_elite: int     # number of elite samples
 
     # spline params
-    spline_type: str = "ZOH"   # type of spline to use
+    spline_type: str = "ZOH"   # "ZOH" | "Bezier"
 
 # CEM optimizer class
 class CEM_Optimizer:
@@ -154,6 +157,8 @@ class CEM_Optimizer:
         # create the spline object
         if self.cem_config.spline_type == "ZOH":
             self.spline = ZOH_Spline(Y0, self.cem_config.T)
+        elif self.cem_config.spline_type == "Bezier":
+            self.spline = Bezier_Spline(Y0, self.cem_config.T)
         else:
             raise NotImplementedError(f"Spline type [{self.cem_config.spline_type}] not implemented.")
         
@@ -388,10 +393,12 @@ if __name__ == "__main__":
     cem_config = CEM_Config(
         rng=cem_rng,
         T=5.0,
-        N_knots=5*5,
         iterations=400,
         N_elite=2048,
+        N_knots=5*5,
         spline_type="ZOH",
+        # N_knots=20,
+        # spline_type="Bezier",
     )
 
     # create the CEM optimizer

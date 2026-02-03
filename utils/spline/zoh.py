@@ -1,12 +1,11 @@
 ##
 #
-#  Different spline implementations.
+#  Zero-order hold spline implementations.
 #  
 ##
 
 # for base class
-from __future__ import annotations
-from abc import ABC, abstractmethod
+from utils.spline.base import Base_Spline
 
 # standard imports
 import numpy as np
@@ -16,62 +15,6 @@ import math
 import jax
 import jax.numpy as jnp
 
-
-#############################################################
-# Base Spline Class
-#############################################################
-
-class Base_Spline(ABC):
-    """
-    Base class for control/trajectory splines.
-    """
-
-    # spline parameters
-    Y: jnp.ndarray  # spline points
-    T: float        # total time horizon
-    B: int          # batch size
-    K: int          # number of knots
-    dim: int        # dimensionality of the spline
-
-    # initialize the spline class
-    def __init__(self, Y0: jnp.ndarray, T: float):
-
-        # set the spline parameters parameters
-        self.Y = Y0
-        self.T = np.round(T, decimals=6)
-
-        # sizes from initial knots
-        self.B, self.K, self.dim = Y0.shape
-
-    # abstract method to evaluate the spline
-    @abstractmethod
-    def evaluate(self, times: jnp.ndarray) -> jnp.ndarray:
-        """
-        Evaluate the spline at given times.
-
-        Args:
-            times: jnp.array, shape (M,), times to evaluate the spline at.
-
-        Returns:
-            Y_eval: jnp.array, shape (B, M, dim), spline values at the given times.
-        """
-        raise NotImplementedError("evaluate method must be implemented in spline subclass.")
-
-    # update spline knot points
-    def update_knots(self, Y_new: jnp.ndarray):
-        """
-        Update the spline knot points.
-
-        Args:
-            Y_new: jnp.array, shape (B, K, dim), new knot points.
-        """
-
-        # check that the new shape matches
-        if Y_new.shape != self.Y.shape:
-            raise ValueError(f"Y_new shape {Y_new.shape} != existing shape {self.Y.shape}")
-        
-        # set the new knots
-        self.Y = Y_new
 
 #############################################################
 # Zero-Order Hold Spline
@@ -197,8 +140,7 @@ if __name__ == "__main__":
     nu = 2
     T = 10.0
     Y0 = jax.random.uniform(jax.random.PRNGKey(seed), (B, K, nu), minval=-1.0, maxval=1.0)
-    # spline = ZOH_Spline(Y0, T)
-    spline = Bezier_Spline(Y0, T)
+    spline = ZOH_Spline(Y0, T)
 
     # print some info
     print(f"  Total time: {spline.T}")
@@ -213,35 +155,20 @@ if __name__ == "__main__":
     t_eval = np.array(t_eval)
     Y_eval = np.array(Y_eval)
     Y_knots = np.array(spline.Y)   # shape (B, K, nu)
+    t_knots = np.array(spline.t_knots)  # shape (K,)
 
     # plot batch 0
     plt.figure(figsize=(8,4))
 
-    # # continuous ZOH-evaluated curve
-    # plt.plot(t_eval, Y_eval[0, :, 0], label="dim 0")
-    # plt.plot(t_eval, Y_eval[0, :, 1], label="dim 1")
-    # plt.scatter(t_knots, Y_knots[0, :, 0], color='red', s=40, label="knots dim 0")
-    # plt.scatter(t_knots, Y_knots[0, :, 1], color='red', s=40, marker='x', label="knots dim 1")
-    # plt.title("ZOH Spline Evaluation (Batch 0)")
-    # plt.xlabel("Time")
-    # plt.ylabel("Spline Value")
-    # plt.legend()
-    # plt.grid()
-    # plt.tight_layout()
-    # plt.show()
-
-    # plot batch 0 as a parametric curve in 2D
-    plt.plot(Y_eval[0, :, 0], Y_eval[0, :, 1], color='blue', linewidth=2, label="Bezier curve")
-    plt.plot(Y_knots[0, :, 0], Y_knots[0, :, 1], color='gray', linewidth=1, linestyle='--')
-    plt.scatter(Y_knots[0, :, 0], Y_knots[0, :, 1], color='red', s=60, zorder=5, label="Control points")
-    for k in range(K):
-        plt.annotate(f"P{k}", (Y_knots[0, k, 0], Y_knots[0, k, 1]),
-                     textcoords="offset points", xytext=(8, 8), fontsize=10)
-    plt.title("Bezier Curve (Batch 0)")
-    plt.xlabel("dim 0")
-    plt.ylabel("dim 1")
+    # continuous ZOH-evaluated curve
+    plt.plot(t_eval, Y_eval[0, :, 0], label="dim 0")
+    plt.plot(t_eval, Y_eval[0, :, 1], label="dim 1")
+    plt.scatter(t_knots, Y_knots[0, :, 0], color='red', s=40, label="knots dim 0")
+    plt.scatter(t_knots, Y_knots[0, :, 1], color='red', s=40, marker='x', label="knots dim 1")
+    plt.title("ZOH Spline Evaluation (Batch 0)")
+    plt.xlabel("Time")
+    plt.ylabel("Spline Value")
     plt.legend()
     plt.grid()
-    plt.axis("equal")  # keep aspect ratio so the curve isn't distorted
     plt.tight_layout()
     plt.show()

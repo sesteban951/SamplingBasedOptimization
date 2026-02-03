@@ -51,5 +51,6 @@ while True:
     viewer.sync()
 
     if time.time() - t0 > times[-1]:
+        time.sleep(2.0)
         t0 = time.time()
     

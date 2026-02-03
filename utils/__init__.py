@@ -1,5 +1,4 @@
 # utils/__init__.py
-
-from .simulation import *   
-from .spline import *
-
+from .simulation.simulation import *   
+from .spline.zoh import *
+from .spline.bezier import *
