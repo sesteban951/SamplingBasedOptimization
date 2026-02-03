@@ -23,7 +23,7 @@ import mujoco.mjx as mjx
 
 # model configuration
 @dataclass
-class ModelConfig:
+class Model_Config:
 
     # model parameters
     xml_path: str            # path to the mujoco xml model
@@ -43,7 +43,7 @@ class ModelConfig:
 
 # parallel sim config
 @dataclass
-class ParallelSimConfig:
+class ParallelSim_Config:
 
     # simulation parameters
     batch_size: int           # batch size for parallel rollout
@@ -54,13 +54,13 @@ class ParallelSim():
     Class to perform parallel rollouts using mujoco mjx on GPU.
 
     Args:
-        model_config: ModelConfig, configuration for the mujoco model
-        sim_config: ParallelSimConfig, configuration for the parallel sim
+        model_config: Model_Config, configuration for the mujoco model
+        sim_config: ParallelSim_Config, configuration for the parallel sim
     """
 
     # initialize the class
-    def __init__(self, model_config: ModelConfig,
-                       sim_config: ParallelSimConfig,):
+    def __init__(self, model_config: Model_Config,
+                       sim_config: ParallelSim_Config,):
 
         # set some config params for the class
         self.B = sim_config.batch_size
@@ -76,12 +76,12 @@ class ParallelSim():
     ####################################### INITIALIZATION #######################################
 
     # initialize the mujoco model
-    def _initialize_model(self, model_config: ModelConfig):
+    def _initialize_model(self, model_config: Model_Config):
         """
         Initialize the mujoco model and data for parallel rollout on GPU.
         
         Args:
-            model_config: ModelConfig, configuration for the mujoco model
+            model_config: Model_Config, configuration for the mujoco model
         """
 
         # mujoco model
@@ -255,7 +255,7 @@ if __name__ == "__main__":
     # np.random.seed(0)
 
     # model config
-    model_config = ModelConfig(
+    model_config = Model_Config(
         xml_path="./models/cartpole/cartpole.xml",
         Kp=[400.0], 
         Kd=[50.0],  
@@ -263,7 +263,7 @@ if __name__ == "__main__":
         v_actuated_idx=[0],
         action_mode="pos"
     )
-    # model_config = ModelConfig(
+    # model_config = Model_Config(
     #     xml_path="./models/biped/biped.xml",
     #     Kp=[100.0, 100.0, 100.0, 100.0], 
     #     Kd=[5.0, 5.0, 5.0, 5.0],  
@@ -273,7 +273,7 @@ if __name__ == "__main__":
     # )
 
     # parallel sim config
-    sim_config = ParallelSimConfig(
+    sim_config = ParallelSim_Config(
         batch_size = 512,
     )
 

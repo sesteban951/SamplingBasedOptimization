@@ -27,7 +27,7 @@ from utils.spline.zoh import *
 
 # CEM configuration dataclass
 @dataclass
-class CEM_Config:
+class CrossEntropyMethod_Config:
 
     # random key
     rng: jax.random.PRNGKey  # random key for sampling
@@ -45,12 +45,12 @@ class CEM_Config:
 
 
 # CEM optimizer class
-class CEM_Optimizer(ABC):
+class CrossEntropyMethod(ABC):
 
     # constructor
-    def __init__(self, model_config: ModelConfig,
-                       sim_config: ParallelSimConfig,
-                       cem_config: CEM_Config):
+    def __init__(self, model_config: Model_Config,
+                       sim_config: ParallelSim_Config,
+                       cem_config: CrossEntropyMethod_Config):
         
         # create the parallel sim object 
         self.sim = ParallelSim(model_config, sim_config)
@@ -76,6 +76,7 @@ class CEM_Optimizer(ABC):
         self.mu = None
         self.Sigma = None
 
+        print("CEM Optimizer initialized.")
 
     # check that the input params make sense
     def _check_valid_params(self):

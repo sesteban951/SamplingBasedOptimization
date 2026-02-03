@@ -44,6 +44,8 @@ class Bezier_Spline(Base_Spline):
 
         # precompute binomial coefficients
         self.coeffs = self._binomial_coefficients(self.K - 1)
+    
+        print("Bezier Spline initialized.")
 
     # compute the binomial coefficients (n choose k) for k=0..n
     def _binomial_coefficients(self, n: int) -> jnp.ndarray:
