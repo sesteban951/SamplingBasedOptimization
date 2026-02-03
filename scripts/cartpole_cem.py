@@ -62,6 +62,10 @@ class CEM_Optimizer:
         # initialize the spline knots points
         self._initialize_spline_knots()
 
+        # construct the time array for simulation
+        N = int(round(self.cem_config.T / self.sim.dt)) # integer number of sim steps
+        self.t_sim = self.sim.dt * jnp.arange(N + 1)    # shape (N+1,)
+
         # empty distribution
         self.mu = None
         self.Sigma = None
@@ -162,9 +166,6 @@ class CEM_Optimizer:
         else:
             raise NotImplementedError(f"Spline type [{self.cem_config.spline_type}] not implemented.")
         
-        # construct the time array for simulation
-        self.t_sim = jnp.arange(0.0, self.cem_config.T, self.sim.dt)  # shape (N,)
-
         # update the spline knot points
         self.spline.update_knots(Y0)
 
@@ -320,7 +321,7 @@ class CEM_Optimizer:
         for itr in range(self.cem_config.iterations):
 
             # evaluate the spline at simulation times
-            y_val = self.spline.evaluate(self.t_sim)  # shape (B, N, nu)
+            y_val = self.spline.evaluate(self.t_sim[:-1])  # shape (B, N, nu)
 
             # do forward rollout
             q_log, v_log, tau_log = self.sim.rollout(q0, v0, y_val)
@@ -393,7 +394,7 @@ if __name__ == "__main__":
     cem_config = CEM_Config(
         rng=cem_rng,
         T=5.0,
-        iterations=400,
+        iterations=300,
         N_elite=2048,
         N_knots=5*5,
         spline_type="ZOH",
@@ -438,14 +439,14 @@ if __name__ == "__main__":
 
     # plot the first two positions
     plt.figure()
-    plt.plot(times, q_opt[:-1, 0], label="Cart Position")
-    plt.plot(times, q_opt[:-1, 1], label="Pole Angle")
+    plt.plot(times, q_opt[:, 0], label="Cart Position")
+    plt.plot(times, q_opt[:, 1], label="Pole Angle")
 
     plt.figure()
-    plt.plot(times, v_opt[:-1, 0], label="Cart Vel")
-    plt.plot(times, v_opt[:-1, 1], label="Pole velocity")
+    plt.plot(times, v_opt[:, 0], label="Cart Vel")
+    plt.plot(times, v_opt[:, 1], label="Pole velocity")
 
     plt.figure()
-    plt.plot(times, tau_opt[:, 0], label="Cart Force")
+    plt.plot(times[:-1], tau_opt[:, 0], label="Cart Force")
 
     plt.show()
