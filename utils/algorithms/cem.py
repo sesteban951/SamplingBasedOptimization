@@ -65,9 +65,9 @@ class CrossEntropyMethod(ABC):
         self._check_valid_params()
 
         # construct the time array for simulation
-        N = int(round(self.cem_config.T / self.sim.dt)) # integer number of sim steps
-        self.t_sim = self.sim.dt * jnp.arange(N + 1)    # shape (N+1,)
-        self.T_eff = N * self.sim.dt                         # effective total time
+        self.N = int(round(self.cem_config.T / self.sim.dt)) # integer number of sim steps
+        self.t_sim = self.sim.dt * jnp.arange(self.N + 1)    # shape (N+1,)
+        self.T_eff = self.N * self.sim.dt                    # effective total time
 
         # initialize the spline knots points
         self._initialize_spline_knots()
