@@ -1,0 +1,13 @@
+# sampling-based optimization
+name: env_sbo
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - numpy
+  - matplotlib
+  - pip
+  - pip:
+      - "jax[cuda12]"
+      - mujoco>=3.4.0
+      - mujoco-mjx>=3.4.0
