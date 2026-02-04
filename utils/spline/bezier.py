@@ -68,6 +68,16 @@ class Bezier_Spline(Base_Spline):
     
     # evaluate the spline at given times
     def evaluate(self, times: jnp.ndarray) -> jnp.ndarray:
+        """
+        Evaluate the Bezier curve at given times.
+
+        B_i(t) = C(n, i) * t^i * (1 - t)^(n - i), for i = 0..n
+
+        Args:
+            times: jnp.array, shape (M,), times to evaluate the spline at.
+        Returns:
+            Y_eval: jnp.array, shape (B, M, dim), spline values at the given times.
+        """
 
         # clip times to [0, T] and normalize to [0, 1]
         times_ = jnp.clip(times, 0.0, self.T)

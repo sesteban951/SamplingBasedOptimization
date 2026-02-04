@@ -9,3 +9,4 @@ from .simulation.simulation import *
 # different spline implementations
 from .spline.zoh import *
 from .spline.bezier import *
+from .spline.fourier import *

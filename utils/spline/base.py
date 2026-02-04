@@ -47,6 +47,8 @@ class Base_Spline(ABC):
         """
         Evaluate the spline at given times.
 
+        M = len(times)
+
         Args:
             times: jnp.array, shape (M,), times to evaluate the spline at.
 
