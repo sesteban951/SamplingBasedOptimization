@@ -14,10 +14,10 @@ import mujoco
 import mujoco.viewer
 
 # which data to load
-system = "cartpole"
-xml_path = f"./models/cartpole/cartpole.xml"
-# system = "hopper"
-# xml_path = f"./models/hopper/hopper.xml"
+# system = "cartpole"
+# xml_path = f"./models/cartpole/cartpole.xml"
+system = "hopper"
+xml_path = f"./models/hopper/hopper.xml"
 
 # load data from csv files
 time_file = f"./results/{system}/times.csv"
@@ -46,6 +46,9 @@ viewer = mujoco.viewer.launch_passive(model, data)
 t0 = time.time()
 while True:
 
+    if viewer.is_running() == False:
+        break
+
     i = np.searchsorted(times, time.time() - t0)
 
     print(f"Time: {time.time() - t0:.2f}, Index: {i}\r", end="")
@@ -58,4 +61,5 @@ while True:
     if time.time() - t0 > times[-1]:
         time.sleep(2.0)
         t0 = time.time()
-    
+
+viewer.close()

@@ -22,7 +22,6 @@ from utils.spline.zoh import *
 # Hopper CEM
 #############################################################
 
-
 # CEM optimizer class
 class Hopper_CEM(CrossEntropyMethod):
 
@@ -33,40 +32,32 @@ class Hopper_CEM(CrossEntropyMethod):
         # initialize the parent class
         super().__init__(model_config, sim_config, cem_config)
 
-        # linear interpolate based on the initial and final state
-        q0 = jnp.array([0.0, 1.0, 0.0, 0.0])
-        v0 = jnp.array([0.0, 0.0, 0.0, 0.0])
-        qf = jnp.array([1.0, 1.0, 0.0, 0.5])
-        vf = jnp.array([0.0, 0.0, 0.0, 0.0])
-        self._make_reference(q0, v0, qf, vf)
+        # Create reference trajectory (simple linear interpolation)
+        self._make_reference()
 
 
-    # make a reference trajectory
-    def _make_reference(self, q0, v0, qf, vf):
+    def _make_reference(self):
         """
         Make a reference trajectory for the hopper.
-
-        Args:
-            q0: jnp.array, shape (nq,) - initial generalized position.
-            v0: jnp.array, shape (nv,) - initial generalized velocity.
-            qf: jnp.array, shape (nq,) - final generalized position.
-            vf: jnp.array, shape (nv,) - final generalized velocity.
+        Simple linear interpolation from start to goal.
         """
+        # Initial and final states (assuming nq=4: [px, pz, theta, leg_length])
+        q0 = jnp.array([0.0, 2.0, 0.0, 0.0])  # start: x=0, z=2m (in air), upright, leg at 0
+        qf = jnp.array([1.0, 2.0, 0.0, 0.0])  # goal: x=1m, z=2m, upright, leg at 0
+        
+        # Compute constant forward velocity
+        vx = (qf[0] - q0[0]) / self.T_eff
+        v0 = jnp.array([vx, 0.0, 0.0, 0.0])  # constant x velocity, rest zero
+        vf = jnp.array([vx, 0.0, 0.0, 0.0])
+        
+        # Linear interpolation
+        self.q_ref = jnp.linspace(q0, qf, self.N + 1)  # (N+1, nq=4)
+        self.v_ref = jnp.linspace(v0, vf, self.N + 1)  # (N+1, nv=4)
 
-        theta_des = 0.0
-        cos_ = jnp.cos(theta_des)
-        sin_ = jnp.sin(theta_des)
 
-        q0 = jnp.array([0.0, 1.0, cos_, sin_ , 0.0])
-        qf = jnp.array([1.0, 1.0, cos_, sin_ , 0.5])
-        self.q_ref = jnp.linspace(q0, qf, self.N + 1)  # shape (N+1, nq)
-        self.v_ref = jnp.linspace(v0, vf, self.N + 1)  # shape (N+1, nv)
-
-
-    # running cost
     def cost(self, q, v, tau):
         """
-        cost function.
+        Cost function.
 
         Args:
             q: jnp.array, shape (B, N+1, nq) - generalized position trajectory.
@@ -76,16 +67,17 @@ class Hopper_CEM(CrossEntropyMethod):
             J: jnp.array, shape (B,) - cost for each batch.
         """
 
-        # cost weights
-        w_px = 5.0
-        w_pz = 5.0
-        w_theta = 15.0
-        w_pl = 0.1
+        # Cost weights
+        w_px = 2.0
+        w_pz = 15.0
+        w_theta = 25.0
+        w_pl = 0.001
         w_vx = 0.1
         w_vz = 0.1
-        w_omega = 1.0
-        w_vl = 0.01
-        w_tau = 0.01
+        w_omega = 0.01
+        w_vl = 0.0001
+        w_tau_theta = 0.1
+        w_tau_pl = 0.00001
 
         wf_px = 10.0 * w_px
         wf_pz = 10.0 * w_pz
@@ -97,34 +89,40 @@ class Hopper_CEM(CrossEntropyMethod):
         wf_vl = 10.0 * w_vl
 
         # ---------------------------------------------------
-        # RUNNING COST
+        # RUNNING COST (t = 0 to N-1)
         # ---------------------------------------------------
         
-        # running state (t = 0 to N-1)
+        # Extract running states
         px_t = q[:, :-1, 0]      # (B, N)
         pz_t = q[:, :-1, 1]      # (B, N)
-        cos_t = q[:, :-1, 2]     # (B, N)
-        sin_t = q[:, :-1, 3]     # (B, N)
-        pl_t = q[:, :-1, 4]      # (B, N)
+        theta_t = q[:, :-1, 2]   # (B, N) - angle
+        pl_t = q[:, :-1, 3]      # (B, N) - leg length
         
         vx_t = v[:, :-1, 0]      # (B, N)
         vz_t = v[:, :-1, 1]      # (B, N)
         omega_t = v[:, :-1, 2]   # (B, N)
         vl_t = v[:, :-1, 3]      # (B, N)
 
-        # reference trajectory (t = 0 to N-1)
+        # Compute cos and sin for angle tracking (like cartpole)
+        cos_t = jnp.cos(theta_t)  # (B, N)
+        sin_t = jnp.sin(theta_t)  # (B, N)
+
+        # Reference trajectory (t = 0 to N-1)
         px_ref_t = self.q_ref[:-1, 0]    # (N,)
         pz_ref_t = self.q_ref[:-1, 1]    # (N,)
-        cos_ref_t = self.q_ref[:-1, 2]   # (N,)
-        sin_ref_t = self.q_ref[:-1, 3]   # (N,)
-        pl_ref_t = self.q_ref[:-1, 4]    # (N,)
+        theta_ref_t = self.q_ref[:-1, 2] # (N,)
+        pl_ref_t = self.q_ref[:-1, 3]    # (N,)
         
         vx_ref_t = self.v_ref[:-1, 0]      # (N,)
         vz_ref_t = self.v_ref[:-1, 1]      # (N,)
         omega_ref_t = self.v_ref[:-1, 2]   # (N,)
         vl_ref_t = self.v_ref[:-1, 3]      # (N,)
 
-        # compute running costs (tracking reference)
+        # Desired cos/sin (upright = theta = 0)
+        cos_ref_t = jnp.cos(theta_ref_t)  # (N,)
+        sin_ref_t = jnp.sin(theta_ref_t)  # (N,)
+
+        # Compute running costs (tracking reference)
         px_running = w_px * jnp.square(px_t - px_ref_t)           # (B, N)
         pz_running = w_pz * jnp.square(pz_t - pz_ref_t)           # (B, N)
         theta_running = w_theta * (
@@ -137,7 +135,10 @@ class Hopper_CEM(CrossEntropyMethod):
         omega_running = w_omega * jnp.square(omega_t - omega_ref_t)  # (B, N)
         vl_running = w_vl * jnp.square(vl_t - vl_ref_t)           # (B, N)
         
-        tau_running = w_tau * jnp.sum(jnp.square(tau), axis=-1)   # (B, N)
+        tau_running = (
+            w_tau_theta * jnp.square(tau[:, :, 0]) +  # (B, N)
+            w_tau_pl * jnp.square(tau[:, :, 1])      # (B, N)
+        )
 
         running_cost = jnp.sum(
             px_running
@@ -153,34 +154,40 @@ class Hopper_CEM(CrossEntropyMethod):
         ) * self.sim.dt  # (B,)
 
         # ---------------------------------------------------
-        # TERMINAL COST
+        # TERMINAL COST (t = N)
         # ---------------------------------------------------
         
-        # terminal states (t = N)
+        # Terminal states
         px_T = q[:, -1, 0]       # (B,)
         pz_T = q[:, -1, 1]       # (B,)
-        cos_T = q[:, -1, 2]      # (B,)
-        sin_T = q[:, -1, 3]      # (B,)
-        pl_T = q[:, -1, 4]       # (B,)
+        theta_T = q[:, -1, 2]    # (B,)
+        pl_T = q[:, -1, 3]       # (B,)
         
         vx_T = v[:, -1, 0]       # (B,)
         vz_T = v[:, -1, 1]       # (B,)
         omega_T = v[:, -1, 2]    # (B,)
         vl_T = v[:, -1, 3]       # (B,)
 
-        # reference terminal state (t = N)
+        # Compute cos and sin for terminal angle
+        cos_T = jnp.cos(theta_T)  # (B,)
+        sin_T = jnp.sin(theta_T)  # (B,)
+
+        # Reference terminal state
         px_ref_T = self.q_ref[-1, 0]      # scalar
         pz_ref_T = self.q_ref[-1, 1]      # scalar
-        cos_ref_T = self.q_ref[-1, 2]     # scalar
-        sin_ref_T = self.q_ref[-1, 3]     # scalar
-        pl_ref_T = self.q_ref[-1, 4]      # scalar
+        theta_ref_T = self.q_ref[-1, 2]   # scalar
+        pl_ref_T = self.q_ref[-1, 3]      # scalar
         
         vx_ref_T = self.v_ref[-1, 0]      # scalar
         vz_ref_T = self.v_ref[-1, 1]      # scalar
         omega_ref_T = self.v_ref[-1, 2]   # scalar
         vl_ref_T = self.v_ref[-1, 3]      # scalar
 
-        # compute terminal costs (tracking reference)
+        # Desired cos/sin at terminal time
+        cos_ref_T = jnp.cos(theta_ref_T)  # scalar
+        sin_ref_T = jnp.sin(theta_ref_T)  # scalar
+
+        # Compute terminal costs
         px_terminal = wf_px * jnp.square(px_T - px_ref_T)           # (B,)
         pz_terminal = wf_pz * jnp.square(pz_T - pz_ref_T)           # (B,)
         theta_terminal = wf_theta * (
@@ -204,7 +211,7 @@ class Hopper_CEM(CrossEntropyMethod):
             + vl_terminal
         )  # (B,)
         
-        # total cost
+        # Total cost
         J = running_cost + terminal_cost  # (B,)
 
         return J
@@ -250,12 +257,14 @@ if __name__ == "__main__":
     cem_config = CrossEntropyMethod_Config(
         rng=cem_rng,
         T=3.0,
-        iterations=20,
+        iterations=200,
         N_elite=2048,
-        N_knots=3 * 20,
+        N_knots=4*10,
         spline_type="ZOH",
         # N_knots=20,
         # spline_type="Bezier",
+        use_step_size=True,
+        step_size=0.9,
     )
 
     # create the CEM optimizer
@@ -267,7 +276,7 @@ if __name__ == "__main__":
 
     # optimize from an initial state
     q_opt, v_opt, tau_opt = cem_optimizer.optimize(
-        q0 = jnp.array([0.0, 1.0, 0.0, 0.0]),  # in the air, leg at zero pos
+        q0 = jnp.array([0.0, 2.0, 0.0, 0.0]),  # in the air, leg at zero pos
         v0 = jnp.array([0.0, 0.0, 0.0, 0.0])   # initial velocity
     )
     times = cem_optimizer.t_sim
