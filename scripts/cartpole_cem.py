@@ -45,16 +45,23 @@ class Cartpole_CEM(CrossEntropyMethod):
             J: jnp.array, shape (B,) - cost for each batch.
         """
 
+        # goal state
+        cart_pos_des = 0.0
+        cos_des = 1.0
+        sin_des = 0.0
+        cart_vel_des = 0.0
+        pole_vel_des = 0.0
+
         # cost weights
-        w_cart_pos = 5.0
-        w_pole_pos = 15.0
+        w_cart_pos = 10.0
+        w_pole_pos = 10.0
         w_cart_vel = 0.1
-        w_pole_vel = 1.0
+        w_pole_vel = 0.1
         w_tau = 0.01
-        wf_cart_pos = 20.0 * w_cart_pos 
-        wf_pole_pos = 20.0 * w_pole_pos
-        wf_cart_vel = 20.0 * w_cart_vel
-        wf_pole_vel = 20.0 * w_pole_vel
+        wf_cart_pos = 50.0 * w_cart_pos 
+        wf_pole_pos = 50.0 * w_pole_pos
+        wf_cart_vel = 50.0 * w_cart_vel
+        wf_pole_vel = 50.0 * w_pole_vel
     
         # running state (t = 0 to N-1)
         cart_pos_t = q[:, :-1, 0]  # (B, N)
@@ -71,13 +78,6 @@ class Cartpole_CEM(CrossEntropyMethod):
         pole_vel_T = v[:, -1, 1]   # (B,)
         cos_T = jnp.cos(theta_T)   # (B,)
         sin_T = jnp.sin(theta_T)   # (B,)
-
-        # goal state
-        cart_pos_des = 0.0
-        cos_des = 1.0
-        sin_des = 0.0
-        cart_vel_des = 0.0
-        pole_vel_des = 0.0
 
         # ---------------------------------------------------
         # RUNNING COST
@@ -143,12 +143,12 @@ class Cartpole_CEM(CrossEntropyMethod):
         #     1 - jnp.exp(-sigma_pole_vel * jnp.square(pole_vel_T - pole_vel_des))
         # )  # (B,)
 
-        # terminal_cost = (
-        #     cart_pos_terminal
-        #     + pole_pos_terminal
-        #     + cart_vel_terminal
-        #     + pole_vel_terminal
-        # )  # (B,)
+        terminal_cost = (
+            cart_pos_terminal
+            + pole_pos_terminal
+            + cart_vel_terminal
+            + pole_vel_terminal
+        )  # (B,)
         
         # total cost
         J = running_cost + terminal_cost  # (B,)
@@ -162,6 +162,7 @@ class Cartpole_CEM(CrossEntropyMethod):
 if __name__ == "__main__":
 
     import matplotlib.pyplot as plt
+    import time
 
     # print deivce that we will use
     print(f"Using device: {jax.default_backend()}")
@@ -189,16 +190,17 @@ if __name__ == "__main__":
     )
 
     # cem config
-    cem_rng = jax.random.PRNGKey(42)
+    s = int(time.time())
+    cem_rng = jax.random.PRNGKey(s)
     cem_config = CrossEntropyMethod_Config(
         rng=cem_rng,
-        T=5.0,
+        T=3.0,
         iterations=300,
-        N_elite=2048,
-        N_knots=5*10,
-        spline_type="ZOH",
-        # N_knots=20,
-        # spline_type="Bezier",
+        N_elite=512,
+        # N_knots=4*5,
+        # spline_type="ZOH",
+        N_knots=30,
+        spline_type="Bezier",
     )
 
     # create the CEM optimizer

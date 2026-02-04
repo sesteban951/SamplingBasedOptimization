@@ -368,6 +368,12 @@ class CrossEntropyMethod(ABC):
                   f"J_elite_avg: {J_elite_avg:.4f} | "
                   f"J_best: {J_opt:.4f} | "
                   f"‖Σ‖: {cov_norm:.4f}")
+            
+        # # just take the best one from the last iteration
+        # J_best = J.min()
+        # q_opt = q_log[jnp.argmin(J), :, :]
+        # v_opt = v_log[jnp.argmin(J), :, :]
+        # tau_opt = tau_log[jnp.argmin(J), :, :]
 
         return q_opt, v_opt, tau_opt
     
