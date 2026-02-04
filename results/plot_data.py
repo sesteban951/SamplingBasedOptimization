@@ -14,8 +14,10 @@ import mujoco
 import mujoco.viewer
 
 # which data to load
-system = "cartpole"
-xml_path = f"./models/cartpole/cartpole.xml"
+# system = "cartpole"
+# xml_path = f"./models/cartpole/cartpole.xml"
+system = "hopper"
+xml_path = f"./models/hopper/hopper.xml"
 
 # load data from csv files
 time_file = f"./results/{system}/times.csv"
@@ -45,6 +47,8 @@ t0 = time.time()
 while True:
 
     i = np.searchsorted(times, time.time() - t0)
+
+    print(f"Time: {time.time() - t0:.2f}, Index: {i}\r", end="")
 
     data.qpos[:] = q_opt[i, :]
     data.qvel[:] = v_opt[i, :]

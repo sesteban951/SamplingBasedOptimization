@@ -32,7 +32,7 @@ class Model_Config:
     Kp: List[float]          # proportional gains for each joint
     Kd: List[float]          # derivative gain for each joint
 
-    # actuated state indices
+    # actuated state indices, TODO: make this so that it is not manually entered
     q_actuated_idx: List[int]   # indices of actuated positions  (qpos)
     v_actuated_idx: List[int]   # indices of actuated velocities (qvel)
 
@@ -255,14 +255,24 @@ if __name__ == "__main__":
     # np.random.seed(0)
 
     # model config
+    # model_config = Model_Config(
+    #     xml_path="./models/cartpole/cartpole.xml",
+    #     Kp=[400.0], 
+    #     Kd=[50.0],  
+    #     q_actuated_idx=[0], # cart position
+    #     v_actuated_idx=[0], # cart velocity
+    #     action_mode="pos"
+    # )
+    # q0 = jnp.array([0.0, jnp.pi])  # slight offset from upright
     model_config = Model_Config(
-        xml_path="./models/cartpole/cartpole.xml",
-        Kp=[400.0], 
-        Kd=[50.0],  
-        q_actuated_idx=[0],
-        v_actuated_idx=[0],
+        xml_path="./models/hopper/hopper.xml",
+        Kp=[100.0, 500.0], 
+        Kd=[5.0, 50.0],  
+        q_actuated_idx=[2, 3], # theta 
+        v_actuated_idx=[2, 3], # theta dot
         action_mode="pos"
     )
+    q0 = jnp.array([0.0, 1.0, 0.0, 0.0])  # in the air, leg at zero pos
     # model_config = Model_Config(
     #     xml_path="./models/biped/biped.xml",
     #     Kp=[100.0, 100.0, 100.0, 100.0], 
@@ -271,6 +281,7 @@ if __name__ == "__main__":
     #     v_actuated_idx=[3, 4, 5, 6],
     #     action_mode="pos"
     # )
+    # q0 = jnp.array([0, 0.83, 0, 0.22, -0.415, 0.22, -0.415])  # bent knees
 
     # parallel sim config
     sim_config = ParallelSim_Config(
@@ -284,9 +295,7 @@ if __name__ == "__main__":
     N = 300
     dt = float(parallel_sim.mjx_model.opt.timestep)
 
-    # initial conditions
-    q0 = jnp.array([0.0, jnp.pi])  # slight offset from upright
-    # q0 = jnp.array([0, 0.83, 0, 0.22, -0.415, 0.22, -0.415])  # slight offset from upright
+    # initial velocity conditions
     v0 = jnp.zeros((parallel_sim.nv,))
 
     # random controls: (B, N, nu)

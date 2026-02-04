@@ -265,7 +265,7 @@ class CrossEntropyMethod(ABC):
 
     # cost function
     @abstractmethod
-    def _cost(self, q, v, tau):
+    def cost(self, q, v, tau):
         """
         Cost function to evaluate the rollouts.
 
@@ -310,7 +310,7 @@ class CrossEntropyMethod(ABC):
             q_log.block_until_ready()
 
             # compute costs
-            J = self._cost(q_log, v_log, tau_log)  # shape (B,)
+            J = self.cost(q_log, v_log, tau_log)  # shape (B,)
             J.block_until_ready()
 
             # select elite samples

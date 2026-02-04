@@ -4,9 +4,12 @@
 #
 ##
 
+# standard imports
+import numpy as np
+
+# mujoco imports
 import mujoco
 from mujoco.viewer import launch
-import numpy as np
 
 # Load the model from XML
 # xml_file = "./models/cartpole/cartpole.xml"
