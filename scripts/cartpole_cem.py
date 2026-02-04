@@ -46,73 +46,112 @@ class Cartpole_CEM(CrossEntropyMethod):
         """
 
         # cost weights
-        w_cart_pos = 10.0
-        w_pole_pos = 10.0
+        w_cart_pos = 5.0
+        w_pole_pos = 15.0
         w_cart_vel = 0.1
-        w_pole_vel = 0.1
-        w_vel = 0.1
+        w_pole_vel = 1.0
         w_tau = 0.01
-        wf_pos = 10.0 * w_pos 
-        wf_vel = 10.0 * w_vel
+        wf_cart_pos = 20.0 * w_cart_pos 
+        wf_pole_pos = 20.0 * w_pole_pos
+        wf_cart_vel = 20.0 * w_cart_vel
+        wf_pole_vel = 20.0 * w_pole_vel
     
-        # running costs over t=0..N-1 (exclude terminal state)
-        q_t = q[:, :-1, :]   # (B, N, nq)
-        v_t = v[:, :-1, :]   # (B, N, nv)
-        q_T = q[:, -1, :]   # (B, nq)
-        v_T = v[:, -1, :]   # (B, nv)
+        # running state (t = 0 to N-1)
+        cart_pos_t = q[:, :-1, 0]  # (B, N)
+        theta_t =    q[:, :-1, 1]  # (B, N)
+        cart_vel_t = v[:, :-1, 0]  # (B, N)
+        pole_vel_t = v[:, :-1, 1]  # (B, N)
+        cos_t = jnp.cos(theta_t)   # (B, N)
+        sin_t = jnp.sin(theta_t)   # (B, N)
 
-        # get pole angle positions
-        theta_t = q_t[:, :, 1]  # pole angle at time t
-        sin_t = jnp.sin(theta_t)
-        cos_t = jnp.cos(theta_t)
+        # terminal states (t = N)
+        cart_pos_T = q[:, -1, 0]   # (B,)
+        theta_T =    q[:, -1, 1]   # (B,)
+        cart_vel_T = v[:, -1, 0]   # (B,)
+        pole_vel_T = v[:, -1, 1]   # (B,)
+        cos_T = jnp.cos(theta_T)   # (B,)
+        sin_T = jnp.sin(theta_T)   # (B,)
 
-        # desired angles error
-        theta_des = 0.0
-        sin_des = jnp.sin(theta_des)
-        cos_des = jnp.cos(theta_des)
-        ang_err = jnp.stack([sin_t - sin_des, cos_t - cos_des], axis=-1)  # shape (B, N, 2)
+        # goal state
+        cart_pos_des = 0.0
+        cos_des = 1.0
+        sin_des = 0.0
+        cart_vel_des = 0.0
+        pole_vel_des = 0.0
 
-        # other desired states (cart position)
-        q_des_other = jnp.array([0.0])     # (1,)
-        q_other_t = q_t[:, :, 0:1]         # (B, N, 1)
-        other_err = q_other_t - q_des_other  # (B, N, 1)
+        # ---------------------------------------------------
+        # RUNNING COST
+        # ---------------------------------------------------
 
-        # total running position penalty
-        running_pos = w_pos * (
-            jnp.sum(ang_err**2, axis=(1, 2)) +
-            jnp.sum(other_err**2, axis=(1, 2))
-        )
+        # Quadratic costs
+        cart_pos_running = w_cart_pos * jnp.square(cart_pos_t - cart_pos_des)  # (B, N)
+        pole_pos_running = w_pole_pos * (
+            jnp.square(cos_t - cos_des) + jnp.square(sin_t - sin_des)
+        )  # (B, N)
+        cart_vel_running = w_cart_vel * jnp.square(cart_vel_t - cart_vel_des)  # (B, N)
+        pole_vel_running = w_pole_vel * jnp.square(pole_vel_t - pole_vel_des)  # (B, N)
+        tau_running = w_tau * jnp.sum(jnp.square(tau), axis=-1)                # (B, N)
 
-        # ----------------------------
-        # velocity + control running cost
-        # ----------------------------
-        v_des = jnp.array([0.0, 0.0])  # cart vel, pole ang vel
-        running_vel = w_vel * jnp.sum((v_t - v_des) ** 2, axis=(1, 2))
-        running_tau = w_tau * jnp.sum(tau ** 2, axis=(1, 2))
+        running_cost = jnp.sum(
+              cart_pos_running
+            + pole_pos_running
+            + cart_vel_running
+            + pole_vel_running
+            + tau_running
+            , axis=-1  # sum over N
+        ) * self.sim.dt  # (B, )
 
-        running_cost = self.sim.dt * (running_pos + running_vel + running_tau)
+        # ---------------------------------------------------
+        # TERMINAL COST
+        # ---------------------------------------------------
 
-        # ----------------------------
-        # terminal cost at t = N
-        # ----------------------------
-        q_T = q[:, -1, :]   # (B, nq)
-        v_T = v[:, -1, :]   # (B, nv)
+        # Quadratic costs
+        cart_pos_terminal = wf_cart_pos * jnp.square(cart_pos_T - cart_pos_des)  # (B,)
+        pole_pos_terminal = wf_pole_pos * (
+            jnp.square(cos_T - cos_des) + jnp.square(sin_T - sin_des)
+        )  # (B,)
+        cart_vel_terminal = wf_cart_vel * jnp.square(cart_vel_T - cart_vel_des)  # (B,)
+        pole_vel_terminal = wf_pole_vel * jnp.square(pole_vel_T - pole_vel_des)  # (B,)
 
-        theta_T = q_T[:, 1]  # (B,)
-        ang_err_T = jnp.stack(
-            [jnp.sin(theta_T) - sin_des, jnp.cos(theta_T) - cos_des],
-            axis=-1
-        )  # (B, 2)
+        terminal_cost = (
+            cart_pos_terminal
+            + pole_pos_terminal
+            + cart_vel_terminal
+            + pole_vel_terminal
+        )  # (B, )
 
-        other_err_T = q_T[:, 0:1] - q_des_other  # (B, 1)
+        # # Exponential costs (upside down gaussian, where bottom touches 0)
+        # sigma_cart_pos = 0.5
+        # sigma_pole_pos = 0.5
+        # sigma_cart_vel = 0.5
+        # sigma_pole_vel = 0.5
+        # cart_pos_terminal = wf_cart_pos * (
+        #     1 - jnp.exp(-sigma_cart_pos * jnp.square(cart_pos_T - cart_pos_des))
+        # )  # (B,)
 
-        terminal_pos = wf_pos * (
-            jnp.sum(ang_err_T**2, axis=1) +
-            jnp.sum(other_err_T**2, axis=1)
-        )
-        terminal_vel = wf_vel * jnp.sum((v_T - v_des) ** 2, axis=1)
+        # pole_pos_terminal = wf_pole_pos * (
+        #     1 - jnp.exp(-sigma_pole_pos * (
+        #         jnp.square(cos_T - cos_des) + jnp.square(sin_T - sin_des)
+        #     ))
+        # )  # (B,)
 
-        J = running_cost + terminal_pos + terminal_vel
+        # cart_vel_terminal = wf_cart_vel * (
+        #     1 - jnp.exp(-sigma_cart_vel * jnp.square(cart_vel_T - cart_vel_des))
+        # )  # (B,)
+
+        # pole_vel_terminal = wf_pole_vel * (
+        #     1 - jnp.exp(-sigma_pole_vel * jnp.square(pole_vel_T - pole_vel_des))
+        # )  # (B,)
+
+        # terminal_cost = (
+        #     cart_pos_terminal
+        #     + pole_pos_terminal
+        #     + cart_vel_terminal
+        #     + pole_vel_terminal
+        # )  # (B,)
+        
+        # total cost
+        J = running_cost + terminal_cost  # (B,)
 
         return J
 
@@ -140,8 +179,8 @@ if __name__ == "__main__":
         Kd=[50.0],  
         q_actuated_idx=[0],
         v_actuated_idx=[0],
-        action_mode="tau",
-        # action_mode="pos",
+        # action_mode="tau",
+        action_mode="pos",
     )
 
     # parallel sim config
@@ -156,7 +195,7 @@ if __name__ == "__main__":
         T=5.0,
         iterations=300,
         N_elite=2048,
-        N_knots=5*5,
+        N_knots=5*10,
         spline_type="ZOH",
         # N_knots=20,
         # spline_type="Bezier",
@@ -171,8 +210,8 @@ if __name__ == "__main__":
 
     # optimize from an initial state
     q_opt, v_opt, tau_opt = cem_optimizer.optimize(
-        q0=jnp.array([0.0, np.pi + 0.1]),   # initial position
-        v0=jnp.array([0.0, 0.0])            # initial velocity
+        q0=jnp.array([0.0, np.pi]),   # initial position
+        v0=jnp.array([0.0, 0.0])      # initial velocity
     )
     times = cem_optimizer.t_sim
 
