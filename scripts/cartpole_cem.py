@@ -242,12 +242,18 @@ if __name__ == "__main__":
     plt.figure()
     plt.plot(times, q_opt[:, 0], label="Cart Position")
     plt.plot(times, q_opt[:, 1], label="Pole Angle")
+    plt.xlabel("Time [s]")
+    plt.legend()
 
     plt.figure()
     plt.plot(times, v_opt[:, 0], label="Cart Vel")
     plt.plot(times, v_opt[:, 1], label="Pole velocity")
+    plt.xlabel("Time [s]")
+    plt.legend()
 
     plt.figure()
     plt.plot(times[:-1], tau_opt[:, 0], label="Cart Force")
+    plt.xlabel("Time [s]")
+    plt.legend()
 
     plt.show()
