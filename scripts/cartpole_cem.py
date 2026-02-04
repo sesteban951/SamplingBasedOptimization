@@ -46,7 +46,10 @@ class Cartpole_CEM(CrossEntropyMethod):
         """
 
         # cost weights
-        w_pos = 10.0
+        w_cart_pos = 10.0
+        w_pole_pos = 10.0
+        w_cart_vel = 0.1
+        w_pole_vel = 0.1
         w_vel = 0.1
         w_tau = 0.01
         wf_pos = 10.0 * w_pos 
@@ -55,6 +58,8 @@ class Cartpole_CEM(CrossEntropyMethod):
         # running costs over t=0..N-1 (exclude terminal state)
         q_t = q[:, :-1, :]   # (B, N, nq)
         v_t = v[:, :-1, :]   # (B, N, nv)
+        q_T = q[:, -1, :]   # (B, nq)
+        v_T = v[:, -1, :]   # (B, nv)
 
         # get pole angle positions
         theta_t = q_t[:, :, 1]  # pole angle at time t

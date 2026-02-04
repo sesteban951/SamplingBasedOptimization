@@ -21,7 +21,7 @@
         <light pos="-0.5 0.0 2.0" dir="0 0 -1" directional="true"/>  
 
         <!-- Ground -->
-        <geom name="ground" type="plane" size="0 0 0.01" material="groundplane" contype="1" conaffinity="6"/>
+        <geom name="ground" type="plane" size="0 0 0.005" material="groundplane" contype="1" conaffinity="6"/>
 
         <!-- Body -->
         <body name="torso" pos="0 0 0.0">
