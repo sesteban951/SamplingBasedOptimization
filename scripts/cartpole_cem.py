@@ -163,8 +163,9 @@ if __name__ == "__main__":
 
     import matplotlib.pyplot as plt
     import time
+    import os
 
-    # print deivce that we will use
+    # print device that we will use
     print(f"Using device: {jax.default_backend()}")
     if jax.default_backend() == "gpu":
         gpu_info = jax.devices("gpu")[0]
@@ -224,19 +225,20 @@ if __name__ == "__main__":
     tau_opt = np.array(tau_opt)
 
     # save as csv files in the results folder
-    time_file = "./results/cartpole/times.csv"
-    q_file = "./results/cartpole/q_opt.csv"
-    v_file = "./results/cartpole/v_opt.csv"
-    tau_file = "./results/cartpole/tau_opt.csv"
+    save_dir = "./results/cartpole/"
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+        print(f"Created directory: {save_dir}")
+
+    time_file = save_dir + "time.csv"
+    q_file = save_dir + "q_opt.csv"
+    v_file = save_dir + "v_opt.csv"
+    tau_file = save_dir + "tau_opt.csv"
     np.savetxt(time_file, times, delimiter=",")
     np.savetxt(q_file, q_opt, delimiter=",")
     np.savetxt(v_file, v_opt, delimiter=",")
     np.savetxt(tau_file, tau_opt, delimiter=",")
-
-    print(times.shape)
-    print(q_opt.shape)
-    print(v_opt.shape)
-    print(tau_opt.shape)
+    print(f"Saved results to {save_dir}")
 
     # plot the first two positions
     plt.figure()

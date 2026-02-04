@@ -20,7 +20,7 @@ xml_path = f"./models/cartpole/cartpole.xml"
 # xml_path = f"./models/hopper/hopper.xml"
 
 # load data from csv files
-time_file = f"./results/{system}/times.csv"
+time_file = f"./results/{system}/time.csv"
 q_file = f"./results/{system}/q_opt.csv"
 v_file = f"./results/{system}/v_opt.csv"
 tau_file = f"./results/{system}/tau_opt.csv"

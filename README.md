@@ -13,3 +13,15 @@ conda activate env_sbo
 - `models/`: Contains various dynamical system models described by an XML file. You can view a model using `visualize_model_mujoco.py`.
 - `utils/`: Contains utility functions and classes used throughout the codebase. For example, parallel simulation, optimization methods, and splines.
 - `results/`: Directory to store results from experiments.
+
+## Usage
+All scripts are run from the root directory. The main scripts are located in the `scripts/` directory.
+
+If you can't run a particular script, try running it as a module. For example, for `scripts/cartpole_cem.py`, use:
+```bash
+python -m scripts.cartpole_cem
+```
+instead of:
+```bash
+python scripts/cartpole_cem.py 
+```
