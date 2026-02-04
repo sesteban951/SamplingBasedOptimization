@@ -19,6 +19,7 @@ import jax.numpy as jnp
 from utils.simulation.simulation import *
 from utils.spline.bezier import *
 from utils.spline.zoh import *
+from utils.spline.fourier import *
 
 
 #############################################################
@@ -41,7 +42,11 @@ class CrossEntropyMethod_Config:
     N_elite: int     # number of elite samples
 
     # spline params
-    spline_type: str = "ZOH"   # "ZOH" | "Bezier"
+    spline_type: str = "ZOH"   # "ZOH" | "Bezier" | "Fourier"
+
+    # other params
+    use_step_size: bool = False  # whether to use step size in updating distribution
+    step_size: float = 0.5       # step size for distribution update
 
 
 # CEM optimizer class
@@ -69,12 +74,12 @@ class CrossEntropyMethod(ABC):
         self.t_sim = self.sim.dt * jnp.arange(self.N + 1)    # shape (N+1,)
         self.T_eff = self.N * self.sim.dt                    # effective total time
 
-        # initialize the spline knots points
-        self._initialize_spline_knots()
-
         # empty distribution
         self.mu = None
         self.Sigma = None
+
+        # initialize the spline knots points
+        self._initialize_spline_knots()
 
         print("CEM Optimizer initialized.")
 
@@ -106,6 +111,11 @@ class CrossEntropyMethod(ABC):
         if self.cem_config.N_elite > self.sim.B:
             raise ValueError(f"Number of elite samples [N_elite = {self.cem_config.N_elite}]" 
                              f" must be less than parallel sim envs [B = {self.sim.B}].")
+        
+        # if using step size, check that step_size is in (0, 1]
+        if self.cem_config.use_step_size == True:
+            if self.cem_config.step_size <= 0.0 or self.cem_config.step_size > 1.0:
+                raise ValueError(f"Step size step_size [{self.cem_config.step_size}] must be in (0, 1].")
 
 
     # initialize the spline knot points
@@ -183,11 +193,16 @@ class CrossEntropyMethod(ABC):
             self.spline = ZOH_Spline(Y0, self.T_eff)
         elif self.cem_config.spline_type == "Bezier":
             self.spline = Bezier_Spline(Y0, self.T_eff)
+        elif self.cem_config.spline_type == "Fourier":
+            self.spline = Fourier_Spline(Y0, self.T_eff, periodic=False)
         else:
             raise NotImplementedError(f"Spline type [{self.cem_config.spline_type}] not implemented.")
 
         # update the spline knot points
         self.spline.update_knots(Y0)
+
+        # update the distribution with the initial knot points
+        self._update_distribution(Y0)
 
     
     # sample knot_points from the current distribution
@@ -227,16 +242,11 @@ class CrossEntropyMethod(ABC):
     # update the distribution based on elite samples
     def _update_distribution(self, Y_elite):
         """
-        Update the disitrbution based on elite samples.
-        
+        Update the distribution based on elite samples.
+
         Args:
             Y_elite: jnp.array, shape (N_elite, N_knots, nu) - elite spline knot points.
         """
-
-        # NOTE: consider adding smoothing to the distribution update:
-        # alpha = 0.1  # or 0.2
-        # self.mu = (1 - alpha) * self.mu + alpha * mu_
-        # self.Sigma = (1 - alpha) * self.Sigma + alpha * Sigma_
 
         # Flatten each elite's knot matrix (N_knots, nu) into a vector (N_knots*nu) in row-major order.
         # Example: if Y_elite[k] = [[1,2,3],
@@ -254,13 +264,18 @@ class CrossEntropyMethod(ABC):
         # compute the unbiased sample covariance
         Sigma_ = (Y_centered.T @ Y_centered) / (K - 1)  # shape (N_knots * nu, N_knots * nu)
 
-        # for numerical stability, add a small value to the diagonal
+        # for numerical stability, symmetrize and add a small value to the diagonal
         epsilon = 1e-6
-        Sigma_ = Sigma_ + epsilon * jnp.eye(Sigma_.shape[0], dtype=Sigma_.dtype)
+        Sigma_ = 0.5 * (Sigma_ + Sigma_.T) + epsilon * jnp.eye(Sigma_.shape[0], dtype=Sigma_.dtype)
 
-        # store the updated distribution
-        self.mu = mu_
-        self.Sigma = Sigma_
+        # use a step size update if specified
+        if self.cem_config.use_step_size == True and self.mu is not None:
+            self.mu = (1 - self.cem_config.step_size) * self.mu + self.cem_config.step_size * mu_
+            self.Sigma = (1 - self.cem_config.step_size) * self.Sigma + self.cem_config.step_size * Sigma_
+        # just update directly
+        else:
+            self.mu = mu_
+            self.Sigma = Sigma_
 
 
     # cost function
@@ -314,8 +329,9 @@ class CrossEntropyMethod(ABC):
             J.block_until_ready()
 
             # select elite samples
-            _, elite_idx = jax.lax.top_k(-J, self.cem_config.N_elite)
-            
+            J_elite_neg, elite_idx = jax.lax.top_k(-J, self.cem_config.N_elite)
+            J_elite = -J_elite_neg  # shape (N_elite,)
+
             # select the elite splines
             Y_elite = jnp.take(self.spline.Y, elite_idx, axis=0)  # shape (N_elite, N_knots, nu)
 
@@ -330,14 +346,28 @@ class CrossEntropyMethod(ABC):
             cov_norm = jnp.linalg.norm(self.Sigma, ord='fro')
 
             # record the best solution found so far
-            if J.min() < J_opt:
-                J_opt = J.min()
-                idx_opt = jnp.argmin(J)
+            J_min = J_elite.min()
+            if J_min < J_opt:
+
+                # set best
+                J_opt = J_min
+                idx_in_elite = jnp.argmin(J_elite)  # Find best within elites
+                idx_opt = elite_idx[idx_in_elite]   # Map to actual batch index
+
+                # set optimal
                 q_opt = q_log[idx_opt, :, :]
                 v_opt = v_log[idx_opt, :, :]
                 tau_opt = tau_log[idx_opt, :, :]
 
-            print(f"Iteration {itr+1}/{self.cem_config.iterations}, Best Cost: {J.min():.4f}, Cov Norm: {cov_norm:.4f}")
+            # compute the average elite cost for monitoring
+            J_elite_avg = jnp.mean(J_elite)
+
+            # print iteration info
+            itr_width = len(str(self.cem_config.iterations))  # e.g., 400 → width=3
+            print(f"Iteration {itr+1:0{itr_width}d}/{self.cem_config.iterations} | "
+                  f"J_elite_avg: {J_elite_avg:.4f} | "
+                  f"J_best: {J_opt:.4f} | "
+                  f"‖Σ‖: {cov_norm:.4f}")
 
         return q_opt, v_opt, tau_opt
     
