@@ -2,6 +2,7 @@
 #
 #  Fourier series spline implementation.
 #  NOTE: only for synthesizing PERIODIC trajectories.
+#  WARNING: Not fully tested yet.
 ##
 
 # for base class

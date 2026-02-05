@@ -42,8 +42,9 @@ class Hopper_CEM(CrossEntropyMethod):
         Simple linear interpolation from start to goal.
         """
         # Initial and final states (assuming nq=4: [px, pz, theta, leg_length])
+        # WARNING: For now, this is hardcoded 
         q0 = jnp.array([0.0, 2.0, 0.0, 0.0])  # start: x=0, z=2m (in air), upright, leg at 0
-        qf = jnp.array([1.0, 2.0, 0.0, 0.0])  # goal: x=1m, z=2m, upright, leg at 0
+        qf = jnp.array([5.0, 2.0, 0.0, 0.0])  # goal: x=1m, z=2m, upright, leg at 0
         
         # Compute constant forward velocity
         vx = (qf[0] - q0[0]) / self.T_eff
@@ -68,25 +69,25 @@ class Hopper_CEM(CrossEntropyMethod):
         """
 
         # Cost weights
-        w_px = 2.0
-        w_pz = 15.0
-        w_theta = 25.0
-        w_pl = 0.001
+        w_px = 5.0
+        w_pz = 5.0
+        w_theta = 20.0
+        w_pl = 0.1
         w_vx = 0.1
         w_vz = 0.1
-        w_omega = 0.01
-        w_vl = 0.0001
-        w_tau_theta = 0.1
-        w_tau_pl = 0.00001
+        w_omega = 0.1
+        w_vl = 0.1
+        w_tau_theta = 0.01
+        w_tau_pl = 0.01
 
-        wf_px = 10.0 * w_px
-        wf_pz = 10.0 * w_pz
-        wf_theta = 10.0 * w_theta
-        wf_pl = 10.0 * w_pl
-        wf_vx = 10.0 * w_vx
-        wf_vz = 10.0 * w_vz
-        wf_omega = 10.0 * w_omega
-        wf_vl = 10.0 * w_vl
+        wf_px = 50.0 * w_px
+        wf_pz = 50.0 * w_pz
+        wf_theta = 50.0 * w_theta
+        wf_pl = 50.0 * w_pl
+        wf_vx = 50.0 * w_vx
+        wf_vz = 50.0 * w_vz
+        wf_omega = 50.0 * w_omega
+        wf_vl = 50.0 * w_vl
 
         # ---------------------------------------------------
         # RUNNING COST (t = 0 to N-1)
@@ -250,7 +251,7 @@ if __name__ == "__main__":
 
     # parallel sim config
     sim_config = ParallelSim_Config(
-        batch_size = 4096,
+        batch_size = 2048,
     )
 
     # cem config
@@ -259,13 +260,9 @@ if __name__ == "__main__":
         rng=cem_rng,
         T=3.0,
         iterations=200,
-        N_elite=2048,
-        N_knots=4*10,
+        N_elite=512,
+        N_knots=3*20,
         spline_type="ZOH",
-        # N_knots=20,
-        # spline_type="Bezier",
-        use_step_size=True,
-        step_size=0.9,
     )
 
     # create the CEM optimizer
