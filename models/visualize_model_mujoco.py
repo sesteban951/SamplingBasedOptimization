@@ -13,8 +13,15 @@ from mujoco.viewer import launch
 
 # Load the model from XML
 # xml_file = "./models/cartpole/cartpole.xml"
-xml_file = "./models/hopper/hopper.xml"
+# xml_file = "./models/cartpole/cartpole_walls.xml"
+
+# xml_file = "./models/hopper/hopper.xml"
+# xml_file = "./models/hopper/hopper_stairs.xml"
+
 # xml_file = "./models/biped/biped.xml"
+# xml_file = "./models/biped/biped_platform.xml"
+xml_file = "./models/biped/biped_cliff.xml"
+
 # xml_file = "./models/g1/g1_21dof.xml"
 
 # load and launch the model
@@ -70,7 +77,6 @@ for i in range(model.nbody):
 
 print(f"\n    Total mass: {total_mass:.4f}")
 
-##################################################")
 print("\n##################################################")
 
 # launch the viewer

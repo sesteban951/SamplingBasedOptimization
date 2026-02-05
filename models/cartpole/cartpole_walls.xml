@@ -1,0 +1,18 @@
+<mujoco model="cartpole_walls">
+    <include file="cartpole.xml"/>
+    
+    <!-- Override or add elements here -->
+    <worldbody>
+
+        <!-- Left wall -->
+        <body name="left_wall" pos="-1.7 0 0.8">
+            <geom name="left_wall" type="box" size="0.1 0.3 0.8" rgba="0.8 0.3 0.3 0.7" contype="1" conaffinity="1"/>
+        </body>
+        
+        <!-- Right wall -->
+        <body name="right_wall" pos="1.7 0 0.8">
+            <geom name="right_wall" type="box" size="0.1 0.3 0.8" rgba="0.3 0.3 0.8 0.7" contype="1" conaffinity="1"/>
+        </body>
+
+    </worldbody>
+</mujoco>

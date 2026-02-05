@@ -1,5 +1,6 @@
 <mujoco model="cart_pole">
-    <!-- Simulation settings, NOTE: the timestep seemed to make a huge difference -->
+
+    <!-- Simulation settings -->
     <option solver="Newton" integrator="implicitfast" timestep="0.02" iterations="5" ls_iterations="5"/>
 
     <!-- Inertia is computed from geometry -->
