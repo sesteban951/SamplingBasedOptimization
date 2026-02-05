@@ -161,7 +161,6 @@ class Cartpole_CEM(CrossEntropyMethod):
 
 if __name__ == "__main__":
 
-    import matplotlib.pyplot as plt
     import time
     import os
 
@@ -212,11 +211,14 @@ if __name__ == "__main__":
     )
 
     # optimize from an initial state
+    t0 = time.time()
     q_opt, v_opt, tau_opt = cem_optimizer.optimize(
         q0=jnp.array([0.0, np.pi]),   # initial position
         v0=jnp.array([0.0, 0.0])      # initial velocity
     )
     times = cem_optimizer.t_sim
+    tf = time.time()
+    print(f"Optimization took {tf - t0:.2f} seconds.")
 
     # convert to numpy for plotting
     times = np.array(times)
@@ -239,23 +241,3 @@ if __name__ == "__main__":
     np.savetxt(v_file, v_opt, delimiter=",")
     np.savetxt(tau_file, tau_opt, delimiter=",")
     print(f"Saved results to {save_dir}")
-
-    # plot the first two positions
-    plt.figure()
-    plt.plot(times, q_opt[:, 0], label="Cart Position")
-    plt.plot(times, q_opt[:, 1], label="Pole Angle")
-    plt.xlabel("Time [s]")
-    plt.legend()
-
-    plt.figure()
-    plt.plot(times, v_opt[:, 0], label="Cart Vel")
-    plt.plot(times, v_opt[:, 1], label="Pole velocity")
-    plt.xlabel("Time [s]")
-    plt.legend()
-
-    plt.figure()
-    plt.plot(times[:-1], tau_opt[:, 0], label="Cart Force")
-    plt.xlabel("Time [s]")
-    plt.legend()
-
-    plt.show()

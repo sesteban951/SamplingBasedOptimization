@@ -273,11 +273,14 @@ if __name__ == "__main__":
     )
 
     # optimize from an initial state
+    t0 = time.time()
     q_opt, v_opt, tau_opt = cem_optimizer.optimize(
         q0 = jnp.array([0.0, 2.0, 0.0, 0.0]),  # in the air, leg at zero pos
         v0 = jnp.array([0.0, 0.0, 0.0, 0.0])   # initial velocity
     )
     times = cem_optimizer.t_sim
+    tf = time.time()
+    print(f"Optimization took {tf - t0:.2f} seconds.")
 
     # convert to numpy for plotting
     times = np.array(times)
