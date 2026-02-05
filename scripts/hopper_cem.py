@@ -55,7 +55,7 @@ class Hopper_CEM(CrossEntropyMethod):
         self.q_ref = jnp.linspace(q0, qf, self.N + 1)  # (N+1, nq=4)
         self.v_ref = jnp.linspace(v0, vf, self.N + 1)  # (N+1, nv=4)
 
-
+    # cost function for the trajecotry optimization
     def cost(self, q, v, tau):
         """
         Cost function.
@@ -225,7 +225,6 @@ class Hopper_CEM(CrossEntropyMethod):
 
 if __name__ == "__main__":
 
-    import matplotlib.pyplot as plt
     import time
     import os
 

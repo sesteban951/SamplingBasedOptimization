@@ -32,7 +32,8 @@ class Cartpole_CEM(CrossEntropyMethod):
         # initialize the parent class
         super().__init__(model_config, sim_config, cem_config)
 
-    # running cost
+
+    # cost function for the trajecotry optimization
     def cost(self, q, v, tau):
         """
         cost function.

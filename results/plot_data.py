@@ -21,8 +21,10 @@ import mujoco.viewer
 # which data to load
 # system = "cartpole"
 # xml_path = f"./models/cartpole/cartpole.xml"
-system = "hopper"
-xml_path = f"./models/hopper/hopper.xml"
+# system = "hopper"
+# xml_path = f"./models/hopper/hopper.xml"
+system = "cube"
+xml_path = f"./models/cube/scene.xml"
 
 # load data from csv files
 time_file = f"./results/{system}/time.csv"
