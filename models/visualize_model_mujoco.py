@@ -11,6 +11,11 @@ import numpy as np
 import mujoco
 from mujoco.viewer import launch
 
+
+###########################################################
+# PICK THE MODEL TO LOAD
+###########################################################
+
 # Load the model from XML
 # xml_file = "./models/cartpole/cartpole.xml"
 # xml_file = "./models/cartpole/cartpole_walls.xml"
@@ -20,9 +25,17 @@ from mujoco.viewer import launch
 
 # xml_file = "./models/biped/biped.xml"
 # xml_file = "./models/biped/biped_platform.xml"
-xml_file = "./models/biped/biped_cliff.xml"
+# xml_file = "./models/biped/biped_cliff.xml"
+
+# xml_file = "./models/cube/leap_rh.xml"
+xml_file = "./models/cube/scene.xml"
 
 # xml_file = "./models/g1/g1_21dof.xml"
+
+
+###########################################################
+# MODEL INFO 
+###########################################################
 
 # load and launch the model
 model =  mujoco.MjModel.from_xml_path(xml_file)
@@ -36,6 +49,14 @@ print("\n#####################  INFO  #####################")
 
 # file name
 print("Model file name:", xml_file)
+
+# basic info 
+nq = model.nq
+nv = model.nv
+nu = model.nu
+print(f"\nNumber of generalized positions (nq): {nq}")
+print(f"Number of generalized velocities (nv): {nv}")
+print(f"Number of control inputs (nu): {nu}")
 
 # joints
 joint_type_dict = {0: "free", 1: "ball", 2: "slide", 3: "hinge"}
@@ -78,6 +99,11 @@ for i in range(model.nbody):
 print(f"\n    Total mass: {total_mass:.4f}")
 
 print("\n##################################################")
+
+
+###########################################################
+# SIMULATION
+###########################################################
 
 # launch the viewer
 launch(model)
