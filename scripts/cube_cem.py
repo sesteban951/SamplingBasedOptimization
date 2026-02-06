@@ -48,7 +48,6 @@ Actuators (nu=16):
 #############################################################
 # Cube Reorientation CEM
 #############################################################
-
 class CubeReorientation_CEM(CrossEntropyMethod):
 
     def __init__(self, model_config: Model_Config,
@@ -70,11 +69,17 @@ class CubeReorientation_CEM(CrossEntropyMethod):
         # Cost weights - balanced for holding + reorienting
         self.w_orientation = 0.05          # Track orientation during trajectory
         self.w_position = 5.0              # Keep cube near hand (INCREASED!)
-        self.w_control = 0.000001          # Control effort (tiny!)
-        self.w_velocity = 0.001            # Velocity regularization
+        self.w_control = 0.0001          # Control effort (tiny!)
+        self.w_velocity = 0.1            # Velocity regularization
         self.w_terminal_orient = 10.0      # Final orientation (INCREASED!)
         self.w_terminal_vel = 0.1          # Final velocity (want stable)
         self.w_terminal_pos = 50.0         # Final position near hand (MUCH HIGHER!)
+        
+        # NEW: Hand finger costs
+        self.w_hand_pos = 1.0             # Keep hand joints at zero position
+        self.w_hand_vel = 0.1            # Keep hand joint velocities at zero
+        self.w_terminal_hand_pos = 0.1     # Terminal hand position at zero
+        self.w_terminal_hand_vel = 0.01    # Terminal hand velocity at zero
         
         # Target position (near grasp site, higher to avoid floor)
         self.target_pos = jnp.array([0.11, 0.0, 0.10])
@@ -142,6 +147,10 @@ class CubeReorientation_CEM(CrossEntropyMethod):
         cube_linvel = v[:, :-1, 16:19]   # (B, N, 3) - linear velocity
         cube_angvel = v[:, :-1, 19:22]   # (B, N, 3) - angular velocity
 
+        # Extract hand states over trajectory
+        hand_pos = q[:, :-1, 0:16]       # (B, N, 16) - hand joint positions
+        hand_vel = v[:, :-1, 0:16]       # (B, N, 16) - hand joint velocities
+
         # 1. Orientation tracking cost
         goal_quat_expanded = jnp.tile(self.goal_quat[None, None, :], (B, N, 1))  # (B, N, 4)
         
@@ -176,8 +185,19 @@ class CubeReorientation_CEM(CrossEntropyMethod):
         angvel_mag = jnp.clip(angvel_mag, 0.0, 100.0)
         vel_cost = self.w_velocity * (jnp.sum(linvel_mag, axis=1) + jnp.sum(angvel_mag, axis=1))  # (B,)
 
+        # 5. NEW: Hand position cost - keep hand joints at zero
+        hand_pos_mag = jnp.sqrt(jnp.sum(hand_pos**2, axis=2) + epsilon)  # (B, N)
+        hand_pos_mag = jnp.clip(hand_pos_mag, 0.0, 100.0)
+        hand_pos_cost = self.w_hand_pos * jnp.sum(hand_pos_mag, axis=1)  # (B,)
+
+        # 6. NEW: Hand velocity cost - keep hand joint velocities at zero
+        hand_vel_mag = jnp.sqrt(jnp.sum(hand_vel**2, axis=2) + epsilon)  # (B, N)
+        hand_vel_mag = jnp.clip(hand_vel_mag, 0.0, 100.0)
+        hand_vel_cost = self.w_hand_vel * jnp.sum(hand_vel_mag, axis=1)  # (B,)
+
         # Total running cost (scaled by timestep)
-        running_cost = (orientation_cost + position_cost + control_cost + vel_cost) * self.sim.dt
+        running_cost = (orientation_cost + position_cost + control_cost + vel_cost + 
+                       hand_pos_cost + hand_vel_cost) * self.sim.dt
         running_cost = jnp.clip(running_cost, 0.0, 1e4)  # Prevent overflow
 
         # ---------------------------------------------------
@@ -189,6 +209,10 @@ class CubeReorientation_CEM(CrossEntropyMethod):
         cube_quat_T = q[:, -1, 19:23]      # (B, 4)
         cube_linvel_T = v[:, -1, 16:19]    # (B, 3)
         cube_angvel_T = v[:, -1, 19:22]    # (B, 3)
+
+        # Terminal hand state
+        hand_pos_T = q[:, -1, 0:16]        # (B, 16)
+        hand_vel_T = v[:, -1, 0:16]        # (B, 16)
 
         # 1. Terminal orientation cost (most important!)
         goal_quat_T = jnp.tile(self.goal_quat[None, :], (B, 1))  # (B, 4)
@@ -209,8 +233,19 @@ class CubeReorientation_CEM(CrossEntropyMethod):
         pos_T_dist = jnp.clip(pos_T_dist, 0.0, 10.0)
         terminal_pos_cost = self.w_terminal_pos * pos_T_dist  # (B,)
 
+        # 4. NEW: Terminal hand position cost
+        hand_pos_T_mag = jnp.sqrt(jnp.sum(hand_pos_T**2, axis=1) + epsilon)  # (B,)
+        hand_pos_T_mag = jnp.clip(hand_pos_T_mag, 0.0, 100.0)
+        terminal_hand_pos_cost = self.w_terminal_hand_pos * hand_pos_T_mag  # (B,)
+
+        # 5. NEW: Terminal hand velocity cost
+        hand_vel_T_mag = jnp.sqrt(jnp.sum(hand_vel_T**2, axis=1) + epsilon)  # (B,)
+        hand_vel_T_mag = jnp.clip(hand_vel_T_mag, 0.0, 100.0)
+        terminal_hand_vel_cost = self.w_terminal_hand_vel * hand_vel_T_mag  # (B,)
+
         # Total terminal cost
-        terminal_cost = terminal_orient_cost + terminal_vel_cost + terminal_pos_cost
+        terminal_cost = (terminal_orient_cost + terminal_vel_cost + terminal_pos_cost + 
+                        terminal_hand_pos_cost + terminal_hand_vel_cost)
         terminal_cost = jnp.clip(terminal_cost, 0.0, 1e4)  # Prevent overflow
         
         # ---------------------------------------------------
@@ -275,9 +310,9 @@ if __name__ == "__main__":
     cem_config = CrossEntropyMethod_Config(
         rng=cem_rng,
         T=2.0,           # Shorter horizon (2s instead of 3s)
-        iterations=20,   # More iterations for convergence
+        iterations=100,   # More iterations for convergence
         N_elite=64,      # More elite samples (25% of batch)
-        N_knots=40,      # Fewer control knots
+        N_knots=10,      # Fewer control knots
         spline_type="ZOH",
     )
 

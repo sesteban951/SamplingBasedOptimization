@@ -4,11 +4,11 @@
   <include file="reorientation_cube.xml" />
 
   <!-- Target cube -->
-  <worldbody>
+  <!-- <worldbody>
     <body name="goal" mocap="true" pos="0.325 0.17 0.0475">
       <geom type="box" size=".035 .035 .035" mass=".108" material="cube" contype="0" conaffinity="0" />
     </body>
-  </worldbody>
+  </worldbody> -->
 
   <!-- Viewpoint and other visual features -->
   <statistic extent="0.4" center="0.3 0.1 0" />
@@ -39,7 +39,7 @@
   <!-- Sensors for the cube -->
   <sensor>
     <framepos name="cube_position" objtype="body" objname="cube" reftype="site" refname="grasp_site" />
-    <framequat name="cube_orientation" objtype="body" objname="cube" reftype="body" refname="goal"/>
+    <!-- <framequat name="cube_orientation" objtype="body" objname="cube" reftype="body" refname="goal"/> -->
   </sensor>
 
 </mujoco>
