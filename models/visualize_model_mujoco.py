@@ -30,7 +30,8 @@ from mujoco.viewer import launch
 # xml_file = "./models/cube/scene.xml"
 
 # xml_file = "./models/g1/g1_21dof.xml"
-xml_file = "./models/g1/g1_planar.xml"
+xml_file = "./models/g1/g1_23dof.xml"
+# xml_file = "./models/g1/g1_planar.xml"
 
 
 ###########################################################
@@ -38,7 +39,7 @@ xml_file = "./models/g1/g1_planar.xml"
 ###########################################################
 
 # load and launch the model
-model =  mujoco.MjModel.from_xml_path(xml_file)
+model = mujoco.MjModel.from_xml_path(xml_file)
 data = mujoco.MjData(model)
 
 # set the print precision

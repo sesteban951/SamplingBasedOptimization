@@ -264,15 +264,15 @@ if __name__ == "__main__":
     #     action_mode="pos"
     # )
     # q0 = jnp.array([0.0, jnp.pi])  # slight offset from upright
-    model_config = Model_Config(
-        xml_path="./models/hopper/hopper.xml",
-        Kp=[100.0, 500.0], 
-        Kd=[5.0, 50.0],  
-        q_actuated_idx=[2, 3], # theta 
-        v_actuated_idx=[2, 3], # theta dot
-        action_mode="pos"
-    )
-    q0 = jnp.array([0.0, 1.0, 0.0, 0.0])  # in the air, leg at zero pos
+    # model_config = Model_Config(
+    #     xml_path="./models/hopper/hopper.xml",
+    #     Kp=[100.0, 500.0], 
+    #     Kd=[5.0, 50.0],  
+    #     q_actuated_idx=[2, 3], # theta 
+    #     v_actuated_idx=[2, 3], # theta dot
+    #     action_mode="pos"
+    # )
+    # q0 = jnp.array([0.0, 1.0, 0.0, 0.0])  # in the air, leg at zero pos
     # model_config = Model_Config(
     #     xml_path="./models/biped/biped.xml",
     #     Kp=[100.0, 100.0, 100.0, 100.0], 
@@ -282,6 +282,29 @@ if __name__ == "__main__":
     #     action_mode="pos"
     # )
     # q0 = jnp.array([0, 0.83, 0, 0.22, -0.415, 0.22, -0.415])  # bent knees
+    # model_config = Model_Config(
+    #     xml_path="./models/biped/biped.xml",
+    #     Kp=[100.0, 100.0, 100.0, 100.0], 
+    #     Kd=[5.0, 5.0, 5.0, 5.0],  
+    #     q_actuated_idx=[3, 4, 5, 6],
+    #     v_actuated_idx=[3, 4, 5, 6],
+    #     action_mode="pos"
+    # )
+    # q0 = jnp.array([0, 0.83, 0, 0.22, -0.415, 0.22, -0.415])  # bent knees
+    model_config = Model_Config(
+        xml_path="./models/g1/g1_planar.xml",
+        Kp=[250, 250, 50, 250, 250, 50, # legs
+            150, 150, 150, 150],        # arms
+        Kd=[3.0, ] * 10,  
+        q_actuated_idx=list(range(10)),
+        v_actuated_idx=list(range(10)),
+        action_mode="pos"
+    )
+    q0 = jnp.array([
+        0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0
+    ])
 
     # parallel sim config
     sim_config = ParallelSim_Config(
