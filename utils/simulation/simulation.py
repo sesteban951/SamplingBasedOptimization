@@ -296,8 +296,8 @@ if __name__ == "__main__":
         Kp=[250, 250, 50, 250, 250, 50, # legs
             150, 150, 150, 150],        # arms
         Kd=[3.0, ] * 10,  
-        q_actuated_idx=list(range(10)),
-        v_actuated_idx=list(range(10)),
+        q_actuated_idx=list(range(3,13)),
+        v_actuated_idx=list(range(3,13)),
         action_mode="pos"
     )
     q0 = jnp.array([
