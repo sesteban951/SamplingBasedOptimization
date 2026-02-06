@@ -27,10 +27,10 @@ from mujoco.viewer import launch
 # xml_file = "./models/biped/biped_platform.xml"
 # xml_file = "./models/biped/biped_cliff.xml"
 
-# xml_file = "./models/cube/scene.xml"
+xml_file = "./models/cube/scene.xml"
 
 # xml_file = "./models/g1/g1_21dof.xml"
-xml_file = "./models/g1/g1_planar.xml"
+# xml_file = "./models/g1/g1_planar.xml"
 
 
 ###########################################################
