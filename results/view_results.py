@@ -22,10 +22,12 @@ import mujoco.viewer
 # experiment = "cartpole"
 # xml_path = f"./models/cartpole/cartpole.xml"
 # experiment = "hopper"
-experiment = "hopper_backflip"
-xml_path = f"./models/hopper/hopper.xml"
+# experiment = "hopper_backflip"
+# xml_path = f"./models/hopper/hopper.xml"
 # experiment = "cube"
 # xml_path = f"./models/cube/scene.xml"
+experiment = "g1_walk"
+xml_path = f"./models/g1/g1_planar.xml"
 
 # load data from csv files
 time_file = f"./results/{experiment}/time.csv"

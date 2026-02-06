@@ -17,6 +17,39 @@ from utils.simulation.simulation import *
 from utils.spline.bezier import *
 from utils.spline.zoh import *
 
+"""
+
+Generalized Positions (q):
+    [0]     root_x                    - Horizontal position (m)
+    [1]     root_z                    - Vertical position (m)
+    [2]     root_y_rotation           - Pitch angle (rad)
+    [3]     left_hip_pitch_joint      - Left hip angle (rad)
+    [4]     left_knee_joint           - Left knee angle (rad)
+    [5]     left_ankle_pitch_joint    - Left ankle angle (rad)
+    [6]     right_hip_pitch_joint     - Right hip angle (rad)
+    [7]     right_knee_joint          - Right knee angle (rad)
+    [8]     right_ankle_pitch_joint   - Right ankle angle (rad)
+    [9]     left_shoulder_pitch_joint - Left shoulder angle (rad)
+    [10]    left_elbow_joint          - Left elbow angle (rad)
+    [11]    right_shoulder_pitch_joint- Right shoulder angle (rad)
+    [12]    right_elbow_joint         - Right elbow angle (rad)
+
+Generalized Velocities (v):
+    [0-12]  Same ordering as q (all 1-DOF joints)
+
+Control Structure (nu=10):
+    [0]     left_hip_pitch_joint
+    [1]     left_knee_joint
+    [2]     left_ankle_pitch_joint
+    [3]     right_hip_pitch_joint
+    [4]     right_knee_joint
+    [5]     right_ankle_pitch_joint
+    [6]     left_shoulder_pitch_joint
+    [7]     left_elbow_joint
+    [8]     right_shoulder_pitch_joint
+    [9]     right_elbow_joint
+
+"""
 
 #############################################################
 # G1 Walk CEM
@@ -35,141 +68,197 @@ class G1_Walk_CEM(CrossEntropyMethod):
         # Create reference trajectory (simple linear interpolation)
         self._make_reference()
 
+
     def _make_reference(self):
         """
-        Create reference trajectory for walking forward.
+        Create reference trajectory for forward walking at 1.0 m/s.
+        
+        Reference includes:
+        - Linear forward motion at constant velocity
+        - Constant standing height
+        - Upright orientation (zero pitch)
         """
         # Extract time parameters
         T = self.T_eff
-        dt = self.sim.dt
         N = self.N
         
-        # Define walking parameters
-        target_forward_velocity = 0.5  # m/s forward velocity
-        target_height = 0.75  # desired height (adjust based on your robot)
+        # Walking parameters
+        self.target_velocity = 1.0      # m/s forward velocity
+        self.target_height = 0.0        # m standing height (displacement from default)
         
         # Create time array
         t_ref = jnp.linspace(0, T, N+1)
         
-        # Reference trajectory
-        # x position: linear forward motion
-        x_ref = target_forward_velocity * t_ref
+        # Reference base positions (first 3 elements of q)
+        x_ref = self.target_velocity * t_ref           # linear forward motion
+        z_ref = jnp.ones(N+1) * self.target_height     # constant height
+        theta_ref = jnp.zeros(N+1)                     # upright (zero pitch)
         
-        # y position: constant height
-        y_ref = jnp.ones(N+1) * target_height
+        # Stack base reference: shape (N+1, 3)
+        self.q_base_ref = jnp.stack([x_ref, z_ref, theta_ref], axis=1)
         
-        # theta: upright orientation
-        theta_ref = jnp.zeros(N+1)
+        # Reference base velocities
+        vx_ref = jnp.ones(N+1) * self.target_velocity  # constant forward velocity
+        vz_ref = jnp.zeros(N+1)                        # no vertical motion
+        vtheta_ref = jnp.zeros(N+1)                    # no rotation
         
-        # Store reference (shape: N+1, 3 for x, y, theta)
-        self.q_ref = jnp.stack([x_ref, y_ref, theta_ref], axis=1)
+        # Stack velocity reference: shape (N+1, 3)
+        self.v_base_ref = jnp.stack([vx_ref, vz_ref, vtheta_ref], axis=1)
         
-        # Reference velocities
-        vx_ref = jnp.ones(N+1) * target_forward_velocity
-        vy_ref = jnp.zeros(N+1)
-        vtheta_ref = jnp.zeros(N+1)
-        self.v_ref = jnp.stack([vx_ref, vy_ref, vtheta_ref], axis=1)
+        # Nominal joint configuration
+        self.q_joint_nominal = jnp.array([
+            0.0, 0.0, 0.0,  # left leg (hip, knee, ankle)
+            0.0, 0.0, 0.0,  # right leg (hip, knee, ankle)
+            0.2, 1.0,       # left arm (shoulder, elbow)
+            0.2, 1.0        # right arm (shoulder, elbow)
+        ])
+        
+        # ===== COST WEIGHTS =====
+
+        # Running cost weights (per timestep)
+        self.w_px_running      = 1.0     # horizontal position tracking
+        self.w_pz_running      = 10.0    # vertical position tracking (keep at default height)
+        self.w_theta_running   = 10.0    # pitch angle (stay upright)
+        self.w_qjoint_running  = 1.0      # joint position tracking
+
+        self.w_vx_running      = 0.1      # forward velocity tracking
+        self.w_vz_running      = 0.1     # vertical velocity (minimize bouncing)
+        self.w_thetadot_running = 0.1    # angular velocity (minimize spinning)
+        self.w_vjoint_running  = 0.1     # joint velocity regularization
+        
+        self.w_control_running = 0.01    # control effort
+
+        # Terminal cost weights (10x running weights)
+        self.w_px_terminal      = 10.0 * self.w_px_running       
+        self.w_pz_terminal      = 100.0 * self.w_pz_running       
+        self.w_theta_terminal   = 100.0 * self.w_theta_running    
+        self.w_qjoint_terminal  = 10.0 * self.w_qjoint_running   
+
+        self.w_vx_terminal      = 10.0 * self.w_vx_running       
+        self.w_vz_terminal      = 10.0 * self.w_vz_running       
+        self.w_thetadot_terminal = 10.0 * self.w_thetadot_running
+        self.w_vjoint_terminal  = 10.0 * self.w_vjoint_running   
+        
+        print(f"Reference: {self.target_velocity} m/s forward, {self.target_height} m height")
+
 
     def cost(self, q, v, tau):
         """
-        Cost function for walking forward trajectory optimization.
+        Quadratic cost with explicit weights for each state component.
+        
+        State components:
+            - px, pz, theta (base position)
+            - vx, vz, thetadot (base velocity)
+            - q_joints (joint positions)
+            - v_joints (joint velocities)
+            - tau (controls)
         
         Args:
-            q: jnp.array, shape (B, N+1, nq) - generalized position trajectory.
-            v: jnp.array, shape (B, N+1, nv) - generalized velocity trajectory.
-            tau: jnp.array, shape (B, N, nu) - control input trajectory.
+            q: jnp.array, shape (B, N+1, nq) - positions
+            v: jnp.array, shape (B, N+1, nv) - velocities
+            tau: jnp.array, shape (B, N, nu) - controls
         
         Returns:
-            J: jnp.array, shape (B,) - cost for each batch.
+            J: jnp.array, shape (B,) - cost per trajectory
         """
-        B = q.shape[0]
-        N = q.shape[1] - 1
+        B, N_plus_1, nq = q.shape
+        N = N_plus_1 - 1
         
-        # Extract base states (x, y, theta are first 3 elements)
-        x = q[:, :, 0]       # shape (B, N+1)
-        y = q[:, :, 1]       # shape (B, N+1)
-        theta = q[:, :, 2]   # shape (B, N+1)
+        # ===== EXTRACT STATE COMPONENTS =====
         
-        vx = v[:, :, 0]      # shape (B, N+1)
-        vy = v[:, :, 1]      # shape (B, N+1)
-        vtheta = v[:, :, 2]  # shape (B, N+1)
+        # Base position components
+        px = q[:, :, 0]        # (B, N+1) - horizontal position
+        pz = q[:, :, 1]        # (B, N+1) - vertical position
+        theta = q[:, :, 2]     # (B, N+1) - pitch angle
         
-        # Joint positions (indices 3 onwards)
-        q_joints = q[:, :, 3:]  # shape (B, N+1, nq-3)
-        v_joints = v[:, :, 3:]  # shape (B, N+1, nv-3)
+        # Base velocity components
+        vx = v[:, :, 0]        # (B, N+1) - forward velocity
+        vz = v[:, :, 1]        # (B, N+1) - vertical velocity
+        thetadot = v[:, :, 2]  # (B, N+1) - angular velocity
         
-        # ===== 1. FORWARD PROGRESS REWARD =====
-        # Maximize forward distance traveled (negative cost)
-        forward_distance = x[:, -1] - x[:, 0]  # final - initial x position
-        cost_forward = -100.0 * forward_distance
+        # Joint states
+        q_joints = q[:, :, 3:]  # (B, N+1, 10)
+        v_joints = v[:, :, 3:]  # (B, N+1, 10)
         
-        # Encourage consistent forward velocity
-        target_vx = 0.5  # m/s
-        cost_velocity = 10.0 * jnp.sum((vx - target_vx)**2, axis=1) / (N+1)
+        # ===== REFERENCE TRAJECTORIES =====
         
-        # ===== 2. HEIGHT MAINTENANCE =====
-        # Keep robot at desired height
-        target_height = 0.75  # adjust for your robot
-        cost_height = 50.0 * jnp.sum((y - target_height)**2, axis=1) / (N+1)
+        px_ref = self.q_base_ref[None, :, 0]       # (1, N+1)
+        pz_ref = self.q_base_ref[None, :, 1]       # (1, N+1)
+        theta_ref = self.q_base_ref[None, :, 2]    # (1, N+1)
         
-        # ===== 3. UPRIGHT POSTURE =====
-        # Minimize deviation from upright orientation
-        cost_orientation = 100.0 * jnp.sum(theta**2, axis=1) / (N+1)
+        vx_ref = self.v_base_ref[None, :, 0]       # (1, N+1)
+        vz_ref = self.v_base_ref[None, :, 1]       # (1, N+1)
+        thetadot_ref = self.v_base_ref[None, :, 2] # (1, N+1)
         
-        # Penalize angular velocity (avoid spinning)
-        cost_angular_vel = 20.0 * jnp.sum(vtheta**2, axis=1) / (N+1)
+        q_joints_ref = self.q_joint_nominal[None, None, :]  # (1, 1, 10)
+        v_joints_ref = jnp.zeros((1, 1, 10))                # (1, 1, 10)
         
-        # ===== 4. CONTROL EFFORT =====
-        # Penalize large control inputs
-        cost_control = 0.01 * jnp.sum(tau**2, axis=(1, 2)) / N
+        # ===== RUNNING COSTS =====
         
-        # ===== 5. SMOOTHNESS =====
-        # Penalize large accelerations (differences in velocity)
-        dv = v[:, 1:, :] - v[:, :-1, :]  # shape (B, N, nv)
-        cost_smoothness = 1.0 * jnp.sum(dv**2, axis=(1, 2)) / N
+        # Base position errors (sum over time)
+        cost_px = jnp.sum((px - px_ref)**2, axis=1)           # (B,)
+        cost_pz = jnp.sum((pz - pz_ref)**2, axis=1)           # (B,)
+        cost_theta = jnp.sum((theta - theta_ref)**2, axis=1)  # (B,)
         
-        # Penalize control input changes (smooth control)
-        dtau = tau[:, 1:, :] - tau[:, :-1, :]  # shape (B, N-1, nu)
-        cost_control_smoothness = 0.1 * jnp.sum(dtau**2, axis=(1, 2)) / (N-1)
+        # Base velocity errors (sum over time)
+        cost_vx = jnp.sum((vx - vx_ref)**2, axis=1)                # (B,)
+        cost_vz = jnp.sum((vz - vz_ref)**2, axis=1)                # (B,)
+        cost_thetadot = jnp.sum((thetadot - thetadot_ref)**2, axis=1)  # (B,)
         
-        # ===== 6. JOINT LIMITS =====
-        # Soft penalty for approaching joint limits (adjust limits for your robot)
-        q_joint_nominal = jnp.zeros_like(q_joints)  # nominal pose
-        cost_joint_deviation = 1.0 * jnp.sum((q_joints - q_joint_nominal)**2, axis=(1, 2)) / (N+1)
+        # Joint errors (sum over time and joints)
+        cost_qjoint = jnp.sum((q_joints - q_joints_ref)**2, axis=(1, 2))  # (B,)
+        cost_vjoint = jnp.sum((v_joints - v_joints_ref)**2, axis=(1, 2))  # (B,)
         
-        # Penalize large joint velocities
-        cost_joint_vel = 0.5 * jnp.sum(v_joints**2, axis=(1, 2)) / (N+1)
+        # Control effort (sum over time and actuators)
+        cost_control = jnp.sum(tau**2, axis=(1, 2))  # (B,)
         
-        # ===== 7. STABILITY METRICS =====
-        # Penalize excessive vertical velocity (avoid bouncing)
-        cost_vy = 10.0 * jnp.sum(vy**2, axis=1) / (N+1)
+        # ===== TERMINAL COSTS =====
         
-        # ===== 8. TERMINAL COSTS =====
-        # Encourage good final state
-        final_x = x[:, -1]
-        final_vx = vx[:, -1]
-        final_theta = theta[:, -1]
+        # Final base position errors
+        cost_px_final = (px[:, -1] - px_ref[0, -1])**2              # (B,)
+        cost_pz_final = (pz[:, -1] - pz_ref[0, -1])**2              # (B,)
+        cost_theta_final = (theta[:, -1] - theta_ref[0, -1])**2     # (B,)
         
-        cost_final_velocity = 20.0 * (final_vx - target_vx)**2
-        cost_final_orientation = 50.0 * final_theta**2
+        # Final base velocity errors
+        cost_vx_final = (vx[:, -1] - vx_ref[0, -1])**2                   # (B,)
+        cost_vz_final = (vz[:, -1] - vz_ref[0, -1])**2                   # (B,)
+        cost_thetadot_final = (thetadot[:, -1] - thetadot_ref[0, -1])**2 # (B,)
+        
+        # Final joint errors
+        cost_qjoint_final = jnp.sum((q_joints[:, -1, :] - q_joints_ref[0, 0, :])**2, axis=1)  # (B,)
+        cost_vjoint_final = jnp.sum((v_joints[:, -1, :] - v_joints_ref[0, 0, :])**2, axis=1)  # (B,)
         
         # ===== TOTAL COST =====
-        J = (cost_forward + 
-            cost_velocity +
-            cost_height + 
-            cost_orientation + 
-            cost_angular_vel +
-            cost_control + 
-            cost_smoothness +
-            cost_control_smoothness +
-            cost_joint_deviation +
-            cost_joint_vel +
-            cost_vy +
-            cost_final_velocity +
-            cost_final_orientation)
+        
+        # Running costs (integrated over time)
+        cost_running = (
+            self.w_px_running * cost_px +
+            self.w_pz_running * cost_pz +
+            self.w_theta_running * cost_theta +
+            self.w_vx_running * cost_vx +
+            self.w_vz_running * cost_vz +
+            self.w_thetadot_running * cost_thetadot +
+            self.w_qjoint_running * cost_qjoint +
+            self.w_vjoint_running * cost_vjoint +
+            self.w_control_running * cost_control
+        ) * self.sim.dt
+        
+        # Terminal costs (final timestep only)
+        cost_terminal = (
+            self.w_px_terminal * cost_px_final +
+            self.w_pz_terminal * cost_pz_final +
+            self.w_theta_terminal * cost_theta_final +
+            self.w_vx_terminal * cost_vx_final +
+            self.w_vz_terminal * cost_vz_final +
+            self.w_thetadot_terminal * cost_thetadot_final +
+            self.w_qjoint_terminal * cost_qjoint_final +
+            self.w_vjoint_terminal * cost_vjoint_final
+        )
+        
+        J = cost_running + cost_terminal
         
         return J
-        
+
 #############################################################
 # EXAMPLE USAGE
 #############################################################
@@ -193,28 +282,28 @@ if __name__ == "__main__":
     # model config
     model_config = Model_Config(
         xml_path="./models/g1/g1_planar.xml",
-        Kp=[250, 250, 50, 250, 250, 50, # legs
+        Kp=[300, 300, 100, 300, 300, 100, # legs
             150, 150, 150, 150],        # arms
         Kd=[3.0, ] * 10,  
-        q_actuated_idx=list(range(10)),
-        v_actuated_idx=list(range(10)),
+        q_actuated_idx=list(range(3,13)),
+        v_actuated_idx=list(range(3,13)),
         action_mode="pos"
     )
 
     # parallel sim config
     sim_config = ParallelSim_Config(
-        batch_size = 2048,
+        batch_size = 4096,
     )
 
     # cem config
     cem_rng = jax.random.PRNGKey(42)
     cem_config = CrossEntropyMethod_Config(
         rng=cem_rng,
-        T=2.0,
-        iterations=200,
-        N_elite=1024,
-        N_knots=2*10,
-        spline_type="ZOH",
+        T=3.0,
+        iterations=100,
+        N_elite=2048,
+        N_knots=30,
+        spline_type="Bezier",
     )
 
     # create the CEM optimizer
@@ -228,7 +317,7 @@ if __name__ == "__main__":
     q0 = jnp.array([
         0.0, 0.0, 0.0,
         0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0
+        0.2, 1.0, 0.2, 1.0
     ])
     v0 = jnp.zeros(cem_optimizer.sim.nv)
 

@@ -361,11 +361,13 @@ class CrossEntropyMethod(ABC):
 
             # compute the average elite cost for monitoring
             J_elite_avg = jnp.mean(J_elite)
+            J_elite_best = J_elite.min()
 
             # print iteration info
             itr_width = len(str(self.cem_config.iterations))  # e.g., 400 → width=3
             print(f"Iteration {itr+1:0{itr_width}d}/{self.cem_config.iterations} | "
                   f"J_elite_avg: {J_elite_avg:.4f} | "
+                  f"J_elite_best: {J_elite_best:.4f} | "
                   f"J_best: {J_opt:.4f} | "
                   f"‖Σ‖: {cov_norm:.4f}")
             
