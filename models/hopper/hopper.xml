@@ -27,7 +27,7 @@
         <body name="torso" pos="0 0 0.0">
             <joint name="px"    type="slide" axis="1 0 0"/>
             <joint name="pz"    type="slide" axis="0 0 1"/>
-            <joint name="theta" type="hinge" axis="0 1 0" limited="true" range="-360.0 360.0"/>
+            <joint name="theta" type="hinge" axis="0 1 0" limited="true" range="-405.0 405.0"/>
             <geom name="torso" type="sphere" size="0.1" rgba="1.0 0.424 0.047 1" contype="2" conaffinity="1"/>
             <site name="torso_site" type="sphere" size="0.101" rgba="0 0 0 0"/>
             <geom name="upper_leg" type="cylinder" fromto="0 0 0 0 0 -0.5" size="0.04" rgba="0.4 0.4 0.4 0.5"/>
