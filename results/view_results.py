@@ -19,18 +19,19 @@ import mujoco.viewer
 #################################################################
 
 # which data to load
-# system = "cartpole"
-# xml_path = f"./models/cartpole/cartpole.xml"
-# system = "hopper"
+experiment = "cartpole"
+xml_path = f"./models/cartpole/cartpole.xml"
+# experiment = "hopper"
+# experiment = "hopper_backflip"
 # xml_path = f"./models/hopper/hopper.xml"
-system = "cube"
-xml_path = f"./models/cube/scene.xml"
+# experiment = "cube"
+# xml_path = f"./models/cube/scene.xml"
 
 # load data from csv files
-time_file = f"./results/{system}/time.csv"
-q_file = f"./results/{system}/q_opt.csv"
-v_file = f"./results/{system}/v_opt.csv"
-tau_file = f"./results/{system}/tau_opt.csv"
+time_file = f"./results/{experiment}/time.csv"
+q_file = f"./results/{experiment}/q_opt.csv"
+v_file = f"./results/{experiment}/v_opt.csv"
+tau_file = f"./results/{experiment}/tau_opt.csv"
 
 # load data from csv files
 times = np.loadtxt(time_file, delimiter=",")
