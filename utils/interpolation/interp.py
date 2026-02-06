@@ -91,6 +91,7 @@ def vec_finite_diff(v1, v2, dt):
 
     return (v2 - v1) / dt
 
+
 def quat_finite_diff(q1, q2, dt):
     """
     Compute angular vel from finite difference of two quaternions in [qw, qx, qy, qz] format.
@@ -144,6 +145,7 @@ def quat_conj(q):
     """
     return np.array([q[0], -q[1], -q[2], -q[3]])
 
+
 def quat_mult(a, b):
     """
     Hamilton product of two quaternions in [qw, qx, qy, qz] format.
@@ -167,8 +169,8 @@ def quat_mult(a, b):
         aw*bz + ax*by - ay*bx + az*bw
     ])
     return c
-    
-# quaternion to rotation matrix
+
+
 def quat_to_rot_matrix(q):
     """
     Convert a quaternion to a rotation matrix.
@@ -192,7 +194,7 @@ def quat_to_rot_matrix(q):
 
     return R
 
-# vector in body frame to world frame
+
 def body_to_world(v_B, q):
     """
     Transform a vector from the body frame to the world frame using a quaternion.
@@ -205,17 +207,49 @@ def body_to_world(v_B, q):
     Returns:
         v_W: (np.array) The same vector transformed to the world frame.
     """
+    v_B = np.asarray(v_B, dtype=float).reshape(3,)
+    q = np.asarray(q, dtype=float)
+    q = q / np.linalg.norm(q)  # safety
+
     R = quat_to_rot_matrix(q)
     v_W = R @ v_B
+
     return v_W
+
+
+def world_to_body(v_W, q):
+    """
+    Transform a vector from the world frame to the body frame using a quaternion.
+
+    Assumes q describes the orientation of the body frame relative to the world frame,
+    so that R transforms vectors from body to world:
+        v_W = R @ v_B
+
+    Therefore:
+        v_B = R.T @ v_W
+
+    Args:
+        v_W: (np.array) Vector in the world frame, shape (3,)
+        q:   (np.array) Quaternion [qw, qx, qy, qz]
+    Returns:
+        v_B: (np.array) Vector in the body frame, shape (3,)
+    """
+    v_W = np.asarray(v_W, dtype=float).reshape(3,)
+    q = np.asarray(q, dtype=float)
+    q = q / np.linalg.norm(q)  # safety
+
+    R = quat_to_rot_matrix(q)  
+    v_B = R.T @ v_W            
+
+    return v_B
+
 
 #############################################################
 # EXAMPLE USAGE
 #############################################################
 
 if __name__ == "__main__":
-
-    q = np.array([np.cos(np.pi/4), 0, 0, np.sin(np.pi/4)])  # +90deg about z
-    R = quat_to_rot_matrix(q)
     
+    q = np.array([np.cos(np.pi/4), 0, 0, np.sin(np.pi/4)])
+    R = quat_to_rot_matrix(q)
     print(R)
