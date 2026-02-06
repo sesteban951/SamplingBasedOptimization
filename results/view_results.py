@@ -19,11 +19,11 @@ import mujoco.viewer
 #################################################################
 
 # which data to load
-experiment = "cartpole"
-xml_path = f"./models/cartpole/cartpole.xml"
+# experiment = "cartpole"
+# xml_path = f"./models/cartpole/cartpole.xml"
 # experiment = "hopper"
-# experiment = "hopper_backflip"
-# xml_path = f"./models/hopper/hopper.xml"
+experiment = "hopper_backflip"
+xml_path = f"./models/hopper/hopper.xml"
 # experiment = "cube"
 # xml_path = f"./models/cube/scene.xml"
 
