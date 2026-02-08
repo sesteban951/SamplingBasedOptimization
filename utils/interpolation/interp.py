@@ -7,6 +7,9 @@
 # standard imports
 import numpy as np
 
+# custom imports
+from utils.kinematics import kin
+
 
 def lerp(v1, v2, alpha):
     """
@@ -110,138 +113,18 @@ def quat_finite_diff(q1, q2, dt):
     # compute the relative rotation
     q1 = q1 / np.linalg.norm(q1)
     q2 = q2 / np.linalg.norm(q2)
-    qd = quat_mult(q2, quat_conj(q1))  # equivalent of dv = v2 - v1 for quaternions
-    qd = (qd / np.linalg.norm(qd))
+    
+    # compute quaternion error
+    q_err = kin.quat_diff(q1, q2)
 
-    # take the shortest path if qd[0] < 0.0
-    if qd[0] < 0:
-        qd = -qd
+    # compute the logarithm of the quaternion error
+    log_q_err = kin.quat_log(q_err)
 
-    # extract the vector part of the quaternion
-    w = qd[0]
-    v = qd[1:]
-    v_norm = np.linalg.norm(v)
-
-    # small enough to do linear approximation
-    if v_norm < 1e-6:
-        omega = 2 * v / dt
-    # use the angle-axis representation to compute the angular velocity
-    else:
-        u = v / v_norm
-        angle = 2 * np.arctan2(v_norm, w)
-        omega = angle * u / dt
+    # compute the angular velocity
+    omega = log_q_err / dt
 
     return omega
 
-
-def quat_conj(q):
-    """
-    Compute the conjugate of a quaternion in [qw, qx, qy, qz] format.
-
-    Args:
-        q: (np.array) Quaternion.
-    Returns:
-        q_conj: (np.array) Conjugate of the quaternion.
-    """
-    return np.array([q[0], -q[1], -q[2], -q[3]])
-
-
-def quat_mult(a, b):
-    """
-    Hamilton product of two quaternions in [qw, qx, qy, qz] format.
-    c = a ⊗ b
-
-    Args:
-        a: (np.array) First quaternion.
-        b: (np.array) Second quaternion.
-    Returns:
-        c: (np.array) Product of the two quaternions.
-    """
-    # take the components of the quaternions
-    aw, ax, ay, az = a
-    bw, bx, by, bz = b
-
-    # Hamilton product
-    c = np.array([
-        aw*bw - ax*bx - ay*by - az*bz,
-        aw*bx + ax*bw + ay*bz - az*by,
-        aw*by - ax*bz + ay*bw + az*bx,
-        aw*bz + ax*by - ay*bx + az*bw
-    ])
-    return c
-
-
-def quat_to_rot_matrix(q):
-    """
-    Convert a quaternion to a rotation matrix.
-    Assumes q is describing the orientation of the body frame relative to the
-    world frame, so that R transforms vectors from body frame to world frame.
-    v_W = R @ v_B
-
-    Args:
-        q: (np.array) Quaternion in [qw, qx, qy, qz] format.
-    Returns:
-        R: (np.array) Rotation matrix corresponding to the quaternion.
-    """
-    # convert quaternion to rotation matrix
-    q = q / np.linalg.norm(q)
-    w, x, y, z = q
-    R = np.array([
-        [1 - 2*(y**2 + z**2),     2*(x*y - z*w),       2*(x*z + y*w)],
-        [    2*(x*y + z*w),   1 - 2*(x**2 + z**2),     2*(y*z - x*w)],
-        [    2*(x*z - y*w),       2*(y*z + x*w),   1 - 2*(x**2 + y**2)]
-    ])
-
-    return R
-
-
-def body_to_world(v_B, q):
-    """
-    Transform a vector from the body frame to the world frame using a quaternion.
-    Assumes q is describing the orientation of the body frame relative to the
-    world frame, so that R transforms vectors from body frame to world frame.
-
-    Args:
-        v_B: (np.array) Some vector in the body frame.
-        q:   (np.array) Quaternion representing the orientation of the body frame in the world frame.
-    Returns:
-        v_W: (np.array) The same vector transformed to the world frame.
-    """
-    v_B = np.asarray(v_B, dtype=float).reshape(3,)
-    q = np.asarray(q, dtype=float)
-    q = q / np.linalg.norm(q)  # safety
-
-    R = quat_to_rot_matrix(q)
-    v_W = R @ v_B
-
-    return v_W
-
-
-def world_to_body(v_W, q):
-    """
-    Transform a vector from the world frame to the body frame using a quaternion.
-
-    Assumes q describes the orientation of the body frame relative to the world frame,
-    so that R transforms vectors from body to world:
-        v_W = R @ v_B
-
-    Therefore:
-        v_B = R.T @ v_W
-
-    Args:
-        v_W: (np.array) Vector in the world frame, shape (3,)
-        q:   (np.array) Quaternion [qw, qx, qy, qz]
-    Returns:
-        v_B: (np.array) Vector in the body frame, shape (3,)
-    """
-    v_W = np.asarray(v_W, dtype=float).reshape(3,)
-    q = np.asarray(q, dtype=float)
-    q = q / np.linalg.norm(q)  # safety
-
-    R = quat_to_rot_matrix(q)  
-    v_B = R.T @ v_W            
-
-    return v_B
 
 
 #############################################################
@@ -251,5 +134,5 @@ def world_to_body(v_W, q):
 if __name__ == "__main__":
     
     q = np.array([np.cos(np.pi/4), 0, 0, np.sin(np.pi/4)])
-    R = quat_to_rot_matrix(q)
+    R = kin.quat_to_rot_matrix(q)
     print(R)
