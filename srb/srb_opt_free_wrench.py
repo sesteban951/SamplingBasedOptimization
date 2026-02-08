@@ -12,10 +12,11 @@ import os
 import casadi as ca
 
 # custom imports
-from utils import interpolation.interp
+from utils.kinematics import kin
+
 
 ##############################################################
-# Single Rigid Body Dynamics
+# Single Rigid Body for Nonlinear Programming
 ##############################################################
 
 class SRBDynamics:
@@ -30,36 +31,30 @@ class SRBDynamics:
         # input dimension
         self.nu = 6   # [F, M]
 
-        # system parameters
+        # system parameters (pulled from pinocchio + 29dof urdf)
         self.m = 33.34      # mass [kg]
         self.g = 9.81       # gravity [m/s^2]
         self.I = ca.vertcat(
             ca.horzcat( 3.0413, -0.2082, -0.5213),
             ca.horzcat(-0.2082,  3.3526,  0.097 ),
             ca.horzcat(-0.5213,  0.097 ,  1.0543),
-        )
+        ) # body frame inertia matrix [kg*m^2]
 
-        # simple quadratic 
-        w_pos = 10.0
-        w_ori = 8.0
-        w_vel = 2.0
-        w_omega = 2.0
+        # simple quadratic penalalty on states
         self.Qx = ca.diag(ca.vertcat(
-            w_pos, w_pos, w_pos,        # p_com
-            w_ori, w_ori, w_ori,        # quat vector part
-            w_vel, w_vel, w_vel,        # v_com
-            w_omega, w_omega, w_omega   # w_body
+            10.0, 10.0, 10.0,  # px, py, pz
+            10.0, 10.0, 10.0,  # qx, qy, qz
+            1.0, 1.0, 1.0,     # vx, vy, vz
+            1.0, 1.0, 1.0      # wx, wy, wz
         ))
 
-        # penalize forces and positions
-        w_force = 0.01
-        w_moment = 0.01
+        # penalize forces and moments
         self.Qu = ca.diag(ca.vertcat(
-            w_force, w_force, w_force,    # F
-            w_moment, w_moment, w_moment  # M
+            0.1, 0.1, 0.1, # fx, fy, fz
+            0.1, 0.1, 0.1  # mx, my, mz
         ))
 
-        # terminal weights (usually larger than running)
+        # terminal weights
         self.Qx_f = 500.0 * self.Qx
 
     ###############################################################
@@ -72,30 +67,23 @@ class SRBDynamics:
         
         # extract the state
         p_com =  x[0:3]    # position in world frame
-        quat =   x[3:7]    # orientation quaternion q_BW (body -> world), [w,x,y,z]
+        quat =   x[3:7]    # orientation quaternion q_BW, body in world, [w,x,y,z]
         v_com =  x[7:10]   # linear velocity in world frame
         w_body = x[10:13]  # body frame angular velocity
 
-        # extract the inputs (world frame)
-        F_left =  u[0:3]  # left foot force    in world frame
-        F_right = u[3:6]  # right foot force   in world frame
-        M_left =  u[6:9]  # left foot moment   in world frame
-        M_right = u[9:12] # right foot moment  in world frame
+        # extract the inputs (world frame wrench)
+        F = u[0:3]  # force applied to the body in world frame
+        M = u[3:6]  # moment applied to the body in world frame
 
         # rotation of body expressed in world frame
-        R_BW = self._quat_to_rotmat(quat)
+        # R_BW = self._quat_to_rotmat(quat)
+        R_BW = kin.quat_to_rot_matrix_ca(quat)
 
         # net force in the world frame
-        F_net_W = F_left + F_right + ca.DM([0, 0, -self.m * self.g])
-
-        # choose a a random point on the ground for each foot
-        p_left = ca.DM([0.0,   0.1, 0.0])   # left foot position in world frame
-        p_right = ca.DM([0.0, -0.1, 0.0])  # right foot position in world frame
+        F_net_W = F + ca.DM([0, 0, -self.m * self.g])
 
         # net moment about COM
-        M_net_W = (ca.cross(p_left - p_com, F_left) 
-                 + ca.cross(p_right - p_com, F_right)
-                 + M_left + M_right)
+        M_net_W = M
         M_net_B = R_BW.T @ M_net_W  # express moment in body frame
 
         # translational dynamics
@@ -104,7 +92,7 @@ class SRBDynamics:
 
         # quaternion rate
         w_body_quat = ca.vertcat(0, w_body)  # augment angular velocity to quaternion form [0, wx, wy, wz]
-        quat_dot = 0.5 * self._quat_hamilton(quat, w_body_quat)
+        quat_dot = 0.5 * kin.quat_mult_ca(quat, w_body_quat)
         
         # angular dynamics
         w_body_dot = ca.solve(self.I, M_net_B - ca.cross(w_body, self.I @ w_body))
@@ -121,14 +109,17 @@ class SRBDynamics:
     
     # SRB model discrete dynamics using Euler integration
     def f_disc(self, x, u, dt):
+
+        # # Euler integration
+        # k1 = self.f_cont(x, u)
+        # x_next = x + dt * k1
+
+        # RK2
+        k1 = self.f_cont(x, u)
+        k2 = self.f_cont(x + 0.5 * dt * k1, u)
+        x_next = x + dt * k2
         
-        # get the continuous dynamics vector
-        x_dot = self.f_cont(x, u)
-
-        # Euler integration
-        x_next = x + dt * x_dot
-
-        # normalize the quaternion
+        # project back to unit quaternion manifold
         quat_next = x_next[3:7]
         quat_next = quat_next / (ca.norm_2(quat_next) + 1e-12)
         
@@ -141,96 +132,6 @@ class SRBDynamics:
         )
         
         return x_next
-    
-    ###############################################################
-    # Helper Functions
-    ###############################################################
-
-    # quaternion to rotation matrix
-    def _quat_to_rotmat(self, q):
-
-        # extract quaternion components
-        qw = q[0]
-        qx = q[1]
-        qy = q[2]
-        qz = q[3]
-        
-        # compute rotation matrix
-        R_00 = 1 - 2*(qy*qy + qz*qz)
-        R_01 = 2*(qx*qy - qz*qw)
-        R_02 = 2*(qx*qz + qy*qw)
-        R_10 = 2*(qx*qy + qz*qw)
-        R_11 = 1 - 2*(qx*qx + qz*qz)
-        R_12 = 2*(qy*qz - qx*qw)
-        R_20 = 2*(qx*qz - qy*qw)
-        R_21 = 2*(qy*qz + qx*qw)
-        R_22 = 1 - 2*(qx*qx + qy*qy)
-        R = ca.vertcat(
-            ca.horzcat(R_00, R_01, R_02),
-            ca.horzcat(R_10, R_11, R_12),
-            ca.horzcat(R_20, R_21, R_22)
-        )
-
-        return R
-    
-    # rotation matrix to quaternion
-    def _rotmat_to_euler_ZYX(self, R):
-
-        R_20 = R[2, 0]
-        R_20 = np.clip(R_20, -1.0, 1.0)  # numerical safety
-
-        # compute pitch
-        p = np.arcsin(-R_20)
-
-        # check gimbal lock
-        eps = 1e-8
-        if abs(np.cos(p)) > eps:
-            r = np.arctan2(R[2, 1], R[2, 2])
-            y  = np.arctan2(R[1, 0], R[0, 0])
-        else:
-            # gimbal lock: yaw-roll coupling
-            # set roll = 0 and compute yaw from other terms
-            r = 0.0
-            y  = np.arctan2(-R[0, 1], R[1, 1])
-
-        return y, p, r
-
-    
-    # quaternion Hamilton product
-    def _quat_hamilton(self, a, b):
-        """
-        Hamilton product c = a ⊗ b for quaternions in [w, x, y, z] convention.
-        Returns a 4x1 SX vector.
-        """
-
-        # unpck the quaternions
-        aw, ax, ay, az = a[0], a[1], a[2], a[3]
-        bw, bx, by, bz = b[0], b[1], b[2], b[3]
-
-        # compute the Hamilton product
-        c = ca.vertcat(
-            aw*bw - ax*bx - ay*by - az*bz,
-            aw*bx + ax*bw + ay*bz - az*by,
-            aw*by - ax*bz + ay*bw + az*bx,
-            aw*bz + ax*by - ay*bx + az*bw
-        )
-
-        return c
-    
-    # quaternion conjugate
-    def _quat_conj(self, q):
-        return ca.vertcat(q[0], -q[1], -q[2], -q[3])
-
-    # quaternion error
-    def _quat_error(self, a, b):
-        
-        # compute the conjugate of a
-        a_conj = self._quat_conj(a)
-
-        # compute the error quaternion
-        q_err = self._quat_hamilton(b, a_conj)
-
-        return q_err
     
     # friction cone matrix for single force
     def _friction_cone_matrix(self, mu):
@@ -259,14 +160,13 @@ class SRBDynamics:
         vel_err = x[7:10] - x_goal[7:10]
         omega_err = x[10:13] - x_goal[10:13]
 
-        quat_err = self._quat_error(x[3:7], x_goal[3:7])
-        quat_err = ca.if_else(quat_err[0] < 0, -quat_err, quat_err)
-        quat_err_img = quat_err[1:4]
+        quat_err = kin.quat_diff_ca(x[3:7], x_goal[3:7])  # like err = x_goal - x
+        quat_err_log = kin.quat_log_ca(quat_err)
 
         # state error vector
         e_x = ca.vertcat(
             pos_err,
-            quat_err_img,
+            quat_err_log,
             vel_err,
             omega_err
         )
@@ -275,18 +175,11 @@ class SRBDynamics:
         cost_state = 0.5 * e_x.T @ self.Qx @ e_x
 
         # compute errors
-        F_left = u[0:3]
-        F_right = u[3:6]
-        M_left_W = u[6:9]
-        M_right_W = u[9:12]
-
+        F = u[0:3]
+        M = u[3:6]
+        
         # input error vector
-        e_u = ca.vertcat(
-            F_left,
-            F_right,
-            M_left_W,
-            M_right_W
-        )
+        e_u = ca.vertcat(F, M)
 
         # input cost
         cost_input = 0.5 * e_u.T @ self.Qu @ e_u
@@ -304,14 +197,13 @@ class SRBDynamics:
         vel_err   = x[7:10]  - x_goal[7:10]
         omega_err = x[10:13] - x_goal[10:13]
 
-        quat_err = self._quat_error(x[3:7], x_goal[3:7])
-        quat_err = ca.if_else(quat_err[0] < 0, -quat_err, quat_err)
-        quat_err_img = quat_err[1:4]
+        quat_err = kin.quat_diff_ca(x[3:7], x_goal[3:7])  # like err = x_goal - x
+        quat_err_log = kin.quat_log_ca(quat_err)
         
         # state error vector
         e = ca.vertcat(
             pos_err,
-            quat_err_img,
+            quat_err_log,
             vel_err,
             omega_err
         )
@@ -324,30 +216,22 @@ class SRBDynamics:
 ##############################################################
 
 # state input indices
-IDX_P      = slice(0, 3)
-IDX_Q      = slice(3, 7)
-IDX_V      = slice(7, 10)
-IDX_W      = slice(10, 13)
+IDX_P = slice(0, 3)
+IDX_Q = slice(3, 7)
+IDX_V = slice(7, 10)
+IDX_W = slice(10, 13)
 
 # force input indices
-IDX_FL_X   = 0
-IDX_FL_Y   = 1
-IDX_FL_Z   = 2
-IDX_FR_X   = 3
-IDX_FR_Y   = 4
-IDX_FR_Z   = 5
-IDX_FL     = slice(0, 3)
-IDX_FR     = slice(3, 6)
+IDX_F = slice(0, 3)
+IDX_M = slice(3, 6)
 
 # moment input indices
-IDX_ML_X   = 6
-IDX_ML_Y   = 7
-IDX_ML_Z   = 8
-IDX_MR_X   = 9
-IDX_MR_Y   = 10
-IDX_MR_Z   = 11
-IDX_ML     = slice(6, 9)
-IDX_MR     = slice(9, 12)
+IDX_FX = 0
+IDX_FY = 1
+IDX_FZ = 2
+IDX_MX = 3
+IDX_MY = 4
+IDX_MZ = 5
 
 ##############################################################
 # Trajectory Optimization
@@ -363,7 +247,7 @@ nu = srb.nu
 
 # optimization settings
 dt = 0.04        # time step
-T = 4.0          # total time
+T = 3.0          # total time
 N = int(T / dt)  # number of intervals
 
 # ----------------------------------------------------------
@@ -378,20 +262,22 @@ X = opti.variable(nx, N + 1)  # states over the horizon
 U = opti.variable(nu, N)      # inputs over the horizon
 
 # initial condition
-x0 = np.array([0, 0, 1,    # p_com
+x0 = np.array([0, 0, 0.8,  # p_com
                1, 0, 0, 0, # quaternion
                0, 0, 0,    # v_com
                0, 0, 0])   # w_body
+x0_ca = ca.DM(x0)
 
 # desired goal state
 pitch_goal = np.deg2rad(-270) 
-x_goal = np.array([0.0, 0, 0.5, # p_com
+x_goal = np.array([0.0, 0, 0.8, # p_com
                    np.cos(pitch_goal/2), 0, np.sin(pitch_goal/2), 0, # quaternion
                    0, 0, 0,     # v_com
                    0, 0, 0])    # w_body
+x_goal_ca = ca.DM(x_goal)
 
 # set the initial condition 
-opti.subject_to(X[:, 0] == x0)
+opti.subject_to(X[:, 0] == x0_ca)
 
 # system dynamics constraints at each time step
 for k in range(N):
@@ -404,26 +290,23 @@ for k in range(N+1):
     opti.subject_to(X[2, k] >= z_min)  # z com min height
 
 # force limits
-mu = 1.0
-A, b = srb._friction_cone_matrix(mu)
+F_max = 750.0 # [N]
 for k in range(N):
-    opti.subject_to(A @ U[IDX_FL, k] <= b)
-    opti.subject_to(A @ U[IDX_FR, k] <= b)
+    opti.subject_to(opti.bounded(-F_max, U[IDX_F, k], F_max))
 
 # moment limits
-m_max = 500.0  
+M_max = 500.0 # [N*m]
 for k in range(N):
-    opti.subject_to(opti.bounded(-m_max, U[IDX_ML, k], m_max))
-    opti.subject_to(opti.bounded(-m_max, U[IDX_MR, k], m_max))
+    opti.subject_to(opti.bounded(-M_max, U[IDX_M, k], M_max))
 
 # objective function 
 J = 0
 for k in range(N):
     J += srb.running_cost(X[:, k], U[:, k], x_goal)
 
-# either terminal cost or final state constraint, not both
+# either terminal cost or final state constraint
 # J += srb.terminal_cost(X[:, N], x_goal)
-opti.subject_to(X[:, N] == x_goal)
+opti.subject_to(X[:, N] == x_goal_ca)
 
 # set the objective
 opti.minimize(J)
@@ -433,8 +316,7 @@ opti.set_initial(X, np.tile(x0.reshape(-1, 1), (1, N+1)))
 opti.set_initial(U, 0)
 
 # better force guess: support weight evenly
-opti.set_initial(U[2, :], 0.5 * srb.m * srb.g)  # fLz
-opti.set_initial(U[5, :], 0.5 * srb.m * srb.g)  # fRz
+opti.set_initial(U[IDX_FZ, :], 0.5 * srb.m * srb.g) 
 
 # ----------------------------------------------------------
 # Solve the optimization
@@ -458,15 +340,15 @@ time = np.linspace(0, T, N+1)
 # save the solution as csv
 X_sol_T = X_sol.T
 U_sol_T = U_sol.T
-save_dir = "./SRB/results/squat/"
+save_dir = "./results/srb/"
 if not os.path.exists(save_dir):
     os.makedirs(save_dir)
-time_file =  "./SRB/results/squat/time.csv"
-state_file = "./SRB/results/squat/states.csv"
-input_file = "./SRB/results/squat/inputs.csv"
+time_file =  "./results/srb/times.csv"
+state_file = "./results/srb/states.csv"
+input_file = "./results/srb/inputs.csv"
 np.savetxt(time_file, time, delimiter=",")
 np.savetxt(state_file, X_sol_T, delimiter=",")
 np.savetxt(input_file, U_sol_T, delimiter=",")
-print(f"Saved time to {time_file}")
+print(f"Saved times to {time_file}")
 print(f"Saved states to {state_file}")
 print(f"Saved inputs to {input_file}")
