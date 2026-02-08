@@ -18,7 +18,6 @@ urdf_file = "./models/g1/g1_29dof_rev_1_0.urdf"
 model = pin.buildModelFromUrdf(urdf_file)
 data = model.createData()
 
-
 ###########################################################
 # MODEL INFO 
 ###########################################################
@@ -26,16 +25,21 @@ data = model.createData()
 # Set print precision
 np.set_printoptions(precision=4, suppress=True)
 
-# set model to its default configuration
-q = pin.neutral(model)
-# set base and quat to origin and identity
-q[0:7] = np.array([
-    0.0, 0.0, 0.0,
-    0.0, 0.0, 0.0, 1.0
+# nominal standing position 
+q_nom_base = np.array([
+    0, 0, 0.79,        #  base pos
+    0, 0, 0, 1,        # base quat (x, y, z, w)
+])  # base position (x, y, z)
+q_nom_joints = np.array([    
+    0, 0, 0, 0, 0, 0,             # left leg (hip, knee, ankle)
+    0, 0, 0, 0, 0, 0,             # right leg (hip, knee, ankle)
+    0, 0, 0,                      # waist
+    0.25,  0.25, 0, 1.0, 0, 0, 0, # left arm
+    0.25, -0.25, 0, 1.0, 0, 0, 0  # right arm
 ])
 
 # Forward kinematics and update frame placements
-pin.forwardKinematics(model, data, q)
+pin.forwardKinematics(model, data, q_nom_joints)
 pin.updateFramePlacements(model, data)
 
 
@@ -61,7 +65,8 @@ for i in range(model.njoints):
 com_world /= total_mass
 
 print(f"Total mass: {total_mass:.4f} kg")
-print(f"COM (world frame): {com_world}")
+print(f"COM composite (world frame): {com_world}")
+print(f"COM pinocchio (world frame): {pin.centerOfMass(model,data)}")
 
 # compute composite inertia about COM in WORLD frame
 I_composite_world = np.zeros((3, 3))
