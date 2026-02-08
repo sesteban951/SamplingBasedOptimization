@@ -1,0 +1,63 @@
+<mujoco model="srb">
+  <compiler angle="radian" coordinate="local" inertiafromgeom="false"/>
+  <option timestep="0.01" gravity="0 0 -9.81" integrator="implicitfast"/>
+  <size njmax="100" nconmax="100"/>
+
+  <!-- Specify the light settings -->
+  <asset>
+      <texture type="skybox" builtin="flat" rgb1="0 0 0" rgb2="0 0 0" width="512" height="3072"/>
+      <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.9 0.9 0.9" width="300" height="300"/>
+      <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
+  </asset>
+
+  <worldbody>
+
+    <!-- Add light -->
+    <light pos="1.0 0.5 0.0" dir="0 0 -1" directional="true"/>  
+    
+    <!-- Add the Floor -->
+    <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
+
+    <!-- SRB base -->
+    <body name="base" pos="0 0 0">
+      
+      <!-- Floating base -->
+      <freejoint name="base_free"/>
+
+      <!-- Explicit inertial properties in the BODY frame at the COM -->
+      <inertial pos="0 0 0"
+                mass="33.34"
+                fullinertia="3.0413 3.3526 1.0543 -0.2082 -0.5213 0.097"/>
+
+      <!-- Visual ellipsoid (roughly capture G1 dimension, height is ~1.3 m)-->
+      <geom name="base_geom"
+            type="ellipsoid"
+            size="0.278 0.278 0.65"
+            rgba="0.5 0.5 0.5 0.5"
+            contype="0" conaffinity="0"/>
+
+      <!-- Orientation cylinders along body frame -->
+      <!-- X-axis (red) -->
+      <geom name="axis_x" type="cylinder" 
+            fromto="0 0 0 0.25 0 0" 
+            size="0.02" 
+            rgba="1 0 0 0.75"
+            contype="0" conaffinity="0"/>
+      
+      <!-- Y-axis (green) -->
+      <geom name="axis_y" type="cylinder" 
+            fromto="0 0 0 0 0.25 0" 
+            size="0.02" 
+            rgba="0 1 0 0.75"
+            contype="0" conaffinity="0"/>
+      
+      <!-- Z-axis (blue) -->
+      <geom name="axis_z" type="cylinder" 
+            fromto="0 0 0 0 0 0.25" 
+            size="0.02" 
+            rgba="0 0 1 0.75"
+            contype="0" conaffinity="0"/>
+    </body>
+  </worldbody>
+  
+</mujoco>
