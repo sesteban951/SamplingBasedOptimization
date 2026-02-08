@@ -184,6 +184,35 @@ def quat_to_rot_matrix_ca(q, eps=1e-12):
     )
 
 
+def quat_to_euler_ZYX(q):
+    """
+    Convert a quaternion to Euler angles (roll, pitch, yaw) in radians.
+    Assumes q is describing the orientation of the body frame relative to the
+    world frame, euler angles are ZYX intrinsic rotations.
+
+    Args:
+        q: (np.array) Quaternion in [qw, qx, qy, qz] format.
+    Returns:
+        euler: (np.array) Euler angles [roll, pitch, yaw] in radians
+    """
+    q = q / np.linalg.norm(q)
+    w, x, y, z = q
+
+    # pitch (y-axis rotation)
+    sinp = 2.0 * (w*y - z*x)
+    sinp = np.clip(sinp, -1.0, 1.0)  # numerical stability
+    pitch = np.arcsin(sinp)
+
+    # roll (x-axis rotation)
+    roll = np.arctan2(2.0*(w*x + y*z), 1.0 - 2.0*(x*x + y*y))
+
+    # yaw (z-axis rotation)
+    yaw = np.arctan2(2.0*(w*z + x*y), 1.0 - 2.0*(y*y + z*z))
+
+    euler = np.array([roll, pitch, yaw])
+    return euler
+    
+
 def body_to_world(v_B, q):
     """
     Transform a vector from the body frame to the world frame using a quaternion.
