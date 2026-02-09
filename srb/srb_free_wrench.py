@@ -32,12 +32,14 @@ class SRBDynamics:
         self.nu = 6   # [F, M]
 
         # system parameters (pulled from pinocchio + 29dof urdf)
+        # nominal ocnfiguration is arms down, standing straight
+        self.pz_com = 0.69  # center of mass height in world frame
         self.m = 33.34      # mass [kg]
         self.g = 9.81       # gravity [m/s^2]
         self.I = ca.vertcat(
-            ca.horzcat( 3.0413, -0.2082, -0.5213),
-            ca.horzcat(-0.2082,  3.3526,  0.097 ),
-            ca.horzcat(-0.5213,  0.097 ,  1.0543),
+            ca.horzcat(3.7475,  0.0001,  0.087),
+            ca.horzcat(0.0001,  3.301 , -0.0009),
+            ca.horzcat(0.087 , -0.0009,  0.5165),
         ) # body frame inertia matrix [kg*m^2]
 
         # simple quadratic penalalty on states
@@ -110,14 +112,21 @@ class SRBDynamics:
     # SRB model discrete dynamics using Euler integration
     def f_disc(self, x, u, dt):
 
-        # # Euler integration
-        # k1 = self.f_cont(x, u)
-        # x_next = x + dt * k1
+        # Euler integration
+        k1 = self.f_cont(x, u)
+        x_next = x + dt * k1
 
         # RK2
-        k1 = self.f_cont(x, u)
-        k2 = self.f_cont(x + 0.5 * dt * k1, u)
-        x_next = x + dt * k2
+        # k1 = self.f_cont(x, u)
+        # k2 = self.f_cont(x + 0.5 * dt * k1, u)
+        # x_next = x + dt * k2
+
+        # RK4
+        # k1 = self.f_cont(x, u)
+        # k2 = self.f_cont(x + 0.5 * dt * k1, u)
+        # k3 = self.f_cont(x + 0.5 * dt * k2, u)
+        # k4 = self.f_cont(x + dt * k3, u)
+        # x_next = x + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
         
         # project back to unit quaternion manifold
         quat_next = x_next[3:7]
@@ -133,24 +142,14 @@ class SRBDynamics:
         
         return x_next
     
-    # friction cone matrix for single force
-    def _friction_cone_matrix(self, mu):
-
-        # build the friction cone matrix
-        A = ca.vertcat(
-            ca.horzcat( 1,  0, -mu),
-            ca.horzcat(-1,  0, -mu),
-            ca.horzcat( 0,  1, -mu),
-            ca.horzcat( 0, -1, -mu),
-            ca.horzcat( 0,  0,  -1)
-        )
-        b = ca.DM.zeros(5, 1)
-
-        return A, b
-    
     ###############################################################
     # Cost Functions
     ###############################################################
+
+    # # generate a reference trajectory
+    # def make_reference(self, T, N):
+
+    #     # intial state
 
     # running cost
     def running_cost(self, x, u, x_goal):
@@ -247,7 +246,7 @@ nu = srb.nu
 
 # optimization settings
 dt = 0.04        # time step
-T = 3.0          # total time
+T = 2.0          # total time
 N = int(T / dt)  # number of intervals
 
 # ----------------------------------------------------------
@@ -269,7 +268,7 @@ x0 = np.array([0, 0, 0.8,  # p_com
 x0_ca = ca.DM(x0)
 
 # desired goal state
-pitch_goal = np.deg2rad(-270) 
+pitch_goal = np.deg2rad(-270.0) 
 x_goal = np.array([0.0, 0, 0.8, # p_com
                    np.cos(pitch_goal/2), 0, np.sin(pitch_goal/2), 0, # quaternion
                    0, 0, 0,     # v_com
@@ -304,7 +303,7 @@ J = 0
 for k in range(N):
     J += srb.running_cost(X[:, k], U[:, k], x_goal)
 
-# either terminal cost or final state constraint
+# set the terminal constraint or cost
 # J += srb.terminal_cost(X[:, N], x_goal)
 opti.subject_to(X[:, N] == x_goal_ca)
 
@@ -316,7 +315,7 @@ opti.set_initial(X, np.tile(x0.reshape(-1, 1), (1, N+1)))
 opti.set_initial(U, 0)
 
 # better force guess: support weight evenly
-opti.set_initial(U[IDX_FZ, :], 0.5 * srb.m * srb.g) 
+opti.set_initial(U[IDX_FZ, :], srb.m * srb.g) 
 
 # ----------------------------------------------------------
 # Solve the optimization
@@ -340,12 +339,12 @@ time = np.linspace(0, T, N+1)
 # save the solution as csv
 X_sol_T = X_sol.T
 U_sol_T = U_sol.T
-save_dir = "./results/srb/"
+save_dir = "./results/srb_free_wrench/"
 if not os.path.exists(save_dir):
     os.makedirs(save_dir)
-time_file =  "./results/srb/times.csv"
-state_file = "./results/srb/states.csv"
-input_file = "./results/srb/inputs.csv"
+time_file =  "./results/srb_free_wrench/times.csv"
+state_file = "./results/srb_free_wrench/states.csv"
+input_file = "./results/srb_free_wrench/inputs.csv"
 np.savetxt(time_file, time, delimiter=",")
 np.savetxt(state_file, X_sol_T, delimiter=",")
 np.savetxt(input_file, U_sol_T, delimiter=",")

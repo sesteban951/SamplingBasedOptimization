@@ -13,7 +13,7 @@ import time
 import mujoco 
 import mujoco.viewer
 
-# custom improts
+# custom imports
 from utils.kinematics import kin
 
 
@@ -22,9 +22,13 @@ from utils.kinematics import kin
 #################################################################
 
 # which data to load
-time_file = "./results/srb/times.csv"
-state_file = "./results/srb/states.csv"
-input_file = "./results/srb/inputs.csv"
+# experiment = "srb_free_wrench"
+experiment = "srb_jump"
+
+# which data to load
+time_file = f"./results/{experiment}/times.csv"
+state_file = f"./results/{experiment}/states.csv"
+input_file = f"./results/{experiment}/inputs.csv"
 
 # load data from csv files
 times = np.loadtxt(time_file, delimiter=",")
