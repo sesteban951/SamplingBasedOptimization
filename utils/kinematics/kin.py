@@ -134,21 +134,24 @@ def quat_log(q_err):
 
     return log_q
 
-def quat_log_ca(q_err, eps=1e-6):
+def quat_log_ca(q_err, eps=1e-6, delta=1e-8):
     q_err = quat_normalize_ca(q_err)
     q_err = ca.if_else(q_err[0] < 0, -q_err, q_err)
 
     w = q_err[0]
     v = q_err[1:4]
-    v_norm = ca.norm_2(v)
 
-    # small-angle approx: log(q) ~ 2v
+    # Smooth norm to avoid undefined gradient at v=0
+    v2 = ca.dot(v, v)
+    v_norm = ca.sqrt(v2 + delta**2)
+
+    # small-angle approx: log(q) ~ 2v  (works well near identity)
     log_small = 2 * v
 
     angle = 2 * ca.atan2(v_norm, w)
-    log_full = angle * (v / (v_norm + 1e-12))
+    log_full = angle * (v / v_norm)
 
-    return ca.if_else(v_norm < eps, log_small, log_full)
+    return ca.if_else(v2 < eps**2, log_small, log_full)
 
 
 def quat_to_rot_matrix(q):
