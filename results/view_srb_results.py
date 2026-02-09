@@ -22,18 +22,18 @@ from utils.kinematics import kin
 #################################################################
 
 # which data to load
-# experiment = "srb_free_wrench"
-experiment = "srb_jump"
+experiment = "srb_free_wrench"
+# experiment = "srb_jump"
 
 # which data to load
 time_file = f"./results/{experiment}/times.csv"
 state_file = f"./results/{experiment}/states.csv"
-# input_file = f"./results/{experiment}/inputs.csv"
+input_file = f"./results/{experiment}/inputs.csv"
 
 # load data from csv files
 times = np.loadtxt(time_file, delimiter=",")
 states = np.loadtxt(state_file, delimiter=",")
-# tau_opt = np.loadtxt(input_file, delimiter=",")
+tau_opt = np.loadtxt(input_file, delimiter=",")
 
 # extract postion and velocity from states
 q_opt = states[:, :7]  # p_com, quat
@@ -43,7 +43,7 @@ print("Loaded data:")
 print(f"  times: {times.shape}")
 print(f"  q_opt: {q_opt.shape}")
 print(f"  v_opt: {v_opt.shape}")
-# print(f"  tau_opt: {tau_opt.shape}")
+print(f"  tau_opt: {tau_opt.shape}")
 
 
 #################################################################

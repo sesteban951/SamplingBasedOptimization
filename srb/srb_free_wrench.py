@@ -146,11 +146,6 @@ class SRBDynamics:
     # Cost Functions
     ###############################################################
 
-    # # generate a reference trajectory
-    # def make_reference(self, T, N):
-
-    #     # intial state
-
     # running cost
     def running_cost(self, x, u, x_goal):
 
@@ -342,12 +337,11 @@ U_sol_T = U_sol.T
 save_dir = "./results/srb_free_wrench/"
 if not os.path.exists(save_dir):
     os.makedirs(save_dir)
-time_file =  "./results/srb_free_wrench/times.csv"
-state_file = "./results/srb_free_wrench/states.csv"
-input_file = "./results/srb_free_wrench/inputs.csv"
+time_file =  save_dir + "times.csv"
+state_file = save_dir + "states.csv"
+input_file = save_dir + "inputs.csv"
 np.savetxt(time_file, time, delimiter=",")
 np.savetxt(state_file, X_sol_T, delimiter=",")
 np.savetxt(input_file, U_sol_T, delimiter=",")
-print(f"Saved times to {time_file}")
-print(f"Saved states to {state_file}")
-print(f"Saved inputs to {input_file}")
+
+print(f"Saved results to {save_dir}")

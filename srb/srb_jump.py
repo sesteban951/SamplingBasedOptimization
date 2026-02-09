@@ -161,11 +161,6 @@ class SRBDynamics:
     # Cost Functions
     ###############################################################
 
-    # # generate a reference trajectory
-    # def make_reference(self, T, N):
-
-    #     # intial state
-
     # State-only running cost (no input cost)
     def state_cost(self, x, x_goal):
         """Cost on state tracking only"""
@@ -325,8 +320,12 @@ x_goal_ca = ca.DM(x_goal)
 # set the initial condition 
 opti.subject_to(X[:, 0] == x0_ca)
 
-# set terminal constraint
-# opti.subject_to(X[:, N] == x_goal_ca)
+# set box xonstraint on terminal condition
+epsilon = 0.005
+x_terminal_lb = x_goal_ca - epsilon
+x_terminal_ub = x_goal_ca + epsilon
+opti.subject_to(X[:, N] >= x_terminal_lb)
+opti.subject_to(X[:, N] <= x_terminal_ub)
 
 # compute the dynamics constraints
 for k in range(N):
@@ -353,8 +352,8 @@ for k in range(N):
     opti.subject_to(X[:, k + 1] == x_next)
 
 # add z_com constraints
-pz_min = 0.5
-pz_max = 0.8
+pz_min = 0.3
+pz_max = 0.9
 for k in range(N+1):
     opti.subject_to(X[2, k] > pz_min)  # enforce constant height
     opti.subject_to(X[2, k] < pz_max)  # enforce constant height
@@ -441,7 +440,7 @@ for k in range(N):
     if k >= flight_end:
         J += srb.foot_placement_cost(p_L[:, k], p_R[:, k], p_L_des, p_R_des)
 
-# Terminal cost
+# Terminal cost (optional since we have a terminal constraint, but can help convergence)
 J += srb.terminal_cost(X[:, N], x_goal_ca)
 
 # set the objective
@@ -496,13 +495,38 @@ opti.solver("ipopt")
 sol = opti.solve()
 
 # Extract solutions
-X_sol = sol.value(X)
-pL_sol = sol.value(p_L)
-pR_sol = sol.value(p_R)
-FL_sol = sol.value(F_L)
-FR_sol = sol.value(F_R)
-ML_sol = sol.value(M_L)
-MR_sol = sol.value(M_R)
+X_sol = sol.value(X)    # shape (nx, N+1)
+pL_sol = sol.value(p_L) # shape (2, N)
+pR_sol = sol.value(p_R) # shape (2, N)
+FL_sol = sol.value(F_L) # shape (3, N)
+FR_sol = sol.value(F_R) # shape (3, N)
+ML_sol = sol.value(M_L) # shape (3, N)
+MR_sol = sol.value(M_R) # shape (3, N)
+
+# force in world frame
+F = FL_sol.T + FR_sol.T  # shape (N, 3)
+
+# moment in the world frame
+M = np.zeros((FL_sol.shape[1], 3))
+for k in range(FL_sol.shape[1]):
+
+    # moment contribution from forces at the feet
+    M_feet = ML_sol[:, k] + MR_sol[:, k]
+
+    # contribution from moment arms (r x F)
+    p_com = X_sol[0:3, k]
+    p_L_3d = np.array([pL_sol[0, k], pL_sol[1, k], 0])
+    p_R_3d = np.array([pR_sol[0, k], pR_sol[1, k], 0])
+    r_L = p_L_3d - p_com
+    r_R = p_R_3d - p_com
+    M_left = np.cross(r_L, FL_sol[:, k])
+    M_right = np.cross(r_R, FR_sol[:, k])
+
+    # total moment in world frame
+    M[k, :] = M_feet + M_left + M_right
+
+# pack it into a single array for saving
+U = np.hstack((F, M))  # shape (N, 6)
 
 # ----------------------------------------------------------
 # Save
@@ -515,7 +539,11 @@ time = np.linspace(0, T, N+1)
 save_dir = "./results/srb_jump/"
 if not os.path.exists(save_dir):
     os.makedirs(save_dir)
-np.savetxt(save_dir + "times.csv", time, delimiter=",")
-np.savetxt(save_dir + "states.csv", X_sol.T, delimiter=",")
+time_file  = save_dir + "times.csv"
+state_file = save_dir + "states.csv"
+input_file = save_dir + "inputs.csv"
+np.savetxt(time_file, time, delimiter=",")
+np.savetxt(state_file, X_sol.T, delimiter=",")
+np.savetxt(input_file, U, delimiter=",")
 
 print(f"\nSaved results to {save_dir}")
