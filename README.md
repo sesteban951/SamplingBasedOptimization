@@ -18,11 +18,11 @@ conda activate env_sbo
 ## Usage
 All scripts are run from the root directory. The main scripts are located in the `scripts/` directory.
 
-If you can't run a particular script, try running it as a module. For example, for `scripts/cartpole_cem.py`, use:
+If you can't run a particular script, try running it as a module. For example, for `scripts/cartpole/cartpole_cem.py`, use:
 ```bash
-python -m scripts.cartpole_cem
+python -m scripts.cartpole.cartpole_cem
 ```
 instead of:
 ```bash
-python scripts/cartpole_cem.py 
+python scripts/cartpole/cartpole_cem.py
 ```
