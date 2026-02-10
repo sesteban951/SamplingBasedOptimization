@@ -1,6 +1,6 @@
 ##
 #
-# Single Rigid Body Traj Opt with continuous wrench.
+# Single Rigid Body Traj Opt with leg kinematics.
 #
 ##
 
