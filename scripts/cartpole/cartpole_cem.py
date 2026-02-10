@@ -196,12 +196,16 @@ if __name__ == "__main__":
     cem_config = CrossEntropyMethod_Config(
         rng=cem_rng,
         T=3.0,
-        iterations=300,
-        N_elite=512,
+        iterations=200,
+        N_elite=2048,
         # N_knots=4*5,
         # spline_type="ZOH",
-        N_knots=30,
-        spline_type="Bezier",
+        # N_knots=10,
+        # spline_type="Linear",
+        N_knots=10,
+        spline_type="Cubic",
+        # N_knots=10,
+        # spline_type="Bezier",
     )
 
     # create the CEM optimizer
