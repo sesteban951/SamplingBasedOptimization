@@ -17,8 +17,10 @@ import jax.numpy as jnp
 
 # custom imports
 from utils.simulation.simulation import *
-from utils.spline.bezier import *
 from utils.spline.zoh import *
+from utils.spline.linear import *
+from utils.spline.cubic import *
+from utils.spline.bezier import *
 from utils.spline.fourier import *
 
 
@@ -42,7 +44,7 @@ class CrossEntropyMethod_Config:
     N_elite: int     # number of elite samples
 
     # spline params
-    spline_type: str = "ZOH"   # "ZOH" | "Bezier" | "Fourier"
+    spline_type: str = "ZOH"   # "ZOH" | "Linear" | "Cubic" | "Bezier" | "Fourier"
 
     # other params
     use_diagonal_cov: bool = False  # whether to only use the diagonal of the covariance matrix
@@ -192,6 +194,10 @@ class CrossEntropyMethod(ABC):
         # create the spline object
         if self.cem_config.spline_type == "ZOH":
             self.spline = ZOH_Spline(Y0, self.T_eff)
+        elif self.cem_config.spline_type == "Linear":
+            self.spline = Linear_Spline(Y0, self.T_eff)
+        elif self.cem_config.spline_type == "Cubic":
+            self.spline = Cubic_Spline(Y0, self.T_eff)
         elif self.cem_config.spline_type == "Bezier":
             self.spline = Bezier_Spline(Y0, self.T_eff)
         elif self.cem_config.spline_type == "Fourier":

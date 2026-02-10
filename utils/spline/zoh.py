@@ -9,7 +9,6 @@ from utils.spline.base import Base_Spline
 
 # standard imports
 import numpy as np
-import math
 
 # jax imports
 import jax

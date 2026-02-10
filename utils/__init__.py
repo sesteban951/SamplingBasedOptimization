@@ -12,5 +12,7 @@ from .interpolation.interp import *
 
 # different spline implementations
 from .spline.zoh import *
+from .spline.linear import *
+from .spline.cubic import *
 from .spline.bezier import *
 from .spline.fourier import *
