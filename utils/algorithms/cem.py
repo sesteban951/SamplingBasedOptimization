@@ -45,9 +45,9 @@ class CrossEntropyMethod_Config:
     spline_type: str = "ZOH"   # "ZOH" | "Bezier" | "Fourier"
 
     # other params
-    use_step_size: bool = False  # whether to use step size in updating distribution
-    step_size: float = 0.5       # step size for distribution update
-
+    use_diagonal_cov: bool = False  # whether to only use the diagonal of the covariance matrix
+    use_step_size: bool = False     # whether to use step size in updating distribution
+    step_size: float = 0.5          # step size for distribution update
 
 # CEM optimizer class
 class CrossEntropyMethod(ABC):
@@ -82,6 +82,7 @@ class CrossEntropyMethod(ABC):
         self._initialize_spline_knots()
 
         print("CEM Optimizer initialized.")
+
 
     # check that the input params make sense
     def _check_valid_params(self):
@@ -277,6 +278,10 @@ class CrossEntropyMethod(ABC):
             self.mu = mu_
             self.Sigma = Sigma_
 
+        # if using diagonal covariance, zero out the off-diagonal entries
+        if self.cem_config.use_diagonal_cov == True:
+            self.Sigma = jnp.diag(jnp.diag(self.Sigma))
+
 
     # cost function
     @abstractmethod
@@ -371,11 +376,5 @@ class CrossEntropyMethod(ABC):
                   f"J_best: {J_opt:.4f} | "
                   f"‖Σ‖: {cov_norm:.4f}")
             
-        # # just take the best one from the last iteration
-        # J_best = J.min()
-        # q_opt = q_log[jnp.argmin(J), :, :]
-        # v_opt = v_log[jnp.argmin(J), :, :]
-        # tau_opt = tau_log[jnp.argmin(J), :, :]
-
         return q_opt, v_opt, tau_opt
     
