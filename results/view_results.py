@@ -19,8 +19,8 @@ import mujoco.viewer
 #################################################################
 
 # which data to load
-experiment = "cartpole"
-xml_path = f"./models/cartpole/cartpole.xml"
+# experiment = "cartpole"
+# xml_path = f"./models/cartpole/cartpole.xml"
 # experiment = "cartpole_walls"
 # xml_path = f"./models/cartpole/cartpole_walls.xml"
 # experiment = "hopper"
@@ -31,7 +31,8 @@ xml_path = f"./models/cartpole/cartpole.xml"
 # experiment = "g1_walk"
 # xml_path = f"./models/g1/g1_planar.xml"
 # experiment = "g1_stand"
-# xml_path = f"./models/g1/g1_21dof.xml"
+experiment = "g1_jump"
+xml_path = f"./models/g1/g1_21dof.xml"
 
 # load data from csv files
 time_file = f"./results/{experiment}/time.csv"

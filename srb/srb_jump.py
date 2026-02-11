@@ -133,9 +133,9 @@ nx = nq + nv
 nu = srb.nu
 
 # fix timings
-dt = 0.04        # time step
+dt = 0.02        # time step
 T_stance = 0.5   # stance duration
-T_flight = 0.4   # flight duration
+T_flight = 0.5   # flight duration
 T_land = 0.5     # landing duration
 T = T_stance + T_flight + T_land  # total trajectory duration
 
@@ -179,8 +179,8 @@ p0_L = ca.DM(p0_L)
 p0_R = ca.DM(p0_R)
 
 # desired goal state - jump forward, stay upright
-x_goal = np.array([1.0, 0, 0.69,  # p_com (forward, same height)
-                   1.0, 0, 0, 0,     # quaternion (upright)
+x_goal = np.array([1, 0, 0.69,   # p_com (forward, same height)
+                   1, 0, 0, 0,   # quaternion (upright)
                    0, 0, 0,        # v_com (stopped)
                    0, 0, 0])       # w_body
 x_goal_ca = ca.DM(x_goal)
@@ -188,7 +188,7 @@ x_goal_ca = ca.DM(x_goal)
 # set the initial condition 
 opti.subject_to(X[:, 0] == x0_ca)
 
-# set box xonstraint on terminal condition
+# set box constraint on terminal condition
 epsilon = 0.005
 x_terminal_lb = x_goal_ca - epsilon
 x_terminal_ub = x_goal_ca + epsilon
@@ -221,7 +221,7 @@ for k in range(N):
 
 # add z_com constraints
 pz_min = 0.3
-pz_max = 0.9
+pz_max = 0.8
 for k in range(N+1):
     opti.subject_to(X[2, k] > pz_min)  # enforce constant height
     opti.subject_to(X[2, k] < pz_max)  # enforce constant height
@@ -231,12 +231,12 @@ for k in range(N+1):
 # ----------------------------------------------------------
 
 # Contact parameters
-mu = 1.0                      # friction coefficient
+mu = 1.5                      # friction coefficient
 hip_offset = 0.1185           # y-distance from base to each foot
 M_ankle_x_max = 50.0          # [N*m]
 M_ankle_y_max = 50.0          # [N*m]
 M_ankle_z_max = 10.0          # [N*m]
-F_max = 500.0                 # [N] max force per foot
+F_max = 450.0                 # [N] max force per foot
 
 # Get friction cone constraint matrices
 A_friction, b_friction = srb.friction_cone_matrix(mu)
