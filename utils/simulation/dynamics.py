@@ -6,11 +6,13 @@
 ##
 
 # standard imports
+import numpy as np
 from dataclasses import dataclass
 
 # jax imports
 import jax
 import jax.numpy as jnp
+jax.config.update("jax_default_matmul_precision", "highest")
 
 # mujoco imports
 import mujoco 
@@ -82,6 +84,55 @@ class Dynamics:
             lambda _: mjx.put_data(mj_model, mj_data)
         )(jnp.arange(self.B))
 
+        # get the default state
+        keyframe = "default"
+        key_id = mj_model.key(keyframe).id
+        qpos_standing = jnp.array(mj_model.key_qpos[key_id])
+        qvel_standing = jnp.array(mj_model.key_qvel[key_id])
+        mj_data.qpos[:] = qpos_standing
+        mj_data.qvel[:] = qvel_standing
+        
+        # move forward one step to compute derived quantities like com_pos
+        mujoco.mj_forward(mj_model, mj_data)
+
+        # compute the total mass of the robot
+        self.mass = 0.0
+        for i in range(mj_model.nbody):
+            self.mass += mj_model.body_mass[i]
+
+        # body name is the first body in the model XML, which is usually the pelvis or torso; we will express inertia about this body frame
+        base_body_name = mujoco.mj_id2name(mj_model, mujoco.mjtObj.mjOBJ_BODY, 1)
+        base_id = mj_model.body(base_body_name).id
+
+        p_base_w = mj_data.xpos[base_id].copy()
+        R_wb = mj_data.xmat[base_id].reshape(3, 3)  # base->world
+        R_bw = R_wb.T
+
+        I_w = np.zeros((3, 3))
+
+        for i in range(mj_model.nbody):
+            m = mj_model.body_mass[i]
+            if m == 0.0:
+                continue
+
+            # inertia about body COM, expressed in world
+            I_principal = np.diag(mj_model.body_inertia[i])        # principal moments
+            R_wi = mj_data.ximat[i].reshape(3, 3)                  # inertia frame -> world
+            I_w_com = R_wi @ I_principal @ R_wi.T
+
+            # shift to base origin (parallel axis)
+            r = mj_data.xipos[i] - p_base_w                        # base origin -> body COM (world)
+            I_w_shift = m * ((r @ r) * np.eye(3) - np.outer(r, r))
+
+            I_w += I_w_com + I_w_shift
+
+        # express in base frame
+        I_base_ = R_bw @ I_w @ R_bw.T
+        self.I_base = jnp.array(I_base_, dtype=jnp.float32)
+
+        print(f"Total mass: {self.mass:.3f} kg")
+        print(f"Inertia about {base_body_name} frame:\n{I_base_}")
+
     
     def _initialize_jit_functions(self):
         """
@@ -90,12 +141,14 @@ class Dynamics:
 
         # dynamics quantities
         self.com_state_in_world = jax.jit(self._com_state_in_world)
+        self.inertia_world = jax.jit(self._inertia_world)
 
         # rotations / SO(3) maps (batched)
         # self._quat_diff = jax.jit(self._quat_diff)
         # self._quat_log  = jax.jit(self._quat_log)
         self.quat_to_rot_matrix = jax.jit(self._quat_to_rot_matrix)
         self.quat_log_diff = jax.jit(self._quat_log_diff)
+        self.vec_body_to_world = jax.jit(self._vec_body_to_world)
 
         print("JIT compilation of dynamics functions complete.")
 
@@ -137,6 +190,25 @@ class Dynamics:
 
         return p_com, v_com
     
+
+    def _inertia_world(self, quat):
+        """
+        Computes the inertia matrix expressed in the world frame for all parallel environments.
+        Assumes quat is in [qw, qx, qy, qz] format and describes the orientation of the
+        body frame relative to the world frame.
+
+        Args:
+            quat (jnp.ndarray): (B,4) array of quaternions representing body orientation
+        Returns:
+            I_w (jnp.ndarray): (B,3,3) array of inertia matrices in world frame
+        """
+        quat = self._quat_normalize(quat)          # (B,4)
+        R_wb = self._quat_to_rot_matrix(quat)      # (B,3,3)
+        I_world  = R_wb @ self.I_base @ jnp.swapaxes(R_wb, -1, -2)
+        I_world = 0.5 * (I_world + jnp.swapaxes(I_world, -1, -2))  # NOTE: enforce symmetry
+        return I_world
+
+
     ################################## ROTATIONS ##################################
 
     def _quat_normalize_single_env(self, q):
@@ -318,10 +390,21 @@ class Dynamics:
         return R
 
 
+    def _vec_body_to_world(self, vec_B, quat):
+        """
+        Convert vectors from body frame to world frame (batched).
+        vec_W = R_wb(quat) @ vec_B
 
-
-        
-
+        Args:
+            vec_B: (B,3) vectors expressed in body frame
+            quat : (B,4) quaternions [qw,qx,qy,qz] describing body orientation in world,
+        Returns:
+            vec_W: (B,3) vectors expressed in world frame
+        """
+        quat = self._quat_normalize(quat)          # (B,4)
+        R_wb = self._quat_to_rot_matrix(quat)      # (B,3,3)
+        vec_W = jnp.einsum('bij,bj->bi', R_wb, vec_B)
+        return vec_W
 
 
 #############################################################
@@ -334,8 +417,9 @@ if __name__ == "__main__":
 
     # configure with a built-in mujoco model
     config = Dynamics_Config(
-        xml_path="./models/g1/g1_21dof.xml",  # e.g. a humanoid or ant model
-        # xml_path="./models/biped/biped.xml",  # e.g. a humanoid or ant model
+        # xml_path="./models/g1/g1_29dof_rev_1_0.xml",  
+        xml_path="./models/g1/g1_21dof.xml",  
+        # xml_path="./models/biped/biped.xml",  
         num_envs=4
     )
 
@@ -417,9 +501,6 @@ if __name__ == "__main__":
     qz = jnp.array([[jnp.cos(theta/2), 0., 0., jnp.sin(theta/2)]])
     Rz = dyn.quat_to_rot_matrix(qz)[0]
     print(Rz @ jnp.array([1.,0.,0.]))  # should be ~[0,1,0]
-
-
-
 
     def assert_close(name, x, y, atol=1e-6, rtol=1e-6):
         err = jnp.max(jnp.abs(x - y))
@@ -561,3 +642,66 @@ if __name__ == "__main__":
     assert_close("exp(log(q)) matches R(q)", R_from_exp, R_from_quat, atol=2e-5, rtol=2e-5)
 
     print("\n✅ All rotation tests passed.\n")
+
+    print("\n================ VEC + INERTIA TESTS ================\n")
+
+    # ---------- Vec body->world tests ----------
+    key = jax.random.PRNGKey(123)
+    B = 32
+
+    quat = random_unit_quat(key, B)                 # (B,4)  qw qx qy qz
+    vec_B = jax.random.normal(key, (B, 3))          # (B,3)
+
+    # (a) vec_W == R(q) @ vec_B
+    R = dyn.quat_to_rot_matrix(quat)                # (B,3,3)
+    vec_W_ref = jnp.einsum("bij,bj->bi", R, vec_B)
+    vec_W = dyn.vec_body_to_world(vec_B, quat)
+    assert_close("vec_body_to_world matches R@v", vec_W, vec_W_ref, atol=2e-6, rtol=2e-6)
+
+    # (b) identity quaternion leaves vectors unchanged
+    qI = jnp.tile(jnp.array([1., 0., 0., 0.], dtype=quat.dtype)[None, :], (B, 1))
+    vec_W_id = dyn.vec_body_to_world(vec_B, qI)
+    assert_close("vec_body_to_world identity", vec_W_id, vec_B, atol=1e-6, rtol=1e-6)
+
+    # (c) round-trip: v_B == R^T (R v_B)
+    vec_B_rec = jnp.einsum("bji,bj->bi", R, vec_W)  # R^T @ vec_W
+    assert_close("vec round-trip R^T(Rv)=v", vec_B_rec, vec_B, atol=2e-6, rtol=2e-6)
+
+    # ---------- inertia_world tests ----------
+    I_base = dyn.I_base
+
+    # (a) inertia_world == R I_base R^T
+    I_w_ref = R @ I_base @ jnp.swapaxes(R, -1, -2)  # (B,3,3)
+    I_w = dyn.inertia_world(quat)
+    assert_close("inertia_world matches R I R^T", I_w, I_w_ref, atol=2e-6, rtol=2e-6)
+
+    # (b) "identity" test done robustly: use R(qI) instead of assuming R=I
+    R_I = dyn.quat_to_rot_matrix(qI)  # (B,3,3)
+    err_RI = jnp.max(jnp.linalg.norm(R_I - jnp.tile(jnp.eye(3, dtype=R_I.dtype)[None,:,:], (B,1,1)), axis=(1,2)))
+    print(f"||R(qI) - I|| max: {float(err_RI):.6e}")
+
+    I_expected_id = R_I @ I_base @ jnp.swapaxes(R_I, -1, -2)
+    I_w_id = dyn.inertia_world(qI)
+    assert_close("inertia_world at qI matches R(qI) I R(qI)^T", I_w_id, I_expected_id, atol=2e-6, rtol=2e-6)
+
+    # (c) symmetry (numerical)
+    sym_err = jnp.max(jnp.abs(I_w - jnp.swapaxes(I_w, -1, -2)))
+    print(f"I_world symmetry max|I-I^T|={float(sym_err):.3e}")
+    if sym_err > 5e-6:
+        raise AssertionError("I_world not symmetric enough")
+
+    # (d) eigenvalues invariant (principal moments)
+    evals_base = jnp.sort(jnp.linalg.eigvalsh(0.5 * (I_base + I_base.T)))
+    evals_w = jnp.sort(
+        jnp.linalg.eigvalsh(0.5 * (I_w + jnp.swapaxes(I_w, -1, -2))),
+        axis=-1
+    )
+    assert_close(
+        "eig(I_world) == eig(I_base)",
+        evals_w,
+        jnp.tile(evals_base[None, :], (B, 1)).astype(evals_w.dtype),
+        atol=5e-5,
+        rtol=5e-5
+    )
+
+    print("\n✅ Vec + inertia tests passed.\n")
