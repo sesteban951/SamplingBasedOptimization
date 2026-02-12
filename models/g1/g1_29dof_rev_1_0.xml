@@ -294,7 +294,15 @@
 
   <!-- default configuration (when you press "Load key" button) -->
   <keyframe>
-    <key name="standing" qpos="0 0 0.79 
+    <key name="default"  qpos="0 0 0 
+                               1 0 0 0 
+                               0 0 0 0 0 0 
+                               0 0 0 0 0 0 
+                               0 0 0 
+                               0.25 0.25 0 1.0 0 0 0 
+                               0.25 -0.25 0 1.0 0 0 0" 
+                         qvel="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0"/>
+    <key name="standing"  qpos="0 0 0.79 
                                1 0 0 0 
                                0 0 0 0 0 0 
                                0 0 0 0 0 0 
