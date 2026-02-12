@@ -227,6 +227,7 @@
                           <geom class="visual" mesh="left_wrist_yaw_link" />
                           <geom pos="0.0415 0.003 0" quat="1 0 0 0" class="visual" mesh="left_rubber_hand" />
                           <geom class="hand_collision" />
+                          <site name="left_hand" />
                         </body>
                       </body>
                     </body>
@@ -264,6 +265,7 @@
                           <geom class="visual" mesh="right_wrist_yaw_link" />
                           <geom pos="0.0415 -0.003 0" quat="1 0 0 0" class="visual" mesh="right_rubber_hand" />
                           <geom class="hand_collision" />
+                          <site name="right_hand" />
                         </body>
                       </body>
                     </body>

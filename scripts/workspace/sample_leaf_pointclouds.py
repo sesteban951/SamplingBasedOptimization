@@ -2,14 +2,14 @@
 Sample leaf-body workspaces from a MuJoCo MJCF model.
 
 How to run:
-    python -m scripts.sample_leaf_pointclouds --xml models/srb/srb.xml --num-samples 1000 --out results/srb_leaf_pointclouds.npz
+    python -m scripts.workspace.sample_leaf_pointclouds --xml models/srb/srb.xml --num-samples 1000 --out results/srb_leaf_pointclouds.npz
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import List, Tuple
 
 import argparse
 import numpy as np
@@ -71,16 +71,27 @@ def _collect_leaf_pointclouds(
     seed: int,
     max_attempts: int,
 ) -> Tuple[List[str], np.ndarray]:
-    """Sample point clouds for each leaf body in the base/body frame.
+    """Sample point clouds for each leaf body or its attached sites in the base/body frame.
 
     Returns:
-        leaf_names: list of body names for each leaf.
-        points: array with shape (num_leaf, num_samples, 3), expressed in base frame.
+        leaf_names: list of site or body names for each point cloud.
+        points: array with shape (num_targets, num_samples, 3), expressed in base frame.
     """
 
     leaf_ids = _find_leaf_bodies(model)
-    leaf_names = [mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, i) or f"body_{i}" for i in leaf_ids]
-    points = np.zeros((len(leaf_ids), num_samples, 3), dtype=np.float64)
+    targets: List[Tuple[str, str, int]] = []
+    for body_id in leaf_ids:
+        site_ids = [i for i in range(model.nsite) if model.site_bodyid[i] == body_id]
+        if site_ids:
+            for site_id in site_ids:
+                site_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_SITE, site_id) or f"site_{site_id}"
+                targets.append((site_name, "site", site_id))
+        else:
+            body_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, body_id) or f"body_{body_id}"
+            targets.append((body_name, "body", body_id))
+
+    leaf_names = [name for name, _, _ in targets]
+    points = np.zeros((len(targets), num_samples, 3), dtype=np.float64)
 
     qpos0 = model.qpos0.copy()
     rng = np.random.default_rng(seed)
@@ -117,9 +128,12 @@ def _collect_leaf_pointclouds(
         p_base = data.xpos[base_id]
         R_base = data.xmat[base_id].reshape(3, 3)
 
-        for leaf_idx, body_id in enumerate(leaf_ids):
-            p_world = data.xpos[body_id]
-            points[leaf_idx, sample_idx, :] = R_base.T @ (p_world - p_base)
+        for target_idx, (_, target_kind, target_id) in enumerate(targets):
+            if target_kind == "site":
+                p_world = data.site_xpos[target_id]
+            else:
+                p_world = data.xpos[target_id]
+            points[target_idx, sample_idx, :] = R_base.T @ (p_world - p_base)
 
         sample_idx += 1
 

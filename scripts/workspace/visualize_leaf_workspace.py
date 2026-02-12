@@ -2,7 +2,7 @@
 Visualize leaf-body workspace point clouds around a MuJoCo model.
 
 How to run:
-    python -m scripts.visualize_leaf_workspace --xml models/srb/srb.xml --points results/srb_leaf_pointclouds.npz
+    python -m scripts.workspace.visualize_leaf_workspace --xml models/srb/srb.xml --points results/srb_leaf_pointclouds.npz
 """
 
 from __future__ import annotations
@@ -160,6 +160,9 @@ def main() -> None:
 
     leaf_names, points_body = _load_pointcloud(cfg.points_path)
     leaf_names, points_body = _select_leaves(leaf_names, points_body, cfg.leaf)
+    print("Displaying pointclouds for leaves:")
+    for name in leaf_names:
+        print(f"  - {name}")
 
     viewer = mujoco.viewer.launch_passive(model, data)
 
