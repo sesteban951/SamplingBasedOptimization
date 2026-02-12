@@ -201,8 +201,22 @@ opti.solver(
     "ipopt",
 )
 sol = opti.solve()
-X_sol = sol.value(X)
-U_sol = sol.value(U)
+X_sol = sol.value(X) # shape (nx, N+1)
+U_sol = sol.value(U) # shape (nu, N)
+
+# compute accelerations by querying the dynamics
+X_sol = np.array(X_sol.T)
+U_sol = np.array(U_sol.T)
+q_opt = X_sol[:, 0:nq]        # shape (N+1, nq)
+v_opt = X_sol[:, nq:nx]       # shape (N+1, nv)
+a_opt = np.zeros_like(v_opt)  # shape (N+1, nv)
+
+f_cont = srb.f_cont
+for k in range(N):
+    x_k = X_sol[k, :]
+    u_k = U_sol[k, :]
+    xdot = np.array(f_cont(x_k, u_k)).squeeze() # shape (nx,)
+    a_opt[k, :] = xdot[nq:nx]                   # shape (nv,)
 
 # ----------------------------------------------------------
 # Save
@@ -212,16 +226,18 @@ U_sol = sol.value(U)
 time = np.linspace(0, T, N+1)
 
 # save the solution as csv
-X_sol_T = X_sol.T
-U_sol_T = U_sol.T
 save_dir = "./results/srb_free_wrench/"
 if not os.path.exists(save_dir):
     os.makedirs(save_dir)
-time_file =  save_dir + "times.csv"
-state_file = save_dir + "states.csv"
-input_file = save_dir + "inputs.csv"
+time_file  = save_dir + "time.csv"
+q_file = save_dir + "q_opt.csv"
+v_file = save_dir + "v_opt.csv"
+a_file = save_dir + "a_opt.csv"
+tau_file = save_dir + "tau_opt.csv"
 np.savetxt(time_file, time, delimiter=",")
-np.savetxt(state_file, X_sol_T, delimiter=",")
-np.savetxt(input_file, U_sol_T, delimiter=",")
+np.savetxt(q_file, q_opt, delimiter=",")
+np.savetxt(v_file, v_opt, delimiter=",")
+np.savetxt(a_file, a_opt, delimiter=",")
+np.savetxt(tau_file, U_sol, delimiter=",") 
 
-print(f"Saved results to {save_dir}")
+print(f"\nSaved results to {save_dir}")

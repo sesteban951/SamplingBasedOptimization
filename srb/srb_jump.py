@@ -396,6 +396,19 @@ for k in range(FL_sol.shape[1]):
 # pack it into a single array for saving
 U = np.hstack((F, M))  # shape (N, 6)
 
+# compute accelerations by querying the dynamics
+X_sol = X_sol.T               # shape (N+1, nx)
+q_opt = X_sol[:, 0:nq]        # shape (N+1, nq)
+v_opt = X_sol[:, nq:nx]       # shape (N+1, nv)
+a_opt = np.zeros_like(v_opt)  # shape (N+1, na)
+
+f_cont = srb.f_cont
+for k in range(N):
+    x_k = X_sol[k, :]
+    u_k = U[k, :]
+    xdot = np.array(f_cont(x_k, u_k)).squeeze() # shape (nx,)
+    a_opt[k, :] = xdot[nq:nx]                   # shape (nv,)
+
 # ----------------------------------------------------------
 # Save
 # ----------------------------------------------------------
@@ -407,11 +420,15 @@ time = np.linspace(0, T, N+1)
 save_dir = "./results/srb_jump/"
 if not os.path.exists(save_dir):
     os.makedirs(save_dir)
-time_file  = save_dir + "times.csv"
-state_file = save_dir + "states.csv"
-input_file = save_dir + "inputs.csv"
+time_file  = save_dir + "time.csv"
+q_file = save_dir + "q_opt.csv"
+v_file = save_dir + "v_opt.csv"
+a_file = save_dir + "a_opt.csv"
+tau_file = save_dir + "tau_opt.csv"
 np.savetxt(time_file, time, delimiter=",")
-np.savetxt(state_file, X_sol.T, delimiter=",")
-np.savetxt(input_file, U, delimiter=",")
+np.savetxt(q_file, q_opt, delimiter=",")
+np.savetxt(v_file, v_opt, delimiter=",")
+np.savetxt(a_file, a_opt, delimiter=",")
+np.savetxt(tau_file, U, delimiter=",")
 
 print(f"\nSaved results to {save_dir}")

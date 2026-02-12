@@ -26,25 +26,25 @@ from utils.kinematics import kin
 experiment = "srb_jump"
 
 # which data to load
-time_file = f"./results/{experiment}/times.csv"
-state_file = f"./results/{experiment}/states.csv"
-input_file = f"./results/{experiment}/inputs.csv"
+time_file = f"./results/{experiment}/time.csv"
+q_file = f"./results/{experiment}/q_opt.csv"
+v_file = f"./results/{experiment}/v_opt.csv"
+a_file = f"./results/{experiment}/a_opt.csv"
+tau_file = f"./results/{experiment}/tau_opt.csv"
 
 # load data from csv files
 times = np.loadtxt(time_file, delimiter=",")
-states = np.loadtxt(state_file, delimiter=",")
-tau_opt = np.loadtxt(input_file, delimiter=",")
-
-# extract postion and velocity from states
-q_opt = states[:, :7]  # p_com, quat
-v_opt = states[:, 7:]  # v_com, omega
+q_opt = np.loadtxt(q_file, delimiter=",")
+v_opt = np.loadtxt(v_file, delimiter=",")
+a_opt = np.loadtxt(a_file, delimiter=",")
+tau_opt = np.loadtxt(tau_file, delimiter=",")
 
 print("Loaded data:")
 print(f"  times: {times.shape}")
 print(f"  q_opt: {q_opt.shape}")
 print(f"  v_opt: {v_opt.shape}")
+print(f"  a_opt: {a_opt.shape}")
 print(f"  tau_opt: {tau_opt.shape}")
-
 
 #################################################################
 # VISUALIZATION
