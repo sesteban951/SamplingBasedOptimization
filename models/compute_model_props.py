@@ -1,119 +1,132 @@
 ##
 #
-# Compute some model properties
+# Compute composite inertial properties for a Pinocchio robot model.
 #
 ##
 
 import numpy as np
 import pinocchio as pin
 
-###########################################################
-# PICK THE MODEL TO LOAD
-###########################################################
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
 
-# file path
-urdf_file = "./models/g1/g1_29dof_rev_1_0.urdf"
+URDF_FILE = "./models/g1/g1_29dof_rev_1_0.urdf"
 
-# Load the model
-model = pin.buildModelFromUrdf(urdf_file)
-data = model.createData()
-
-###########################################################
-# MODEL INFO 
-###########################################################
-
-# Set print precision
-np.set_printoptions(precision=4, suppress=True)
-
-# nominal standing position 
-q_nom_base = np.array([
-    0, 0, 0.79,        #  base pos
-    0, 0, 0, 1,        # base quat (x, y, z, w)
-])  # base position (x, y, z)
-q_nom_joints = np.array([    
-    0, 0, 0, 0, 0, 0,             # left leg (hip, knee, ankle)
-    0, 0, 0, 0, 0, 0,             # right leg (hip, knee, ankle)
-    0, 0, 0,                      # waist
-    0.25,  0.25, 0, 1.0, 0, 0, 0, # left arm
-    0.25, -0.25, 0, 1.0, 0, 0, 0  # right arm
+Q_NOM = np.concatenate([
+    [0, 0, 0.79],           # base position
+    [0, 0, 0, 1],           # base orientation (quaternion)
+    [0, 0, 0, 0, 0, 0,      # left leg  (hip, knee, ankle)
+     0, 0, 0, 0, 0, 0,      # right leg (hip, knee, ankle)
+     0, 0, 0,               # waist
+     0.25,  0.25, 0, 1.0, 0, 0, 0,   # left arm
+     0.25, -0.25, 0, 1.0, 0, 0, 0],  # right arm
 ])
 
-# Forward kinematics and update frame placements
-pin.forwardKinematics(model, data, q_nom_joints)
+PELVIS_JOINT_ID = 1  # free-flyer root joint; child link is the pelvis
+
+np.set_printoptions(precision=6, suppress=True)
+
+# ---------------------------------------------------------------------------
+# Load model and run forward kinematics
+# ---------------------------------------------------------------------------
+
+model = pin.buildModelFromUrdf(URDF_FILE, pin.JointModelFreeFlyer())
+data  = model.createData()
+
+pin.forwardKinematics(model, data, Q_NOM)
 pin.updateFramePlacements(model, data)
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
-###########################################################
-# COMPUTE COMPOSITE PROPERTIES
-###########################################################
+def parallel_axis(m: float, r: np.ndarray) -> np.ndarray:
+    """Inertia correction for shifting reference point by r (Steiner term)."""
+    rx = pin.skew(r)
+    return m * (rx.T @ rx)
 
-# compute total mass and COM
-total_mass = 0.0
+
+def sym(A: np.ndarray) -> np.ndarray:
+    """Symmetrize a matrix to eliminate numerical antisymmetry."""
+    return 0.5 * (A + A.T)
+
+# ---------------------------------------------------------------------------
+# Total mass and system COM
+# ---------------------------------------------------------------------------
+
+total_mass  = sum(model.inertias[jid].mass for jid in range(1, model.njoints))
+
 com_world = np.zeros(3)
-
-for i in range(model.njoints):
-    I_joint = model.inertias[i]
-    mass = I_joint.mass
-    
-    # Position of this body's COM in world frame
-    oMj = data.oMi[i]
-    com_i_world = oMj.translation + oMj.rotation @ I_joint.lever
-    
-    total_mass += mass
-    com_world += mass * com_i_world
-
+for jid in range(1, model.njoints):
+    I_joint = model.inertias[jid]
+    oMj     = data.oMi[jid]
+    com_world += I_joint.mass * (oMj.translation + oMj.rotation @ I_joint.lever)
 com_world /= total_mass
 
-print(f"Total mass: {total_mass:.4f} kg")
-print(f"COM composite (world frame): {com_world}")
-print(f"COM pinocchio (world frame): {pin.centerOfMass(model,data)}")
+print(f"Total mass              : {total_mass:.6f} kg")
+print(f"COM (composite, world)  : {com_world}")
+print(f"COM (pinocchio,  world) : {pin.centerOfMass(model, data, Q_NOM)}")
 
-# compute composite inertia about COM in WORLD frame
+# ---------------------------------------------------------------------------
+# Composite inertia about the system COM, in world frame
+# ---------------------------------------------------------------------------
+
 I_composite_world = np.zeros((3, 3))
 
-for i in range(model.njoints):
-    I_joint = model.inertias[i]
-    mass = I_joint.mass
-    oMj = data.oMi[i]
-    
-    # Inertia in joint frame (about body's own COM)
-    I_body = I_joint.inertia
-    
-    # Rotate to world frame
-    R = oMj.rotation
-    I_world = R @ I_body @ R.T
-    
-    # Position of body COM in world frame
-    com_i_world = oMj.translation + R @ I_joint.lever
-    
-    # Parallel axis theorem: shift from body COM to system COM
-    r = com_i_world - com_world
-    r_cross = pin.skew(r)
-    I_parallel = mass * (r_cross.T @ r_cross)
-    
-    # Add contribution
-    I_composite_world += I_world + I_parallel
+for jid in range(1, model.njoints):
+    I_joint = model.inertias[jid]
+    oMj     = data.oMi[jid]
+    R, p    = oMj.rotation, oMj.translation
 
-print(f"\nComposite inertia about COM (world frame):")
+    # Body inertia (about its own COM) rotated into world frame
+    I_body_world = R @ I_joint.inertia @ R.T
+
+    # Shift from body COM to system COM
+    r = (p + R @ I_joint.lever) - com_world
+    I_composite_world += I_body_world + parallel_axis(I_joint.mass, r)
+
+I_composite_world = sym(I_composite_world)
+
+print("\nComposite inertia about system COM (world frame):")
 print(I_composite_world)
 
-# 3. Express composite inertia in BODY (base) frame
-# Get base frame orientation
-base_joint_id = 1  # Usually joint 1 is the floating base
-oM_base = data.oMi[base_joint_id]
-R_base = oM_base.rotation  # world_R_base
+# ---------------------------------------------------------------------------
+# Composite inertia in base / pelvis frames
+# ---------------------------------------------------------------------------
 
-# Transform: I_body = R_base^T * I_world * R_base
-I_composite_body = R_base.T @ I_composite_world @ R_base
+R_base = data.oMi[PELVIS_JOINT_ID].rotation  # ^world R_base
 
-print(f"\nComposite inertia about COM (body/base frame):")
-print(I_composite_body)
+I_composite_base = sym(R_base.T @ I_composite_world @ R_base)
 
-# 4. Principal moments of inertia
-eigenvalues = np.linalg.eigvals(I_composite_body)
-eigenvalues = np.sort(eigenvalues)
+print("\nComposite inertia about system COM (base / pelvis frame):")
+print(I_composite_base)
 
-print(f"\nPrincipal moments of inertia:")
-print(f"  I1: {eigenvalues[0]:.4f} kg⋅m²")
-print(f"  I2: {eigenvalues[1]:.4f} kg⋅m²")
-print(f"  I3: {eigenvalues[2]:.4f} kg⋅m²")
+# ---------------------------------------------------------------------------
+# Principal moments of inertia
+# ---------------------------------------------------------------------------
+
+eigvals = np.sort(np.linalg.eigvalsh(I_composite_base))
+
+print("\nPrincipal moments of inertia (about system COM, base frame):")
+print(f"  I1: {eigvals[0]:.6f} kg·m²")
+print(f"  I2: {eigvals[1]:.6f} kg·m²")
+print(f"  I3: {eigvals[2]:.6f} kg·m²")
+
+# ---------------------------------------------------------------------------
+# Whole-body inertia about the pelvis origin, in pelvis frame
+# ---------------------------------------------------------------------------
+
+p_pelvis = data.oMi[PELVIS_JOINT_ID].translation
+
+# Shift from system COM to pelvis origin
+r_com_to_pelvis = com_world - p_pelvis
+I_world_about_pelvis = sym(I_composite_world + parallel_axis(total_mass, r_com_to_pelvis))
+
+I_pelvis_about_pelvis = sym(R_base.T @ I_world_about_pelvis @ R_base)
+
+print("\nWhole-robot inertia about system COM, expressed in pelvis frame:")
+print(I_composite_base)
+
+print("\nWhole-robot inertia about pelvis origin, expressed in pelvis frame:")
+print(I_pelvis_about_pelvis)

@@ -51,19 +51,19 @@ class SRBDynamics(ABC):
 
         # system parameters (pulled from pinocchio + 29dof urdf)
         # nominal ocnfiguration is arms down, standing straight
-        self.pz_com = 0.69  # center of mass height in world frame
+        self.pz_com = 0.693  # center of mass height in world frame
         self.m = 33.34      # mass [kg]
         self.g = 9.81       # gravity [m/s^2]
         self.I = ca.vertcat(
-            ca.horzcat(3.7475,  0.0001,  0.087),
-            ca.horzcat(0.0001,  3.301 , -0.0009),
-            ca.horzcat(0.087 , -0.0009,  0.5165),
-        ) # body frame inertia matrix [kg*m^2] (from pinocchio)
+            ca.horzcat(3.747533,  0.000051,  0.086972),
+            ca.horzcat(0.000051,  3.300958, -0.000894),
+            ca.horzcat(0.086972, -0.000894,  0.516523),
+        ) # inertia matrix about COM [kg*m^2]
         # self.I = ca.vertcat(
-        #     ca.horzcat(4.06196200e+00,  3.91260469e-05,  1.01482291e-01),
-        #     ca.horzcat(3.91260469e-05,  3.61605836e+00, -6.28007265e-04),
-        #     ca.horzcat(1.01482291e-01, -6.28007265e-04,  5.17192159e-01),
-        # ) # body frame inertia matrix [kg*m^2] (from mujoco)
+        #     ca.horzcat(4.061963,  0.000039,  0.101482),
+        #     ca.horzcat(0.000039,  3.616058, -0.000628),
+        #     ca.horzcat(0.101482, -0.000628,  0.517193),
+        # ) # inertia matrix about base frame [kg*m^2]
 
         # nominal G1 offset from base to foot
         self.hip_offset = 0.1185
