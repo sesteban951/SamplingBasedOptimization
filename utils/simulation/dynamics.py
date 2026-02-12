@@ -144,11 +144,19 @@ class Dynamics:
         self.inertia_world = jax.jit(self._inertia_world)
 
         # rotations / SO(3) maps (batched)
-        # self._quat_diff = jax.jit(self._quat_diff)
-        # self._quat_log  = jax.jit(self._quat_log)
         self.quat_to_rot_matrix = jax.jit(self._quat_to_rot_matrix)
         self.quat_log_diff = jax.jit(self._quat_log_diff)
         self.vec_body_to_world = jax.jit(self._vec_body_to_world)
+
+        # helpful vector operations
+        self.skew = jax.jit(self._skew)
+
+        # # ---- Optional but useful if used directly in rollouts ----
+        # self.quat_normalize     = jax.jit(self._quat_normalize)
+        # self.quat_conj          = jax.jit(self._quat_conj)
+        # self.quat_mult          = jax.jit(self._quat_mult)
+        # self.quat_diff          = jax.jit(self._quat_diff)
+        # self.quat_log           = jax.jit(self._quat_log)
 
         print("JIT compilation of dynamics functions complete.")
 
@@ -207,6 +215,67 @@ class Dynamics:
         I_world  = R_wb @ self.I_base @ jnp.swapaxes(R_wb, -1, -2)
         I_world = 0.5 * (I_world + jnp.swapaxes(I_world, -1, -2))  # NOTE: enforce symmetry
         return I_world
+
+
+    ################################## HELPERS ##################################
+
+    @staticmethod
+    def _skew_single_env(w: jnp.ndarray) -> jnp.ndarray:
+        """
+        Vector to skew-symmetric matrix for a single environment, [ ⋅ ]ₓ
+
+        Args:
+            w: (3,) vector
+        Returns:
+            W: (3,3) skew-symmetric matrix such that W @ v == w x v
+        """
+        wx, wy, wz = w[0], w[1], w[2]
+        return jnp.array([
+            [0.0, -wz,  wy],
+            [wz,  0.0, -wx],
+            [-wy, wx,  0.0]
+        ], dtype=w.dtype)
+
+    @staticmethod
+    def _skew(w: jnp.ndarray) -> jnp.ndarray:
+        """
+        Batched skew operator.
+
+        Args:
+            w: (B,3) vectors
+        Returns:
+            W: (B,3,3) skew matrices
+        """
+        return jax.vmap(Dynamics._skew_single_env)(w)
+
+    @staticmethod
+    def _omega_cross_Iomega(omega: jnp.ndarray, I: jnp.ndarray) -> jnp.ndarray:
+        """
+        Compute omega x (I omega), batched.
+
+        Args:
+            omega: (B,3)
+            I:     (B,3,3) or (3,3) broadcastable
+        Returns:
+            term:  (B,3)
+        """
+        Iomega = jnp.einsum('bij,bj->bi', I, omega)  # (B,3)
+        return jnp.cross(omega, Iomega)              # (B,3)
+
+    @staticmethod
+    def _omega_cross_Iomega_via_skew(omega: jnp.ndarray, I: jnp.ndarray) -> jnp.ndarray:
+        """
+        Same as above but via skew matrix: hat(omega) @ (I omega).
+
+        Args:
+            omega: (B,3)
+            I:     (B,3,3) or (3,3) broadcastable
+        Returns:
+            term:  (B,3)
+        """
+        Iomega = jnp.einsum('bij,bj->bi', I, omega)         # (B,3)
+        Omega_hat = Dynamics._skew(omega)                   # (B,3,3)
+        return jnp.einsum('bij,bj->bi', Omega_hat, Iomega)  # (B,3)
 
 
     ################################## ROTATIONS ##################################
