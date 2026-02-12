@@ -5,6 +5,8 @@ channels:
 dependencies:
   - python=3.10
   - numpy
+  - scipy
+  - casadi
   - matplotlib
   - pip
   - pinocchio
