@@ -58,7 +58,12 @@ class SRBDynamics(ABC):
             ca.horzcat(3.7475,  0.0001,  0.087),
             ca.horzcat(0.0001,  3.301 , -0.0009),
             ca.horzcat(0.087 , -0.0009,  0.5165),
-        ) # body frame inertia matrix [kg*m^2]
+        ) # body frame inertia matrix [kg*m^2] (from pinocchio)
+        # self.I = ca.vertcat(
+        #     ca.horzcat(4.06196200e+00,  3.91260469e-05,  1.01482291e-01),
+        #     ca.horzcat(3.91260469e-05,  3.61605836e+00, -6.28007265e-04),
+        #     ca.horzcat(1.01482291e-01, -6.28007265e-04,  5.17192159e-01),
+        # ) # body frame inertia matrix [kg*m^2] (from mujoco)
 
         # nominal G1 offset from base to foot
         self.hip_offset = 0.1185
