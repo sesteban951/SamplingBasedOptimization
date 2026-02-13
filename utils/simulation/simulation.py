@@ -38,7 +38,7 @@ class Model_Config:
 
     # action mode
     action_mode: str = "tau"   # action mode:    "tau" (pure torque) 
-                               #              or "pos" (PD tracking)
+                               #              or "pos" (PD tracking) 
 
 
 # parallel sim config
@@ -152,7 +152,6 @@ class ParallelSim():
 
     ####################################### ROLLOUTS #######################################
 
-    # rollout with given inputs
     def _rollout(self, q0, v0, U):
         """
         Perform parallel rollouts with a given initial state and action sequences.
@@ -211,6 +210,83 @@ class ParallelSim():
         tau_log = jnp.swapaxes(tau_hist, 0, 1)
 
         return q_log, v_log, tau_log
+    
+
+    def _rollout_wrench(self, q0, v0, U, F_const_W, M_const_W, body_id=1):
+        """
+        Perform parallel rollouts with constant external wrench injected at the floating base
+        via `qfrc_applied` every step.
+
+        Args:
+            q0:         (nq,) initial qpos
+            v0:         (nv,) initial qvel
+            U:          (B, N, nu) action sequence (torques or desired joint positions)
+            F_const_W:  (3,) or (B,3) constant world force
+            M_const_W:  (3,) or (B,3) constant world torque (couple), world
+            body_id:    base/pelvis body id (used only for world->body torque conversion)
+
+        Returns:
+            q_log:   (B, N+1, nq)
+            v_log:   (B, N+1, nv)
+            tau_log: (B, N, nu)
+        """
+        B, N, _ = U.shape
+
+        # Batch initial states
+        q0_batch = jnp.broadcast_to(q0, (B, self.nq))
+        v0_batch = jnp.broadcast_to(v0, (B, self.nv))
+        data0 = self.data_batch0.replace(qpos=q0_batch, qvel=v0_batch)
+
+        # Make constant wrench batched
+        F_const_W = jnp.asarray(F_const_W)
+        M_const_W = jnp.asarray(M_const_W)
+
+        F_const_W = lax.cond(
+            F_const_W.ndim == 1,
+            lambda _: jnp.broadcast_to(F_const_W[None, :], (B, 3)),
+            lambda _: F_const_W,
+            operand=None,
+        )
+        M_const_W = lax.cond(
+            M_const_W.ndim == 1,
+            lambda _: jnp.broadcast_to(M_const_W[None, :], (B, 3)),
+            lambda _: M_const_W,
+            operand=None,
+        )
+
+        # (B, N, nu) -> (N, B, nu)
+        U = jnp.swapaxes(U, 0, 1)
+
+        def integration_step(data, uk):
+            # Compute joint-space actuation
+            tau = lax.cond(
+                self.use_pd,
+                lambda _: self._compute_pd_torque(data.qpos, data.qvel, uk),
+                lambda _: uk,
+                operand=None
+            )
+
+            # Set control
+            data = data.replace(ctrl=tau)
+
+            # Inject constant wrench at base via qfrc_applied
+            data = self.inject_base_wrench_qfrc(data, F_const_W, M_const_W, body_id=body_id)
+
+            # Step dynamics
+            data = self.step_fn_batched(data)
+
+            return data, (data.qpos, data.qvel, data.actuator_force)
+
+        _, (q_hist, v_hist, tau_hist) = lax.scan(integration_step, data0, U, length=N)
+
+        q_hist = jnp.swapaxes(q_hist, 0, 1)  # (B,N,nq)
+        v_hist = jnp.swapaxes(v_hist, 0, 1)  # (B,N,nv)
+
+        q_log = jnp.concatenate([q0_batch[:, None, :], q_hist], axis=1)  # (B,N+1,nq)
+        v_log = jnp.concatenate([v0_batch[:, None, :], v_hist], axis=1)  # (B,N+1,nv)
+        tau_log = jnp.swapaxes(tau_hist, 0, 1)  # (B,N,nu)
+
+        return q_log, v_log, tau_log
 
     ####################################### AUXILLARY #######################################
     
@@ -233,7 +309,36 @@ class ParallelSim():
         tau = self.Kp_batched * (q_des - q_act) + self.Kd_batched * (-v_act) # (B, nu)
 
         return tau
+    
 
+    def inject_base_wrench_qfrc(self, data, F_W, M_W, body_id=1):
+        """
+        Inject a wrench at the floating base via `qfrc_applied`.
+
+        Assumed convention for freejoint generalized forces:
+        qfrc_applied[..., 0:3] = world linear force
+        qfrc_applied[..., 3:6] = body-frame torque
+
+        Args:
+            data:   mjx.Data with batch dimension (B, ...)
+            F_W:    (B,3) world force
+            M_W:    (B,3) world torque (couple)
+            body_id: int, body id for the base/pelvis (used to get orientation)
+        """
+        # data.xmat is (B, nbody, 9) row-major
+        B = data.xmat.shape[0]
+        R_BW = data.xmat[:, body_id, :].reshape((B, 3, 3))  # (B,3,3)
+
+        # Convert world torque -> body torque: M_B = R_WB * M_W = R_BW^T * M_W
+        M_B = jnp.einsum('bij,bj->bi', jnp.swapaxes(R_BW, 1, 2), M_W)  # (B,3)
+
+        qfrc = jnp.zeros_like(data.qfrc_applied)  # (B,nv)
+        qfrc = qfrc.at[:, 0:3].set(F_W)
+        qfrc = qfrc.at[:, 3:6].set(M_B)
+
+        # (Optional) clear xfrc_applied so you're only using qfrc injection
+        data = data.replace(qfrc_applied=qfrc, xfrc_applied=jnp.zeros_like(data.xfrc_applied))
+        return data
 
 #############################################################
 # EXAMPLE USAGE
@@ -291,20 +396,41 @@ if __name__ == "__main__":
     #     action_mode="pos"
     # )
     # q0 = jnp.array([0, 0.83, 0, 0.22, -0.415, 0.22, -0.415])  # bent knees
+    # model_config = Model_Config(
+    #     xml_path="./models/g1/g1_planar.xml",
+    #     Kp=[250, 250, 50, 250, 250, 50, # legs
+    #         150, 150, 150, 150],        # arms
+    #     Kd=[3.0, ] * 10,  
+    #     q_actuated_idx=list(range(3,13)),
+    #     v_actuated_idx=list(range(3,13)),
+    #     action_mode="pos"
+    # )
+    # q0 = jnp.array([
+    #     0.0, 0.0, 0.0,
+    #     0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    #     0.0, 0.0, 0.0, 0.0
+    # ])
+
+    # load mujoco model
+    xml_path = "./models/g1/g1_21dof.xml"
+    mj_model = mujoco.MjModel.from_xml_path(xml_path)
+    mj_data = mujoco.MjData(mj_model)
+    keyframe = "standing"
+    key_id = mj_model.key(keyframe).id
+    q0 = jnp.array(mj_model.key_qpos[key_id])
+    v0 = jnp.array(mj_model.key_qvel[key_id])
     model_config = Model_Config(
-        xml_path="./models/g1/g1_planar.xml",
-        Kp=[250, 250, 50, 250, 250, 50, # legs
-            150, 150, 150, 150],        # arms
-        Kd=[3.0, ] * 10,  
-        q_actuated_idx=list(range(3,13)),
-        v_actuated_idx=list(range(3,13)),
+        xml_path=xml_path,
+        Kp=[300, 300, 300, 300, 100, 100, # left leg
+            300, 300, 300, 300, 100, 100, # right leg
+            100,                          # waist
+            150, 150, 150, 150,           # left arm
+            150, 150, 150, 150],          # right arm
+        Kd=[3.0, ] * 21,  
+        q_actuated_idx=list(range(7,7+21)),
+        v_actuated_idx=list(range(6,6+21)),
         action_mode="pos"
     )
-    q0 = jnp.array([
-        0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0
-    ])
 
     # parallel sim config
     sim_config = ParallelSim_Config(
@@ -368,14 +494,13 @@ if __name__ == "__main__":
     # time axis (optional)
     t = np.arange(q_log.shape[1]) * dt  # (N+1,)
 
-    plt.figure()
-    for k in idx:
-        plt.plot(t, q_log[k, :, 0], alpha=0.7)
-        plt.plot(t, q_log[k, :, 1], alpha=0.7)
-        # plt.plot(t[:-1], tau_log[k, :, 0], alpha=0.7)
+    # plt.figure()
+    # for k in idx:
+    #     plt.plot(t, q_log[k, :, 0], alpha=0.7)
+    #     plt.plot(t, q_log[k, :, 1], alpha=0.7)
+    #     # plt.plot(t[:-1], tau_log[k, :, 0], alpha=0.7)
 
-    plt.xlabel("Time (s)")
-    plt.ylabel("Positions")
+    # plt.xlabel("Time (s)")
+    # plt.ylabel("Positions")
 
-    plt.show()
-    
+    # plt.show()
