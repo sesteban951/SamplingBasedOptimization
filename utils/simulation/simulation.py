@@ -71,7 +71,7 @@ class ParallelSim():
 
     # initialize the class
     def __init__(self, model_config: Model_Config,
-                       sim_config: ParallelSim_Config,):
+                       sim_config: ParallelSim_Config):
 
         # set some config params for the class
         self.B = sim_config.batch_size
@@ -81,8 +81,7 @@ class ParallelSim():
 
         # external wrench
         self.use_external_wrench = sim_config.use_external_wrench
-        if self.use_external_wrench == True:
-            
+        if (self.use_external_wrench == True) and (self.has_3D_floating_base == True):
             self._initialize_dynamics(model_config)
             self._initialize_SRB_trajectories(sim_config)
 
@@ -117,6 +116,9 @@ class ParallelSim():
         self.nv = self.mjx_model.nv
         self.nu = self.mjx_model.nu
 
+        # check if there is a floating base system
+        self.has_3D_floating_base = bool((mj_model.jnt_type == mujoco.mjtJoint.mjJNT_FREE).any())
+
         # load simulation dt (rounded) # NOTE: can change integrator and sim_dt here
         self.dt = round(float(self.mjx_model.opt.timestep), 6)
 
@@ -143,6 +145,7 @@ class ParallelSim():
 
         # print message
         print(f"Initialized batched MJX model from [{model_config.xml_path}].")
+        print(f"   [3D Floating Base: {self.has_3D_floating_base}]")
         print(f"   [dt: {self.dt:.4f} seconds]")
         print(f"   [nq: {self.nq}]")
         print(f"   [nv: {self.nv}]")
@@ -166,7 +169,8 @@ class ParallelSim():
         """
         Initialize the SRB trajectories for external wrench injection.
         """
-        # direcotry that has the SRB trajectories
+        
+        # directory that has the SRB trajectories
         dir = sim_config.srb_traj_dir
 
         # which data to load
@@ -339,13 +343,9 @@ class ParallelSim():
             )
             data = data.replace(ctrl=tau)   
 
-            # optionally inject external wrench (overwrites qfrc_applied each step)
-            data = lax.cond(
-                self.use_external_wrench,
-                lambda d: self._base_wrench_qfrc(d, F_W_b, M_B_b),
-                lambda d: d,
-                data
-            )
+            # inject external wrench
+            if self.use_external_wrench:
+                data = self._base_wrench_qfrc(data, F_W_b, M_B_b)
 
             # step the simulation forward
             data = self.step_fn_batched(data)    
@@ -462,15 +462,6 @@ if __name__ == "__main__":
     # )
     # q0 = jnp.array([0, 0.83, 0, 0.22, -0.415, 0.22, -0.415])  # bent knees
     # model_config = Model_Config(
-    #     xml_path="./models/biped/biped.xml",
-    #     Kp=[100.0, 100.0, 100.0, 100.0], 
-    #     Kd=[5.0, 5.0, 5.0, 5.0],  
-    #     q_actuated_idx=[3, 4, 5, 6],
-    #     v_actuated_idx=[3, 4, 5, 6],
-    #     action_mode="pos"
-    # )
-    # q0 = jnp.array([0, 0.83, 0, 0.22, -0.415, 0.22, -0.415])  # bent knees
-    # model_config = Model_Config(
     #     xml_path="./models/g1/g1_planar.xml",
     #     Kp=[250, 250, 50, 250, 250, 50, # legs
     #         150, 150, 150, 150],        # arms
@@ -509,8 +500,8 @@ if __name__ == "__main__":
     # parallel sim config
     sim_config = ParallelSim_Config(
         batch_size = 512,
-        use_external_wrench=True,
-        srb_traj_dir="./results/srb_jump/"
+        # use_external_wrench=True,
+        # srb_traj_dir="./results/srb_jump/"
     )
 
     # create the parallel sim object
@@ -595,10 +586,9 @@ if __name__ == "__main__":
     
     plt.figure()
     for k in idx:
-        # plt.plot(t, q_log[k, :, 0], alpha=0.7)
-        # plt.plot(t, q_log[k, :, 1], alpha=0.7)
+        plt.plot(t, q_log[k, :, 0], alpha=0.7)
+        plt.plot(t, q_log[k, :, 1], alpha=0.7)
         # plt.plot(t, q_log[k, :, 2], alpha=0.7)
-        plt.plot(t, q_log[k, :, 2], alpha=0.7)
         # plt.plot(t[:-1], tau_log[k, :, 0], alpha=0.7)
 
     plt.xlabel("Time (s)")
