@@ -51,7 +51,7 @@ class Dynamics:
         # initialize jit functions
         self._initialize_jit_functions()
 
-        print("Initialized the dynamics class")
+        print("Initialized the dynamics class.")
 
     
     ################################## INITIALIZATION ##################################

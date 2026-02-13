@@ -17,6 +17,12 @@ from jax import lax
 import mujoco
 import mujoco.mjx as mjx
 
+# custom imports
+from utils.simulation import dynamics
+from utils.interpolation import interp
+from utils.kinematics import kin
+
+
 #############################################################
 # PARALLEL DYNAMICS ROLLOUT CLASS
 #############################################################
@@ -48,6 +54,11 @@ class ParallelSim_Config:
     # simulation parameters
     batch_size: int           # batch size for parallel rollout
 
+    # some options on whether or not to use external wrench
+    use_external_wrench: bool = False
+    srb_traj_dir: str = None  
+
+
 # MJX Rollout class
 class ParallelSim():
     """
@@ -67,6 +78,15 @@ class ParallelSim():
 
         # load the model from XML
         self._initialize_model(model_config)
+
+        # external wrench
+        self.use_external_wrench = sim_config.use_external_wrench
+        if self.use_external_wrench == True:
+            
+            self._initialize_dynamics(model_config)
+            self._initialize_SRB_trajectories(sim_config)
+
+            print("External wrench injection enabled.")
 
         # initialize the jit functions
         self._initialize_jit_functions()
@@ -123,10 +143,131 @@ class ParallelSim():
 
         # print message
         print(f"Initialized batched MJX model from [{model_config.xml_path}].")
+        print(f"   [dt: {self.dt:.4f} seconds]")
         print(f"   [nq: {self.nq}]")
         print(f"   [nv: {self.nv}]")
         print(f"   [nu: {self.nu}]")
 
+
+    def _initialize_dynamics(self, model_config: Model_Config):
+        """
+        Initialize the dynamics object for computing external wrenches.
+        """
+        # build the dynamics config
+        dyn_config = dynamics.Dynamics_Config(
+            xml_path=model_config.xml_path,
+            num_envs=self.B,
+        )
+        # instantiate the dynamics object
+        self.dyn = dynamics.Dynamics(dyn_config)
+
+
+    def _initialize_SRB_trajectories(self, sim_config: ParallelSim_Config):
+        """
+        Initialize the SRB trajectories for external wrench injection.
+        """
+        # direcotry that has the SRB trajectories
+        dir = sim_config.srb_traj_dir
+
+        # which data to load
+        time_file = dir + "time.csv"
+        q_file    = dir + "q_opt.csv"
+        v_file    = dir + "v_opt.csv"
+        a_file    = dir + "a_opt.csv"
+        tau_file  = dir + "tau_opt.csv"
+
+        # load data from csv files
+        times    = np.loadtxt(time_file, delimiter=",")
+        q_traj   = np.loadtxt(q_file, delimiter=",")
+        v_traj   = np.loadtxt(v_file, delimiter=",")
+        a_traj   = np.loadtxt(a_file, delimiter=",")
+        tau_traj = np.loadtxt(tau_file, delimiter=",")
+
+        # extract all the data
+        p_com_traj = q_traj[:, :3]    # world position
+        v_com_traj = v_traj[:, :3]    # world linear velocity
+        quat_traj  = q_traj[:, 3:]    # world orientation (quaternion)
+        omega_traj = v_traj[:, 3:]    # body frame angular velocity
+        F_W_traj   = tau_traj[:, :3]  # world forces
+        M_W_traj   = tau_traj[:, 3:]  # world moments
+
+        # add the last elemnent to the forces and moments to make sure we can interpolate all the way to the end of the trajectory
+        F_W_traj = np.vstack([F_W_traj, F_W_traj[-1]])
+        M_W_traj = np.vstack([M_W_traj, M_W_traj[-1]])
+
+        # extract some other info 
+        Nx_traj = q_traj.shape[0]
+        Nu_traj = tau_traj.shape[0]
+        T_traj = times[-1]
+
+        # setup the simulation time axis for the SRB trajectory
+        dt_traj = times[1] - times[0]
+        dt_sim = self.dt
+        t0 = times[0]
+        tf = times[-1]
+
+        # time array 
+        t_sim = np.arange(t0, tf, dt_sim, dtype=np.float64)
+        N_sim = t_sim.shape[0]
+
+        # allocate the SRB trajectory in the class
+        p_com_ref = np.zeros((N_sim, 3), dtype=np.float32)
+        v_com_ref = np.zeros((N_sim, 3), dtype=np.float32)
+        quat_ref  = np.zeros((N_sim, 4), dtype=np.float32)
+        omega_ref = np.zeros((N_sim, 3), dtype=np.float32)
+        F_W_ref = np.zeros((N_sim, 3), dtype=np.float32)
+        M_W_ref = np.zeros((N_sim, 3), dtype=np.float32)
+
+        for k in range(N_sim):
+            t = float(t_sim[k])
+
+            idx_2 = int(np.searchsorted(times, t, side="right"))
+            idx_1 = idx_2 - 1
+
+            if idx_2 >= len(times):
+                idx_1 = idx_2 = len(times) - 1
+                alpha = 0.0
+            elif idx_1 < 0:
+                idx_1 = idx_2 = 0
+                alpha = 0.0
+            else:
+                t1_ = float(times[idx_1])
+                t2_ = float(times[idx_2])
+                denom = (t2_ - t1_)
+                if abs(denom) < 1e-12:
+                    alpha = 0.0
+                else:
+                    alpha = (t - t1_) / denom
+                    alpha = float(np.clip(alpha, 0.0, 1.0))
+
+            # Optional: normalize quats before slerp if your data may drift
+            q1 = quat_traj[idx_1]
+            q2 = quat_traj[idx_2]
+            q1 = q1 / (np.linalg.norm(q1) + 1e-12)
+            q2 = q2 / (np.linalg.norm(q2) + 1e-12)
+
+            p_com_ref[k] = interp.lerp(p_com_traj[idx_1], p_com_traj[idx_2], alpha)
+            v_com_ref[k] = interp.lerp(v_com_traj[idx_1], v_com_traj[idx_2], alpha)
+            omega_ref[k] = interp.lerp(omega_traj[idx_1], omega_traj[idx_2], alpha)
+            quat_ref[k]  = interp.slerp(q1, q2, alpha)
+
+            F_W_ref[k] = interp.lerp(F_W_traj[idx_1], F_W_traj[idx_2], alpha)
+            M_W_ref[k] = interp.lerp(M_W_traj[idx_1], M_W_traj[idx_2], alpha)
+
+        self.p_com_ref = jnp.asarray(p_com_ref)
+        self.v_com_ref = jnp.asarray(v_com_ref)
+        self.quat_ref  = jnp.asarray(quat_ref)
+        self.omega_ref = jnp.asarray(omega_ref)
+        self.F_W_ref   = jnp.asarray(F_W_ref)
+        self.M_W_ref   = jnp.asarray(M_W_ref)
+
+        print(f"Loaded SRB trajectory from [{dir}].")
+        print(f"   [Nx_traj: {Nx_traj}]")
+        print(f"   [Nu_traj: {Nu_traj}]")
+        print(f"   [dt_traj: {dt_traj}]")
+        print(f"   [T_traj: {T_traj:.4f} seconds]")
+
+        
     # initialize the jit functions
     def _initialize_jit_functions(self):
         """
@@ -150,6 +291,7 @@ class ParallelSim():
 
         print("JIT compilation of simulation functions complete.")
 
+
     ####################################### ROLLOUTS #######################################
 
     def _rollout(self, q0, v0, U):
@@ -166,7 +308,6 @@ class ParallelSim():
             v_log: jnp.array, logged velocities, shape (B, N+1, nv)
             tau_log: jnp.array, logged torques, shape (B, N, nu)
         """
-
         # get sizes
         B, N, _ = U.shape
 
@@ -180,20 +321,34 @@ class ParallelSim():
         # swap axes for easier indexing (B, N, nu) -> (N, B, nu)
         U = jnp.swapaxes(U, 0, 1)
 
+        # fixed wrench (WORLD force, BODY torque)
+        fixed_F_W = jnp.array([30.0, 0.0, 35.0 * 9.81], dtype=jnp.float32)  # example: +Z world force
+        fixed_M_B = jnp.array([0.0, 5.0, 5.0], dtype=jnp.float32)          # example: no body torque
+        F_W_b = jnp.broadcast_to(fixed_F_W[None, :], (B, 3))
+        M_B_b = jnp.broadcast_to(fixed_M_B[None, :], (B, 3))
+
         # main integration step body
         def integration_step(data, uk):
             
-            # compute the control based on action mode
+            # compute the control based on action mode and apply
             tau = lax.cond(
                 self.use_pd,                                                 # condition
                 lambda _: self._compute_pd_torque(data.qpos, data.qvel, uk), # position target function
                 lambda _: uk,                                                # torque target function
                 operand=None
             )
+            data = data.replace(ctrl=tau)   
 
-            # step the dynamics
-            data = data.replace(ctrl=tau)        # set the control
-            data = self.step_fn_batched(data)    # step
+            # optionally inject external wrench (overwrites qfrc_applied each step)
+            data = lax.cond(
+                self.use_external_wrench,
+                lambda d: self._base_wrench_qfrc(d, F_W_b, M_B_b),
+                lambda d: d,
+                data
+            )
+
+            # step the simulation forward
+            data = self.step_fn_batched(data)    
 
             return data, (data.qpos, data.qvel, data.actuator_force) # NOTE: takes torque limits into account
 
@@ -211,82 +366,6 @@ class ParallelSim():
 
         return q_log, v_log, tau_log
     
-
-    def _rollout_wrench(self, q0, v0, U, F_const_W, M_const_W, body_id=1):
-        """
-        Perform parallel rollouts with constant external wrench injected at the floating base
-        via `qfrc_applied` every step.
-
-        Args:
-            q0:         (nq,) initial qpos
-            v0:         (nv,) initial qvel
-            U:          (B, N, nu) action sequence (torques or desired joint positions)
-            F_const_W:  (3,) or (B,3) constant world force
-            M_const_W:  (3,) or (B,3) constant world torque (couple), world
-            body_id:    base/pelvis body id (used only for world->body torque conversion)
-
-        Returns:
-            q_log:   (B, N+1, nq)
-            v_log:   (B, N+1, nv)
-            tau_log: (B, N, nu)
-        """
-        B, N, _ = U.shape
-
-        # Batch initial states
-        q0_batch = jnp.broadcast_to(q0, (B, self.nq))
-        v0_batch = jnp.broadcast_to(v0, (B, self.nv))
-        data0 = self.data_batch0.replace(qpos=q0_batch, qvel=v0_batch)
-
-        # Make constant wrench batched
-        F_const_W = jnp.asarray(F_const_W)
-        M_const_W = jnp.asarray(M_const_W)
-
-        F_const_W = lax.cond(
-            F_const_W.ndim == 1,
-            lambda _: jnp.broadcast_to(F_const_W[None, :], (B, 3)),
-            lambda _: F_const_W,
-            operand=None,
-        )
-        M_const_W = lax.cond(
-            M_const_W.ndim == 1,
-            lambda _: jnp.broadcast_to(M_const_W[None, :], (B, 3)),
-            lambda _: M_const_W,
-            operand=None,
-        )
-
-        # (B, N, nu) -> (N, B, nu)
-        U = jnp.swapaxes(U, 0, 1)
-
-        def integration_step(data, uk):
-            # Compute joint-space actuation
-            tau = lax.cond(
-                self.use_pd,
-                lambda _: self._compute_pd_torque(data.qpos, data.qvel, uk),
-                lambda _: uk,
-                operand=None
-            )
-
-            # Set control
-            data = data.replace(ctrl=tau)
-
-            # Inject constant wrench at base via qfrc_applied
-            data = self.inject_base_wrench_qfrc(data, F_const_W, M_const_W, body_id=body_id)
-
-            # Step dynamics
-            data = self.step_fn_batched(data)
-
-            return data, (data.qpos, data.qvel, data.actuator_force)
-
-        _, (q_hist, v_hist, tau_hist) = lax.scan(integration_step, data0, U, length=N)
-
-        q_hist = jnp.swapaxes(q_hist, 0, 1)  # (B,N,nq)
-        v_hist = jnp.swapaxes(v_hist, 0, 1)  # (B,N,nv)
-
-        q_log = jnp.concatenate([q0_batch[:, None, :], q_hist], axis=1)  # (B,N+1,nq)
-        v_log = jnp.concatenate([v0_batch[:, None, :], v_hist], axis=1)  # (B,N+1,nv)
-        tau_log = jnp.swapaxes(tau_hist, 0, 1)  # (B,N,nu)
-
-        return q_log, v_log, tau_log
 
     ####################################### AUXILLARY #######################################
     
@@ -309,36 +388,30 @@ class ParallelSim():
         tau = self.Kp_batched * (q_des - q_act) + self.Kd_batched * (-v_act) # (B, nu)
 
         return tau
-    
 
-    def inject_base_wrench_qfrc(self, data, F_W, M_W, body_id=1):
+    def _base_wrench_qfrc(self, data, F_W, M_B):
         """
         Inject a wrench at the floating base via `qfrc_applied`.
 
-        Assumed convention for freejoint generalized forces:
+        NOTE: understanding how to apply wrenches to the robot
+        https://github.com/google-deepmind/mujoco/discussions/2350
+        https://mujoco.readthedocs.io/en/stable/mjx_api.html#mujoco.mjx.Data.qfrc_applied
+
+        Assumed (MuJoCo freejoint) convention:
         qfrc_applied[..., 0:3] = world linear force
         qfrc_applied[..., 3:6] = body-frame torque
 
-        Args:
-            data:   mjx.Data with batch dimension (B, ...)
-            F_W:    (B,3) world force
-            M_W:    (B,3) world torque (couple)
-            body_id: int, body id for the base/pelvis (used to get orientation)
+        Inputs:
+        F_W: (B,3) world force
+        M_B: (B,3) body frame torque
         """
-        # data.xmat is (B, nbody, 9) row-major
-        B = data.xmat.shape[0]
-        R_BW = data.xmat[:, body_id, :].reshape((B, 3, 3))  # (B,3,3)
-
-        # Convert world torque -> body torque: M_B = R_WB * M_W = R_BW^T * M_W
-        M_B = jnp.einsum('bij,bj->bi', jnp.swapaxes(R_BW, 1, 2), M_W)  # (B,3)
-
+        # build qfrc_applied (overwrite each step)
         qfrc = jnp.zeros_like(data.qfrc_applied)  # (B,nv)
         qfrc = qfrc.at[:, 0:3].set(F_W)
         qfrc = qfrc.at[:, 3:6].set(M_B)
 
-        # (Optional) clear xfrc_applied so you're only using qfrc injection
-        data = data.replace(qfrc_applied=qfrc, xfrc_applied=jnp.zeros_like(data.xfrc_applied))
-        return data
+        return data.replace(qfrc_applied=qfrc)
+
 
 #############################################################
 # EXAMPLE USAGE
@@ -349,6 +422,7 @@ if __name__ == "__main__":
     import numpy as np
     import matplotlib.pyplot as plt
     import time
+    import os
 
     # print deivce that we will use
     print(f"Using device: {jax.default_backend()}")
@@ -435,6 +509,8 @@ if __name__ == "__main__":
     # parallel sim config
     sim_config = ParallelSim_Config(
         batch_size = 512,
+        use_external_wrench=True,
+        srb_traj_dir="./results/srb_jump/"
     )
 
     # create the parallel sim object
@@ -453,7 +529,8 @@ if __name__ == "__main__":
 
     key = jax.random.PRNGKey(int(time.time()))
     key, subkey = jax.random.split(key)
-    U_B = jax.random.uniform(subkey, shape=(B, nu), minval=-1.0, maxval=1.0)   # (B, nu)
+    # U_B = jax.random.uniform(subkey, shape=(B, nu), minval=-1.0, maxval=1.0)   # (B, nu)
+    U_B = jnp.zeros((B, nu))  # zero controls
     U = jnp.broadcast_to(U_B[:, None, :], (B, N, nu))
 
     # run rollout
@@ -494,13 +571,37 @@ if __name__ == "__main__":
     # time axis (optional)
     t = np.arange(q_log.shape[1]) * dt  # (N+1,)
 
-    # plt.figure()
-    # for k in idx:
-    #     plt.plot(t, q_log[k, :, 0], alpha=0.7)
-    #     plt.plot(t, q_log[k, :, 1], alpha=0.7)
-    #     # plt.plot(t[:-1], tau_log[k, :, 0], alpha=0.7)
+    # pick one of the trajectories to save as csv
+    k = idx[0]
+    times = t
+    q_opt = q_log[k]      # (N+1, nq)
+    v_opt = v_log[k]      # (N+1, nv)
+    tau_opt = tau_log[k]  # (N, nu)
+    # save as csv files in the results folder
+    save_dir = "./results/parallel_sim/"
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+        print(f"Created directory: {save_dir}")
 
-    # plt.xlabel("Time (s)")
-    # plt.ylabel("Positions")
+    time_file = save_dir + "time.csv"
+    q_file = save_dir + "q_opt.csv"
+    v_file = save_dir + "v_opt.csv"
+    tau_file = save_dir + "tau_opt.csv"
+    np.savetxt(time_file, times, delimiter=",")
+    np.savetxt(q_file, q_opt, delimiter=",")
+    np.savetxt(v_file, v_opt, delimiter=",")
+    np.savetxt(tau_file, tau_opt, delimiter=",")
+    print(f"Saved results to {save_dir}")
+    
+    plt.figure()
+    for k in idx:
+        # plt.plot(t, q_log[k, :, 0], alpha=0.7)
+        # plt.plot(t, q_log[k, :, 1], alpha=0.7)
+        # plt.plot(t, q_log[k, :, 2], alpha=0.7)
+        plt.plot(t, q_log[k, :, 2], alpha=0.7)
+        # plt.plot(t[:-1], tau_log[k, :, 0], alpha=0.7)
 
-    # plt.show()
+    plt.xlabel("Time (s)")
+    plt.ylabel("Positions")
+
+    plt.show()
