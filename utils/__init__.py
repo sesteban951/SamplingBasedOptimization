@@ -5,6 +5,7 @@ from .algorithms.cem import *
 
 # simulation utils
 from .simulation.simulation import *   
+from .simulation.dynamics import *
 
 # kinematics and interpolation utils
 from .kinematics.kin import *
