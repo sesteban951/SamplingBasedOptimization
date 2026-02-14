@@ -150,6 +150,7 @@ class Dynamics:
         self.quat_to_rot_matrix = jax.jit(self._quat_to_rot_matrix)
         self.quat_log_diff = jax.jit(self._quat_log_diff)
         self.vec_body_to_world = jax.jit(self._vec_body_to_world)
+        self.vec_world_to_body = jax.jit(self._vec_world_to_body)
 
         # helpful vector operations
         self.skew = jax.jit(self._skew)
@@ -477,6 +478,22 @@ class Dynamics:
         R_wb = self._quat_to_rot_matrix(quat)      # (B,3,3)
         vec_W = jnp.einsum('bij,bj->bi', R_wb, vec_B)
         return vec_W
+    
+    def _vec_world_to_body(self, vec_W, quat):
+        """
+        Convert vectors from world frame to body frame (batched).
+        vec_B = R_wb(quat)^T @ vec_W
+
+        Args:
+            vec_W: (B,3) vectors expressed in world frame
+            quat : (B,4) quaternions [qw,qx,qy,qz] describing body orientation in world
+        Returns:
+            vec_B: (B,3) vectors expressed in body frame
+        """
+        quat  = self._quat_normalize(quat)              # (B,4)
+        R_wb  = self._quat_to_rot_matrix(quat)          # (B,3,3)
+        vec_B = jnp.einsum('bji,bj->bi', R_wb, vec_W)  # R^T @ vec_W
+        return vec_B
 
 
 #############################################################

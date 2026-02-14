@@ -59,6 +59,12 @@ class ParallelSim_Config:
     use_external_wrench: bool = False
     srb_traj_dir: str = None  
 
+    # viertual wrench gains
+    kp_lin: float = 250.0     # linear position gain
+    kd_lin: float = 10.0      # linear velocity gain
+    kp_ang: float = 100.0     # angular position gain
+    kd_ang: float = 5.0      # angular velocity gain
+
 
 # MJX Rollout class
 class ParallelSim():
@@ -274,8 +280,14 @@ class ParallelSim():
         self.M_W_ref    = jnp.asarray(M_W_ref)
 
         # broadcast gravity and inertia
-        self.gravity_B = jnp.broadcast_to(self.dyn.gravity, (self.B, 3))
-        self.I_B = jnp.broadcast_to(self.dyn.I_base, (self.B, 3, 3))
+        self.gravity_batch = jnp.broadcast_to(self.dyn.gravity, (self.B, 3))
+        self.I_base_batch = jnp.broadcast_to(self.dyn.I_base, (self.B, 3, 3))
+
+        # PD gains for the external wrnech 
+        self.kp_lin = sim_config.kp_lin
+        self.kd_lin = sim_config.kd_lin
+        self.kp_ang = sim_config.kp_ang
+        self.kd_ang = sim_config.kd_ang
 
         print(f"Loaded SRB trajectory from [{dir}].")
         print(f"   [Nx_traj: {Nx_traj}]")
@@ -363,7 +375,7 @@ class ParallelSim():
             return (data, step_idx + 1), (data.qpos, data.qvel, data.actuator_force) # NOTE: takes torque limits into account
 
         # forward propagate
-        (_, _), (q_hist, v_hist, tau_hist) = lax.scan(integration_step, (data0, 0), U, length=N)
+        (_, _), (q_hist, v_hist, tau_hist) = lax.scan(integration_step, (data0, jnp.int32(0)), U, length=N)
 
         # q_hist, v_hist: (N, B, nq/nv) -> (B, N, nq/nv)
         q_hist = jnp.swapaxes(q_hist, 0, 1)
@@ -411,10 +423,15 @@ class ParallelSim():
             M_B: (B, 3) body frame torque to apply at the base
         """
         # current states of the mujoco 
-        p_base  = data.qpos[:, :3]    # (B, 3)
+        p_base = data.qpos[:, :3]     # (B, 3)
+        v_base = data.qvel[:, :3]     # (B, 3)
         quat    = data.qpos[:, 3:7]   # (B, 4)
-        v_base  = data.qvel[:, :3]    # (B, 3)
         omega   = data.qvel[:, 3:6]   # (B, 3)
+
+        # current com state
+        p_com_batch, v_com_batch = self.dyn.com_state_in_world(data.qpos, data.qvel)  # (B, 3), (B, 3)
+
+        # ----------------------- references -----------------------
 
         # reference states from the SRB trajectory
         p_com_ref = self.p_com_ref[step_idx]  # (3,)
@@ -424,29 +441,52 @@ class ParallelSim():
         omega_ref = self.omega_ref[step_idx]  # (3,)
         alpha_ref = self.alpha_ref[step_idx]  # (3,)
 
-        p_com_ref_B = jnp.broadcast_to(p_com_ref, (self.B, 3))   # (B, 3)
-        v_com_ref_B = jnp.broadcast_to(v_com_ref, (self.B, 3))   # (B, 3)
-        a_com_ref_B = jnp.broadcast_to(a_com_ref, (self.B, 3))   # (B, 3)
-        quat_ref_B  = jnp.broadcast_to(quat_ref, (self.B, 4))    # (B, 4)
-        omega_ref_B = jnp.broadcast_to(omega_ref, (self.B, 3))   # (B, 3)
-        alpha_ref_B = jnp.broadcast_to(alpha_ref, (self.B, 3))   # (B, 3)
+        p_com_ref_batch = jnp.broadcast_to(p_com_ref, (self.B, 3))   # (B, 3)
+        v_com_ref_batch = jnp.broadcast_to(v_com_ref, (self.B, 3))   # (B, 3)
+        a_com_ref_batch = jnp.broadcast_to(a_com_ref, (self.B, 3))   # (B, 3)
+        quat_ref_batch  = jnp.broadcast_to(quat_ref, (self.B, 4))    # (B, 4)
+        omega_ref_batch = jnp.broadcast_to(omega_ref, (self.B, 3))   # (B, 3)
+        alpha_ref_batch = jnp.broadcast_to(alpha_ref, (self.B, 3))   # (B, 3)
 
-        # gains
-        kp_lin = 100.0
-        kd_lin = 5.0
-        kp_rot = 100.0
-        kd_rot = 5.0    
+        # ----------------------- Force in World -----------------------
 
         # force to track the COM state trajectory
         F_W = self.dyn.mass * (
-              a_com_ref_B
-            + kp_lin * (p_com_ref_B - p_base)
-            + kd_lin * (v_com_ref_B - v_base)
-            - self.gravity_B
+              a_com_ref_batch
+            + self.kp_lin * (p_com_ref_batch - p_com_batch)
+            + self.kd_lin * (v_com_ref_batch - v_com_batch)
+            - self.gravity_batch
         )
 
-        # TODO: implement the moment to track the orientation trajectory
-        M_B = jnp.zeros((self.B, 3))  # placeholder for now
+        # ----------------------- Moment in Base -----------------------
+
+        # inertia helper: I @ vec for batched (B, 3)
+        I_B  = self.I_base_batch                                  # (B, 3, 3)
+        Iv   = lambda vec: jnp.einsum('ij,bj->bi', self.dyn.I_base, vec)  # (B, 3)
+
+        # feedforward moment
+        M_ff = Iv(alpha_ref_batch)    # (B, 3)
+
+        # the coriolis term
+        C = dynamics.Dynamics._omega_cross_Iomega(omega, I_B)      # (B, 3)
+
+        # orientation moment
+        orient_err = self.dyn.quat_log_diff(quat, quat_ref_batch)  # (B, 3)
+        pd_orient  = self.kp_ang * Iv(orient_err)                       # (B, 3)
+        pd_angvel = self.kd_ang * Iv(omega_ref_batch - omega)           # (B, 3)
+        M_ori = pd_orient + pd_angvel                              # (B, 3)
+
+        # gravity force in world frame → rotate into body frame
+        F_grav_W = self.dyn.mass * self.gravity_batch          # (B, 3)
+        F_grav_B = self.dyn.vec_world_to_body(F_grav_W, quat)  # (B, 3)
+
+        # compensation of gravity
+        r_com_W  = p_com_batch - p_base                         # (B, 3)
+        r_com_B  = self.dyn.vec_world_to_body(r_com_W, quat)    # (B, 3)
+        M_grav = jnp.cross(r_com_B, F_grav_B)                  # (B, 3)
+
+        # Moment that tracks the orientation trajectory and compensates for gravity
+        M_B = M_ff + C + M_ori - M_grav
 
         return F_W, M_B
 
@@ -557,7 +597,7 @@ if __name__ == "__main__":
         Kd=[3.0, ] * 21,  
         q_actuated_idx=list(range(7,7+21)),
         v_actuated_idx=list(range(6,6+21)),
-        action_mode="tau"
+        action_mode="pos"
     )
 
     # parallel sim config

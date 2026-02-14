@@ -117,8 +117,6 @@ class SRB_Jump(SRBDynamics):
 
         return cost_terminal
 
-##############################################################
-
 
 ##############################################################
 # Trajectory Optimization
@@ -179,7 +177,7 @@ p0_L = ca.DM(p0_L)
 p0_R = ca.DM(p0_R)
 
 # desired goal state - jump forward, stay upright
-x_goal = np.array([1, 0, 0.69,   # p_com (forward, same height)
+x_goal = np.array([1.25, 0, 0.69,   # p_com (forward, same height)
                    1, 0, 0, 0,   # quaternion (upright)
                    0, 0, 0,        # v_com (stopped)
                    0, 0, 0])       # w_body
@@ -220,8 +218,8 @@ for k in range(N):
     opti.subject_to(X[:, k + 1] == x_next)
 
 # add z_com constraints
-pz_min = 0.3
-pz_max = 0.8
+pz_min = 0.4
+pz_max = 0.9
 for k in range(N+1):
     opti.subject_to(X[2, k] > pz_min)  # enforce constant height
     opti.subject_to(X[2, k] < pz_max)  # enforce constant height
