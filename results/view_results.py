@@ -104,8 +104,13 @@ nv = v_opt.shape[-1]
 nu = tau_opt.shape[-1] if tau_opt.ndim > 1 else 1
 
 # Get joint and actuator names from MuJoCo model
-q_names = [model.joint(i).name if model.joint(i).name else f'q[{i}]' for i in range(nq)]
-v_names = [model.joint(i).name if model.joint(i).name else f'v[{i}]' for i in range(nv)]
+# q_names = [model.joint(i).name if model.joint(i).name else f'q[{i}]' for i in range(nq)]
+# v_names = [model.joint(i).name if model.joint(i).name else f'v[{i}]' for i in range(nv)]
+# use njnt for joint names, not nq/nv
+q_names = [model.joint(i).name if model.joint(i).name else f'q[{i}]' for i in range(model.njnt)]
+v_names = [model.joint(i).name if model.joint(i).name else f'v[{i}]' for i in range(model.njnt)]
+q_names += [f'q[{i}]' for i in range(model.njnt, nq)]
+v_names += [f'v[{i}]' for i in range(model.njnt, nv)]
 u_names = [model.actuator(i).name if model.actuator(i).name else f'tau[{i}]' for i in range(nu)]
 
 # Function to get best square tile layout

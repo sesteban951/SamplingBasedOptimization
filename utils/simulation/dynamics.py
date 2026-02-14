@@ -128,7 +128,10 @@ class Dynamics:
 
         # express in base frame
         I_base_ = R_bw @ I_w @ R_bw.T
-        self.I_base = jnp.array(I_base_, dtype=jnp.float32)
+        self.I_base = jnp.array(I_base_, dtype=jnp.float32)  # shape (3, 3)
+
+        # get gravity vector from model
+        self.gravity = jnp.array(mj_model.opt.gravity, dtype=jnp.float32) # shape (3,)
 
         print(f"Total mass: {self.mass:.3f} kg")
         print(f"Inertia about {base_body_name} frame:\n{I_base_}")
