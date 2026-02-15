@@ -296,8 +296,6 @@ class ParallelSim():
         print(f"   [T_traj: {T_traj:.4f} seconds]")
         print(f"   [N_sim:   {N_sim} steps at dt={dt_sim:.4f}s]")
 
-        
-    # initialize the jit functions
     def _initialize_jit_functions(self):
         """
         Initialize the functions with jit for rollout for speed.
@@ -312,30 +310,57 @@ class ParallelSim():
         self.data_batch0 = jax.vmap(lambda _: self.mjx_data)(jnp.arange(self.B))
 
         # pre-broadcast control gains
-        self.Kp_batched = self.Kp[None, :]  # Pre-broadcast
+        self.Kp_batched = self.Kp[None, :]
         self.Kd_batched = self.Kd[None, :]
         
-        # jit the rollout function
-        self.rollout = jax.jit(self._rollout)
+        # two compiled rollout functions:
+        # - no wrench: wrench block never compiled into graph
+        # - with wrench: wrench block compiled in, w_scale is dynamic
+        self._jit_rollout_no_wrench = jax.jit(self._rollout_no_wrench)
+        self._jit_rollout_wrench    = jax.jit(self._rollout_wrench)
 
         print("JIT compilation of simulation functions complete.")
 
 
     ####################################### ROLLOUTS #######################################
 
-    def _rollout(self, q0, v0, U):
+    def rollout(self, q0, v0, U, w_scale=0.0):
         """
-        Perform parallel rollouts with a given initial state and action sequences.
+        Public API. Routes to the correct compiled function based on w_scale.
+        - w_scale == 0.0 or use_external_wrench == False: wrench block never compiled into graph (fastest)
+        - w_scale  > 0.0 and use_external_wrench == True: wrench block compiled in, w_scale is dynamic
+        
+        Args:
+            q0:      jnp.array, shape (nq, ), initial position state
+            v0:      jnp.array, shape (nv, ), initial velocity state
+            U:       jnp.array, shape (B, N, nu), batch of action sequences, either torques or desired positions
+            w_scale: float, scale factor for external wrenches (0.0 = no wrench, 1.0 = full wrench)
+    
+        Returns:
+            q_log:   jnp.array, logged positions,  shape (B, N+1, nq)
+            v_log:   jnp.array, logged velocities, shape (B, N+1, nv)
+            tau_log: jnp.array, logged torques,    shape (B, N, nu)
+        """
+        if (not self.use_external_wrench) or (w_scale == 0.0):
+            return self._jit_rollout_no_wrench(q0, v0, U)
+        else:
+            return self._jit_rollout_wrench(q0, v0, U, jnp.float32(w_scale))
+
+
+    def _rollout_no_wrench(self, q0, v0, U):
+        """
+        Perform parallel rollouts with no external wrench injection.
+        The wrench block is never compiled into the graph — fastest path.
         
         Args:
             q0: jnp.array, shape (nq, ), initial position state
             v0: jnp.array, shape (nv, ), initial velocity state
-            U:  jnp.array, shape (B, N, nu),  batch of  action sequences, either torques or desired positions
-                                              
+            U:  jnp.array, shape (B, N, nu), batch of action sequences, either torques or desired positions
+    
         Returns:
-            q_log: jnp.array, logged positions,  shape (B, N+1, nq)
-            v_log: jnp.array, logged velocities, shape (B, N+1, nv)
-            tau_log: jnp.array, logged torques, shape (B, N, nu)
+            q_log:   jnp.array, logged positions,  shape (B, N+1, nq)
+            v_log:   jnp.array, logged velocities, shape (B, N+1, nv)
+            tau_log: jnp.array, logged torques,    shape (B, N, nu)
         """
         # get sizes
         B, N, _ = U.shape
@@ -355,22 +380,15 @@ class ParallelSim():
             # unpack the carry
             data, step_idx = carry
 
-            # compute the control based on action mode and apply
-            tau = lax.cond(
-                self.use_pd,                                                 # condition
-                lambda _: self._compute_pd_torque(data.qpos, data.qvel, uk), # position target function
-                lambda _: uk,                                                # torque target function
-                operand=None
-            )
-            data = data.replace(ctrl=tau)   
-
-            # inject external wrench
-            if self.use_external_wrench:
-                F_W, M_B = self._compute_virtual_wrench(data, step_idx)
-                data = self._base_wrench_qfrc(data, F_W, M_B)
+            # compute the control based on action mode and apply (NOTE: decided once at compile time)
+            if self.use_pd:
+                tau = self._compute_pd_torque(data.qpos, data.qvel, uk)
+            else:
+                tau = uk
+            data = data.replace(ctrl=tau)
 
             # step the simulation forward
-            data = self.step_fn_batched(data)    
+            data = self.step_fn_batched(data)
 
             return (data, step_idx + 1), (data.qpos, data.qvel, data.actuator_force) # NOTE: takes torque limits into account
 
@@ -382,8 +400,73 @@ class ParallelSim():
         v_hist = jnp.swapaxes(v_hist, 0, 1)
 
         # prepend initial state so logs are N+1
-        q_log = jnp.concatenate([q0_batch[:, None, :], q_hist], axis=1)
-        v_log = jnp.concatenate([v0_batch[:, None, :], v_hist], axis=1)
+        q_log   = jnp.concatenate([q0_batch[:, None, :], q_hist], axis=1)
+        v_log   = jnp.concatenate([v0_batch[:, None, :], v_hist], axis=1)
+        tau_log = jnp.swapaxes(tau_hist, 0, 1)
+
+        return q_log, v_log, tau_log
+
+
+    def _rollout_wrench(self, q0, v0, U, w_scale):
+        """
+        Perform parallel rollouts with external wrench injection.
+        w_scale is a dynamic GPU float32 — any value in (0, 1] reuses the same compiled graph.
+        
+        Args:
+            q0:      jnp.array, shape (nq, ), initial position state
+            v0:      jnp.array, shape (nv, ), initial velocity state
+            U:       jnp.array, shape (B, N, nu), batch of action sequences, either torques or desired positions
+            w_scale: jnp.float32, scale factor for external wrenches (0.0 = no wrench, 1.0 = full wrench)
+    
+        Returns:
+            q_log:   jnp.array, logged positions,  shape (B, N+1, nq)
+            v_log:   jnp.array, logged velocities, shape (B, N+1, nv)
+            tau_log: jnp.array, logged torques,    shape (B, N, nu)
+        """
+        # get sizes
+        B, N, _ = U.shape
+
+        # batch the initial states
+        q0_batch = jnp.broadcast_to(q0, (B, self.nq))    # (B, nq)
+        v0_batch = jnp.broadcast_to(v0, (B, self.nv))    # (B, nv)
+
+        # set the initial conditions in the batched data
+        data0 = self.data_batch0.replace(qpos=q0_batch, qvel=v0_batch)
+
+        # swap axes for easier indexing (B, N, nu) -> (N, B, nu)
+        U = jnp.swapaxes(U, 0, 1)
+
+        # main integration step body
+        def integration_step(carry, uk):
+            # unpack the carry
+            data, step_idx = carry
+
+            # compute the control based on action mode and apply (NOTE: decided once at compile time)
+            if self.use_pd:
+                tau = self._compute_pd_torque(data.qpos, data.qvel, uk)
+            else:
+                tau = uk
+            data = data.replace(ctrl=tau)
+
+            # inject external wrench (NOTE: decided once at compile time)
+            F_W, M_B = self._compute_virtual_wrench(data, step_idx, w_scale)
+            data = self._base_wrench_qfrc(data, F_W, M_B)
+
+            # step the simulation forward
+            data = self.step_fn_batched(data)
+
+            return (data, step_idx + 1), (data.qpos, data.qvel, data.actuator_force) # NOTE: takes torque limits into account
+
+        # forward propagate
+        (_, _), (q_hist, v_hist, tau_hist) = lax.scan(integration_step, (data0, jnp.int32(0)), U, length=N)
+
+        # q_hist, v_hist: (N, B, nq/nv) -> (B, N, nq/nv)
+        q_hist = jnp.swapaxes(q_hist, 0, 1)
+        v_hist = jnp.swapaxes(v_hist, 0, 1)
+
+        # prepend initial state so logs are N+1
+        q_log   = jnp.concatenate([q0_batch[:, None, :], q_hist], axis=1)
+        v_log   = jnp.concatenate([v0_batch[:, None, :], v_hist], axis=1)
         tau_log = jnp.swapaxes(tau_hist, 0, 1)
 
         return q_log, v_log, tau_log
@@ -409,22 +492,28 @@ class ParallelSim():
 
         return tau
 
-    def _compute_virtual_wrench(self, data, step_idx):
+    def _compute_virtual_wrench(self, data, step_idx, w_scale):
         """
         Compute the virtual wrench that tracks the SRB trajectory
         Fᵂ = m  (â + kₚᵛ (p̂ - p) + k_dᵛ (v̂ - v) - g)
         Mᴮ = I α̂ + kₚ^ω I (q̂ - q) + k_d^ω I (ω̂ - ω) + ω × (I ω) − r × mg
 
+        W = w_scale * [Fᵂ, Mᴮ], w_scale ∈ [0, 1]
+
         Args: 
             data:     mjx.Data, the current state of the simulation
             step_idx: int, the current step in the rollout
+            w_scale:  jnp.float32, scale factor for the virtual wrench (0.0 = no wrench, 1.0 = full wrench)
         Returns:
             F_W: (B, 3) world frame force to apply at the base
             M_B: (B, 3) body frame torque to apply at the base
         """
+        # clip the wrench scale to be between 0 and 1
+        w_scale = jnp.clip(w_scale, 0.0, 1.0)
+
         # current states of the mujoco 
         p_base = data.qpos[:, :3]     # (B, 3)
-        v_base = data.qvel[:, :3]     # (B, 3)
+        # v_base = data.qvel[:, :3]     # (B, 3)
         quat    = data.qpos[:, 3:7]   # (B, 4)
         omega   = data.qvel[:, 3:6]   # (B, 3)
 
@@ -450,30 +539,30 @@ class ParallelSim():
 
         # ----------------------- Force in World -----------------------
 
-        # force to track the COM state trajectory
+        # force to track the COM state trajectory (with scaling)
         F_W = self.dyn.mass * (
               a_com_ref_batch
             + self.kp_lin * (p_com_ref_batch - p_com_batch)
             + self.kd_lin * (v_com_ref_batch - v_com_batch)
             - self.gravity_batch
-        )
+        ) * w_scale  # (B, 3)
 
         # ----------------------- Moment in Base -----------------------
 
         # inertia helper: I @ vec for batched (B, 3)
-        I_B  = self.I_base_batch                                  # (B, 3, 3)
-        Iv   = lambda vec: jnp.einsum('ij,bj->bi', self.dyn.I_base, vec)  # (B, 3)
+        I_B = self.I_base_batch                                          # (B, 3, 3)
+        Iv  = lambda vec: jnp.einsum('ij,bj->bi', self.dyn.I_base, vec)  # (B, 3)
 
         # feedforward moment
-        M_ff = Iv(alpha_ref_batch)    # (B, 3)
+        M_ff = Iv(alpha_ref_batch)  # (B, 3)
 
         # the coriolis term
         C = dynamics.Dynamics._omega_cross_Iomega(omega, I_B)      # (B, 3)
 
         # orientation moment
         orient_err = self.dyn.quat_log_diff(quat, quat_ref_batch)  # (B, 3)
-        pd_orient  = self.kp_ang * Iv(orient_err)                       # (B, 3)
-        pd_angvel = self.kd_ang * Iv(omega_ref_batch - omega)           # (B, 3)
+        pd_orient  = self.kp_ang * Iv(orient_err)                  # (B, 3)
+        pd_angvel = self.kd_ang * Iv(omega_ref_batch - omega)      # (B, 3)
         M_ori = pd_orient + pd_angvel                              # (B, 3)
 
         # gravity force in world frame → rotate into body frame
@@ -481,12 +570,12 @@ class ParallelSim():
         F_grav_B = self.dyn.vec_world_to_body(F_grav_W, quat)  # (B, 3)
 
         # compensation of gravity
-        r_com_W  = p_com_batch - p_base                         # (B, 3)
-        r_com_B  = self.dyn.vec_world_to_body(r_com_W, quat)    # (B, 3)
-        M_grav = jnp.cross(r_com_B, F_grav_B)                  # (B, 3)
+        r_com_W  = p_com_batch - p_base                       # (B, 3)
+        r_com_B  = self.dyn.vec_world_to_body(r_com_W, quat)  # (B, 3)
+        M_grav = jnp.cross(r_com_B, F_grav_B)                 # (B, 3)
 
-        # Moment that tracks the orientation trajectory and compensates for gravity
-        M_B = M_ff + C + M_ori - M_grav
+        # Moment that tracks the orientation trajectory (with scaling)
+        M_B = (M_ff + C + M_ori - M_grav) * w_scale  # (B, 3)
 
         return F_W, M_B
 
@@ -630,24 +719,44 @@ if __name__ == "__main__":
 
     # run rollout
     t0 = time.time()
+    q_log, v_log, tau_log = parallel_sim.rollout(q0, v0, U, jnp.float32(0.01))
+    q_log.block_until_ready()
+    v_log.block_until_ready()
+    tau_log.block_until_ready()
+    t1 = time.time()
+    print(f"Rolled out {B} trajectories of length {N} in {t1 - t0:.4f} seconds.")
+    
+    t0 = time.time()
+    q_log, v_log, tau_log = parallel_sim.rollout(q0, v0, U, jnp.float32(0.5))
+    q_log.block_until_ready()
+    v_log.block_until_ready()
+    tau_log.block_until_ready()
+    t1 = time.time()
+    print(f"Rolled out {B} trajectories of length {N} in {t1 - t0:.4f} seconds.")
+
+    t0 = time.time()
     q_log, v_log, tau_log = parallel_sim.rollout(q0, v0, U)
     q_log.block_until_ready()
     v_log.block_until_ready()
     tau_log.block_until_ready()
     t1 = time.time()
     print(f"Rolled out {B} trajectories of length {N} in {t1 - t0:.4f} seconds.")
+
+    t0 = time.time()
+    q_log, v_log, tau_log = parallel_sim.rollout(q0, v0, U, jnp.float32(0.99))
+    q_log.block_until_ready()
+    v_log.block_until_ready()
+    tau_log.block_until_ready()
+    t1 = time.time()
+    print(f"Rolled out {B} trajectories of length {N} in {t1 - t0:.4f} seconds.")
+
+    t0 = time.time()
     q_log, v_log, tau_log = parallel_sim.rollout(q0, v0, U)
     q_log.block_until_ready()
     v_log.block_until_ready()
     tau_log.block_until_ready()
-    t2 = time.time()
-    print(f"Rolled out {B} trajectories of length {N} in {t2 - t1:.4f} seconds.")
-    q_log, v_log, tau_log = parallel_sim.rollout(q0, v0, U)
-    q_log.block_until_ready()
-    v_log.block_until_ready()
-    tau_log.block_until_ready()
-    t3 = time.time()
-    print(f"Rolled out {B} trajectories of length {N} in {t3 - t2:.4f} seconds.")
+    t1 = time.time()
+    print(f"Rolled out {B} trajectories of length {N} in {t1 - t0:.4f} seconds.")
 
     # convert to numpy for plotting
     q_log = np.array(q_log)
