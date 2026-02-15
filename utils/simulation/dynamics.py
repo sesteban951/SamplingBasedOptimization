@@ -143,8 +143,9 @@ class Dynamics:
         """
 
         # dynamics quantities
-        self.com_state_in_world = jax.jit(self._com_state_in_world)
         self.inertia_world = jax.jit(self._inertia_world)
+        self.com_state_in_world = jax.jit(self._com_state_in_world)
+        self.centroidal_ang_mom_in_world = jax.jit(self._centroidal_ang_mom_in_world)
 
         # rotations / SO(3) maps (batched)
         self.quat_to_rot_matrix = jax.jit(self._quat_to_rot_matrix)
@@ -166,6 +167,25 @@ class Dynamics:
 
 
     ################################## DYNAMICS ##################################
+
+    def _inertia_world(self, quat):
+        """
+        Computes the inertia matrix expressed in the world frame for all parallel environments.
+        Assumes quat is in [qw, qx, qy, qz] format and describes the orientation of the
+        body frame relative to the world frame.
+
+        Args:
+            quat (jnp.ndarray): (B,4) array of quaternions representing body orientation
+        Returns:
+            I_w (jnp.ndarray): (B,3,3) array of inertia matrices in world frame
+        """
+        quat = self._quat_normalize(quat)          # (B,4)
+        R_wb = self._quat_to_rot_matrix(quat)      # (B,3,3)
+        I_world  = R_wb @ self.I_base @ jnp.swapaxes(R_wb, -1, -2)
+        I_world = 0.5 * (I_world + jnp.swapaxes(I_world, -1, -2))  # NOTE: enforce symmetry
+        
+        return I_world
+
 
     def _com_state_in_world_single_env(self, model , data):
         """
@@ -203,22 +223,36 @@ class Dynamics:
         return p_com, v_com
     
 
-    def _inertia_world(self, quat):
+    def _centroidal_ang_mom_in_world_single_env(self, model, data):
         """
-        Computes the inertia matrix expressed in the world frame for all parallel environments.
-        Assumes quat is in [qw, qx, qy, qz] format and describes the orientation of the
-        body frame relative to the world frame.
+        Compute the centroidal angular momentum about the COM in the world frame 
+        for a single environment.
+        """
+        data = mjx.kinematics(model, data)
+        data = mjx.com_pos(model, data)
+        data = mjx.com_vel(model, data)
+        data = mjx.subtree_vel(model, data)
+
+        L = data._impl.subtree_angmom[0]  # (3,) — no batch dim inside single env
+        return L
+
+    def _centroidal_ang_mom_in_world(self, q, v):
+        """
+        Computes the centroidal angular momentum in the world frame
+        for all parallel environments.
 
         Args:
-            quat (jnp.ndarray): (B,4) array of quaternions representing body orientation
+            q (jnp.ndarray): (B, nq) array of generalized positions
+            v (jnp.ndarray): (B, nv) array of generalized velocities
         Returns:
-            I_w (jnp.ndarray): (B,3,3) array of inertia matrices in world frame
+            L (jnp.ndarray): (B, 3) array of centroidal angular momenta [kg·m²/s]
         """
-        quat = self._quat_normalize(quat)          # (B,4)
-        R_wb = self._quat_to_rot_matrix(quat)      # (B,3,3)
-        I_world  = R_wb @ self.I_base @ jnp.swapaxes(R_wb, -1, -2)
-        I_world = 0.5 * (I_world + jnp.swapaxes(I_world, -1, -2))  # NOTE: enforce symmetry
-        return I_world
+        data = self.data0.replace(qpos=q, qvel=v)
+
+        single = lambda d: self._centroidal_ang_mom_in_world_single_env(self.mjx_model, d)
+        L = jax.vmap(single)(data)
+
+        return L
 
 
     ################################## HELPERS ##################################
@@ -558,6 +592,48 @@ if __name__ == "__main__":
     v_shift = v.at[:, 0].add(2.0)
     _, vc2 = dyn.com_state_in_world(q, v_shift)
     print(vc2[:,0] - vc1[:,0])  # should be ~2.0 for envs with same pose
+
+    # ---- centroidal angular momentum tests ----
+    print("\n================ CENTROIDAL TESTS ================\n")
+
+    q = jnp.zeros((dyn.B, dyn.nq))
+    v = jnp.zeros((dyn.B, dyn.nv))
+    q = q.at[:, 3].set(1.0)  # identity quat
+
+    # test 1: zero velocity -> zero angular momentum
+    L = dyn.centroidal_ang_mom_in_world(q, v)
+    print("L (zero vel):\n", L)  # expect (B, 3) all zeros
+
+    # test 2: pure linear COM velocity -> zero angular momentum
+    # translating the whole body shouldn't contribute angular momentum about COM
+    v_lin = v.at[:, 0].set(1.0).at[:, 1].set(2.0).at[:, 2].set(3.0)
+    L_lin = dyn.centroidal_ang_mom_in_world(q, v_lin)
+    print("L (pure linear vel, expect ~0):\n", L_lin)
+
+    # test 3: spinning about z-axis -> L should be aligned with z
+    v_spin = v.at[:, 5].set(1.0)  # wz = 1 rad/s in body frame
+    L_spin = dyn.centroidal_ang_mom_in_world(q, v_spin)
+    print("L (spin about z, expect L_z >> L_x, L_y):\n", L_spin)
+    print("L_z / L_x ratio:", L_spin[0, 2] / (jnp.abs(L_spin[0, 0]) + 1e-9))
+
+    # test 4: validate against manual implementation
+    # compare subtree_angmom path vs our body-wise summation
+    q_test = jnp.zeros((dyn.B, dyn.nq)).at[:, 3].set(1.0)
+    v_test = jnp.zeros((dyn.B, dyn.nv)).at[:, 3].set(0.5).at[:, 4].set(0.3).at[:, 5].set(0.7)
+    L_ours = dyn.centroidal_ang_mom_in_world(q_test, v_test)
+    print("L (manual summation):\n", L_ours)
+
+    # test 5: linearity — doubling angular velocity should double L
+    L1 = dyn.centroidal_ang_mom_in_world(q, v_spin)
+    v_spin2 = v.at[:, 5].set(2.0)
+    L2 = dyn.centroidal_ang_mom_in_world(q, v_spin2)
+    print("L2 / L1 (expect ~2.0):", L2[0] / (L1[0] + 1e-9))
+
+    # test 6: L should be identical across envs with same q, v
+    q_same = jnp.zeros((dyn.B, dyn.nq)).at[:, 3].set(1.0)
+    v_same = jnp.zeros((dyn.B, dyn.nv)).at[:, 3].set(1.0)
+    L_same = dyn.centroidal_ang_mom_in_world(q_same, v_same)
+    print("max spread across envs (expect ~0):", jnp.max(jnp.abs(L_same - L_same[0])))
 
 
     quat = jnp.array([[1.0, 0.0, 0.0, 0.0]])  # (B=1,4)
