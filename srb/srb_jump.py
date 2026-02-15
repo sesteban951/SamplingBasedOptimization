@@ -27,8 +27,8 @@ class SRB_Jump(SRBDynamics):
         self.Qx = ca.diag(ca.vertcat(
             1.0, 1.0, 1.0,  # px, py, pz
             1.0, 1.0, 1.0,  # qx, qy, qz
-            1.0, 1.0, 1.0,     # vx, vy, vz
-            1.0, 1.0, 1.0      # wx, wy, wz
+            1.0, 1.0, 1.0,  # vx, vy, vz
+            1.0, 1.0, 1.0   # wx, wy, wz
         ))
 
         # foot placement cost weights
@@ -39,7 +39,7 @@ class SRB_Jump(SRBDynamics):
         self.Q_moment = 0.0005
 
         # terminal weights
-        self.Qx_f = 500.0 * self.Qx
+        self.Qx_f = 100.0 * self.Qx
 
 
     ###############################################################
@@ -157,31 +157,43 @@ opti = ca.Opti()
 # horizon variables
 X = opti.variable(nx, N + 1)  # states over the horizon
 
-# contact decision variables
-p_L = opti.variable(2, N)  
-p_R = opti.variable(2, N)
-F_L = opti.variable(3, N)
-F_R = opti.variable(3, N)
-M_L = opti.variable(3, N)
-M_R = opti.variable(3, N)
+# decision variables
+p_L_land = opti.variable(2)  # single landing position
+p_R_land = opti.variable(2)  # single landing position
+F_L = opti.variable(3, N)   # forces along left leg
+F_R = opti.variable(3, N)   # forces along right leg
+M_L = opti.variable(3, N)   # ankle moments at left ankle
+M_R = opti.variable(3, N)   # ankle moments at right ankle
 
 # initial condition
+pitch0_deg = 1.0
+quat0 = np.array([
+    np.cos(np.radians(pitch0_deg) / 2),  # qw
+    0,                                   # qx
+    np.sin(np.radians(pitch0_deg) / 2),  # qy
+    0                                    # qz
+])
 x0 = np.array([0, 0, 0.69,  # p_com
-               1, 0, 0, 0, # quaternion
+               quat0[0], quat0[1], quat0[2], quat0[3],  # quaternion
                0, 0, 0,    # v_com
                0, 0, 0])   # w_body
 x0_ca = ca.DM(x0)
-p0_L = np.array([0, 0.1185])  # initial left foot position
-p0_R = np.array([0, -0.1185]) # initial right foot position
+p0_L = np.array([0,  srb.hip_offset]) # initial left foot position
+p0_R = np.array([0, -srb.hip_offset]) # initial right foot position
 p0_L = ca.DM(p0_L)
 p0_R = ca.DM(p0_R)
 
 # desired goal state - jump forward, stay upright
-x_goal = np.array([1.25, 0, 0.69,   # p_com (forward, same height)
-                   1, 0, 0, 0,   # quaternion (upright)
-                   0, 0, 0,        # v_com (stopped)
-                   0, 0, 0])       # w_body
+px_goal = 1.0                        
+x_goal = np.array([px_goal, 0, 0.69, # p_com (forward, same height)
+                   1, 0, 0, 0,       # quaternion (upright)
+                   0, 0, 0,          # v_com (stopped)
+                   0, 0, 0])         # w_body
 x_goal_ca = ca.DM(x_goal)
+
+# Desired landing foot positions
+p_L_goal = ca.DM([x_goal[0],  srb.hip_offset])
+p_R_goal = ca.DM([x_goal[0], -srb.hip_offset])
 
 # set the initial condition 
 opti.subject_to(X[:, 0] == x0_ca)
@@ -195,21 +207,54 @@ opti.subject_to(X[:, N] <= x_terminal_ub)
 
 # compute the dynamics constraints
 for k in range(N):
-    # Extract COM position
-    p_com = X[0:3, k]
+
+    # STANCE
+    if k < stance_end:
+        # Extract COM position
+        p_com = X[0:3, k]
+        
+        # stance is prescribed intial condition
+        p_L = ca.vertcat(p0_L, 0)
+        p_R = ca.vertcat(p0_R, 0)
+        
+        # moment arms from COM to feet
+        r_L = p_L - p_com
+        r_R = p_R - p_com
+
+        # total wrench from contacts (in world frame)
+        F_total = F_L[:, k] + F_R[:, k]
+        M_total = (
+              ca.cross(r_L, F_L[:, k]) 
+            + ca.cross(r_R, F_R[:, k]) 
+            + M_L[:, k] + M_R[:, k]
+        )
+
+    # FLIGHT
+    elif (k>= stance_end) and (k < flight_end):
+        F_total = ca.DM.zeros(3)
+        M_total = ca.DM.zeros(3)
+
+    # LANDING
+    else:
+        # Extract COM position
+        p_com = X[0:3, k]
+        
+        # feet are decision variables but at fixed height
+        p_L = ca.vertcat(p_L_land, 0)
+        p_R = ca.vertcat(p_R_land, 0)
+
+        # moment arms from COM to feet
+        r_L = p_L - p_com
+        r_R = p_R - p_com
     
-    # 3D foot positions (on flat ground z=0)
-    p_L_3d = ca.vertcat(p_L[:, k], 0)
-    p_R_3d = ca.vertcat(p_R[:, k], 0)
-    
-    # Moment arms from COM to feet
-    r_L = p_L_3d - p_com
-    r_R = p_R_3d - p_com
-    
-    # Total wrench from contacts (in world frame)
-    F_total = F_L[:, k] + F_R[:, k]
-    M_total = ca.cross(r_L, F_L[:, k]) + ca.cross(r_R, F_R[:, k]) + M_L[:, k] + M_R[:, k]
-    
+        # total wrench from contacts (in world frame)
+        F_total = F_L[:, k] + F_R[:, k]
+        M_total = (
+              ca.cross(r_L, F_L[:, k]) 
+            + ca.cross(r_R, F_R[:, k])
+            + M_L[:, k] + M_R[:, k]
+        )
+
     # Combined wrench as control input
     u = ca.vertcat(F_total, M_total)
     
@@ -218,93 +263,96 @@ for k in range(N):
     opti.subject_to(X[:, k + 1] == x_next)
 
 # add z_com constraints
-pz_min = 0.4
-pz_max = 0.9
+pz_min = 0.40
+pz_max = 1.0
 for k in range(N+1):
-    opti.subject_to(X[2, k] > pz_min)  # enforce constant height
-    opti.subject_to(X[2, k] < pz_max)  # enforce constant height
+    opti.subject_to(X[2, k] >= pz_min)  # enforce constant height
+    opti.subject_to(X[2, k] <= pz_max)  # enforce constant height
 
 # ----------------------------------------------------------
 # Contact Constraints
 # ----------------------------------------------------------
 
 # Contact parameters
-mu = 1.5                      # friction coefficient
-hip_offset = 0.1185           # y-distance from base to each foot
-M_ankle_x_max = 50.0          # [N*m]
-M_ankle_y_max = 50.0          # [N*m]
-M_ankle_z_max = 10.0          # [N*m]
-F_max = 450.0                 # [N] max force per foot
+mu = 1.0              # friction coefficient
+M_ankle_x_max = 50.0  # [N*m]
+M_ankle_y_max = 50.0  # [N*m]
+M_ankle_z_max = 10.0  # [N*m]
+F_leg_max = 500.0     # [N] max force per leg
 
 # Get friction cone constraint matrices
 A_friction, b_friction = srb.friction_cone_matrix(mu)
 
-# STANCE PHASE (k = 0 to stance_end - 1)
-for k in range(stance_end):
-    # Feet fixed on ground at initial location
-    opti.subject_to(p_L[:, k] == p0_L)
-    opti.subject_to(p_R[:, k] == p0_R)
-    
-    # Friction cone constraints
-    opti.subject_to(A_friction @ F_L[:, k] <= b_friction)
-    opti.subject_to(A_friction @ F_R[:, k] <= b_friction)
-    
-    # Force magnitude limits
-    opti.subject_to(ca.norm_2(F_L[:, k]) <= F_max)
-    opti.subject_to(ca.norm_2(F_R[:, k]) <= F_max)
-    
-    # Ankle moment limits (roll, pitch, and yaw)
-    opti.subject_to(opti.bounded(-M_ankle_x_max, M_L[0, k], M_ankle_x_max))
-    opti.subject_to(opti.bounded(-M_ankle_y_max, M_L[1, k], M_ankle_y_max))
-    opti.subject_to(opti.bounded(-M_ankle_z_max, M_L[2, k], M_ankle_z_max))
-    
-    opti.subject_to(opti.bounded(-M_ankle_x_max, M_R[0, k], M_ankle_x_max))
-    opti.subject_to(opti.bounded(-M_ankle_y_max, M_R[1, k], M_ankle_y_max))
-    opti.subject_to(opti.bounded(-M_ankle_z_max, M_R[2, k], M_ankle_z_max))
+for k in range(N):
 
-# FLIGHT PHASE (k = stance_end to flight_end - 1)
-for k in range(stance_end, flight_end):
-    # No contact forces or moments
-    opti.subject_to(F_L[:, k] == 0)
-    opti.subject_to(F_R[:, k] == 0)
-    opti.subject_to(M_L[:, k] == 0)
-    opti.subject_to(M_R[:, k] == 0)
+    # STANCE
+    if k < stance_end:
+        # friction cone constraints
+        opti.subject_to(A_friction @ F_L[:, k] <= b_friction)
+        opti.subject_to(A_friction @ F_R[:, k] <= b_friction)
 
-# LANDING PHASE (k = flight_end to N - 1)
-for k in range(flight_end, N):
-    # Friction cone constraints
-    opti.subject_to(A_friction @ F_L[:, k] <= b_friction)
-    opti.subject_to(A_friction @ F_R[:, k] <= b_friction)
-    
-    # Force magnitude limits
-    opti.subject_to(ca.norm_2(F_L[:, k]) <= F_max)
-    opti.subject_to(ca.norm_2(F_R[:, k]) <= F_max)
-    
-    # Ankle moment limits (roll, pitch, and yaw)
-    opti.subject_to(opti.bounded(-M_ankle_x_max, M_L[0, k], M_ankle_x_max))
-    opti.subject_to(opti.bounded(-M_ankle_y_max, M_L[1, k], M_ankle_y_max))
-    opti.subject_to(opti.bounded(-M_ankle_z_max, M_L[2, k], M_ankle_z_max))
-    
-    opti.subject_to(opti.bounded(-M_ankle_x_max, M_R[0, k], M_ankle_x_max))
-    opti.subject_to(opti.bounded(-M_ankle_y_max, M_R[1, k], M_ankle_y_max))
-    opti.subject_to(opti.bounded(-M_ankle_z_max, M_R[2, k], M_ankle_z_max))
+        # force limits
+        opti.subject_to(ca.sumsqr(F_L[:, k]) <= F_leg_max**2)
+        opti.subject_to(ca.sumsqr(F_R[:, k]) <= F_leg_max**2)
+
+        # moment limits
+        opti.subject_to(opti.bounded(-M_ankle_x_max, M_L[0, k], M_ankle_x_max))
+        opti.subject_to(opti.bounded(-M_ankle_y_max, M_L[1, k], M_ankle_y_max))
+        opti.subject_to(opti.bounded(-M_ankle_z_max, M_L[2, k], M_ankle_z_max))
+
+        opti.subject_to(opti.bounded(-M_ankle_x_max, M_R[0, k], M_ankle_x_max))
+        opti.subject_to(opti.bounded(-M_ankle_y_max, M_R[1, k], M_ankle_y_max))
+        opti.subject_to(opti.bounded(-M_ankle_z_max, M_R[2, k], M_ankle_z_max))
+
+    # FLIGHT
+    elif (k>= stance_end) and (k < flight_end):
+        # no contact forces or moments
+        opti.subject_to(F_L[:, k] == 0)
+        opti.subject_to(F_R[:, k] == 0)
+        opti.subject_to(M_L[:, k] == 0)
+        opti.subject_to(M_R[:, k] == 0)
+
+    # LANDING
+    else:
+        # friction cone constraints
+        opti.subject_to(A_friction @ F_L[:, k] <= b_friction)
+        opti.subject_to(A_friction @ F_R[:, k] <= b_friction)
+
+        # force limits
+        opti.subject_to(ca.sumsqr(F_L[:, k]) <= F_leg_max**2)
+        opti.subject_to(ca.sumsqr(F_R[:, k]) <= F_leg_max**2)
+
+        # moment limits
+        opti.subject_to(opti.bounded(-M_ankle_x_max, M_L[0, k], M_ankle_x_max))
+        opti.subject_to(opti.bounded(-M_ankle_y_max, M_L[1, k], M_ankle_y_max))
+        opti.subject_to(opti.bounded(-M_ankle_z_max, M_L[2, k], M_ankle_z_max))
+        
+        opti.subject_to(opti.bounded(-M_ankle_x_max, M_R[0, k], M_ankle_x_max))
+        opti.subject_to(opti.bounded(-M_ankle_y_max, M_R[1, k], M_ankle_y_max))
+        opti.subject_to(opti.bounded(-M_ankle_z_max, M_R[2, k], M_ankle_z_max))
+
+# landing foot placement constraint
+landing_tol = 0.1  # foot landing tolerance
+opti.subject_to(ca.sumsqr(p_L_land - p_L_goal) <= landing_tol**2)
+opti.subject_to(ca.sumsqr(p_R_land - p_R_goal) <= landing_tol**2)
 
 # ----------------------------------------------------------
 # Objective Function
 # ----------------------------------------------------------
 
-# Desired landing foot positions
-p_L_des = ca.DM([x_goal[0], hip_offset])
-p_R_des = ca.DM([x_goal[0], -hip_offset])
-
+# total cost
 J = 0
 for k in range(N):
+
+    # state cost
     J += srb.state_cost(X[:, k], x_goal_ca)
-    J += srb.contact_cost(F_L[:, k], F_R[:, k], M_L[:, k], M_R[:, k])
-    
-    # Add foot placement cost only during landing phase
-    if k >= flight_end:
-        J += srb.foot_placement_cost(p_L[:, k], p_R[:, k], p_L_des, p_R_des)
+
+    # contact cost
+    if k < stance_end or k >= flight_end:
+        J += srb.contact_cost(F_L[:, k], F_R[:, k], M_L[:, k], M_R[:, k])
+
+# foot placement cost
+J += srb.foot_placement_cost(p_L_land, p_R_land, p_L_goal, p_R_goal)
 
 # Terminal cost (optional since we have a terminal constraint, but can help convergence)
 J += srb.terminal_cost(X[:, N], x_goal_ca)
@@ -316,39 +364,35 @@ opti.minimize(J)
 # Initial Guesses
 # ----------------------------------------------------------
 
-# State trajectory
-for k in range(N+1):
-    opti.set_initial(X[3:7, k], [1, 0, 0, 0])  # keep quaternion upright
+# state trajectory
+for k in range(N + 1):
 
-# Foot positions - interpolate from start to goal
-for k in range(N):
-    if k < stance_end:
-        # Stance: at initial position
-        opti.set_initial(p_L[:, k], [0, hip_offset])
-        opti.set_initial(p_R[:, k], [0, -hip_offset])
-    elif k < flight_end:
-        # Flight: interpolate
-        alpha = (k - stance_end) / N_flight
-        x_foot = (1 - alpha) * 0 + alpha * x_goal[0]
-        opti.set_initial(p_L[:, k], [x_foot, hip_offset])
-        opti.set_initial(p_R[:, k], [x_foot, -hip_offset])
-    else:
-        # Landing: at goal position
-        opti.set_initial(p_L[:, k], [x_goal[0], hip_offset])
-        opti.set_initial(p_R[:, k], [x_goal[0], -hip_offset])
+    # interp coeff
+    alpha = k / N
 
-# Forces: phase-aware initial guess
+    # com position
+    p_com_guess = (1 - alpha) * x0[:3] + alpha * x_goal[:3]
+    opti.set_initial(X[0:3, k], p_com_guess)
+
+    # quaternion, TODO: SLERP for better guess when orientations differ significantly
+    opti.set_initial(X[3:7, k], [1, 0, 0, 0])
+
+# # landing foot positions
+opti.set_initial(p_L_land, p_L_goal)
+opti.set_initial(p_R_land, p_R_goal)
+
+# wrenches: phase-aware
 for k in range(N):
     if k < stance_end or k >= flight_end:
-        # Contact phases: support weight
+        # contact phases: split weight evenly
         opti.set_initial(F_L[:, k], [0, 0, srb.m * srb.g / 2])
         opti.set_initial(F_R[:, k], [0, 0, srb.m * srb.g / 2])
     else:
-        # Flight phase: zero force
+        # flight: zero
         opti.set_initial(F_L[:, k], [0, 0, 0])
         opti.set_initial(F_R[:, k], [0, 0, 0])
 
-# Moments: zero initial guess
+# moments: zero
 opti.set_initial(M_L, 0)
 opti.set_initial(M_R, 0)
 
@@ -360,73 +404,98 @@ opti.set_initial(M_R, 0)
 opti.solver("ipopt")
 sol = opti.solve()
 
+# ----------------------------------------------------------
 # Extract solutions
-X_sol = sol.value(X)    # shape (nx, N+1)
-pL_sol = sol.value(p_L) # shape (2, N)
-pR_sol = sol.value(p_R) # shape (2, N)
-FL_sol = sol.value(F_L) # shape (3, N)
-FR_sol = sol.value(F_R) # shape (3, N)
-ML_sol = sol.value(M_L) # shape (3, N)
-MR_sol = sol.value(M_R) # shape (3, N)
+# ----------------------------------------------------------
 
-# force in world frame
-F = FL_sol.T + FR_sol.T  # shape (N, 3)
+X_sol    = sol.value(X)         # (nx, N+1)
+pL_land  = sol.value(p_L_land)  # (2,)
+pR_land  = sol.value(p_R_land)  # (2,)
+FL_sol   = sol.value(F_L)       # (3, N)
+FR_sol   = sol.value(F_R)       # (3, N)
+ML_sol   = sol.value(M_L)       # (3, N)
+MR_sol   = sol.value(M_R)       # (3, N)
 
-# moment in the world frame
-M = np.zeros((FL_sol.shape[1], 3))
-for k in range(FL_sol.shape[1]):
+# ----------------------------------------------------------
+# Reconstruct wrench trajectory
+# ----------------------------------------------------------
 
-    # moment contribution from forces at the feet
-    M_feet = ML_sol[:, k] + MR_sol[:, k]
+# Forces (in world frame)
+F = (FL_sol + FR_sol).T  # (N, 3)
 
-    # contribution from moment arms (r x F)
-    p_com = X_sol[0:3, k]
-    p_L_3d = np.array([pL_sol[0, k], pL_sol[1, k], 0])
-    p_R_3d = np.array([pR_sol[0, k], pR_sol[1, k], 0])
-    r_L = p_L_3d - p_com
-    r_R = p_R_3d - p_com
-    M_left = np.cross(r_L, FL_sol[:, k])
-    M_right = np.cross(r_R, FR_sol[:, k])
-
-    # total moment in world frame
-    M[k, :] = M_feet + M_left + M_right
-
-# pack it into a single array for saving
-U = np.hstack((F, M))  # shape (N, 6)
-
-# compute accelerations by querying the dynamics
-X_sol = X_sol.T               # shape (N+1, nx)
-q_opt = X_sol[:, 0:nq]        # shape (N+1, nq)
-v_opt = X_sol[:, nq:nx]       # shape (N+1, nv)
-a_opt = np.zeros_like(v_opt)  # shape (N+1, na)
-
-f_cont = srb.f_cont
+# Moments (in world frame)
+M = np.zeros((N, 3))
 for k in range(N):
-    x_k = X_sol[k, :]
-    u_k = U[k, :]
-    xdot = np.array(f_cont(x_k, u_k)).squeeze() # shape (nx,)
-    a_opt[k, :] = xdot[nq:nx]                   # shape (nv,)
+
+    if k < stance_end:
+        p_com = X_sol[0:3, k]
+        p_L = np.array([float(p0_L[0]), float(p0_L[1]), 0.0])
+        p_R = np.array([float(p0_R[0]), float(p0_R[1]), 0.0])
+
+    elif k < flight_end:
+        M[k, :] = 0.0
+        continue
+
+    else:
+        p_com = X_sol[0:3, k]
+        p_L = np.array([pL_land[0], pL_land[1], 0.0])  # was p0_L — bug
+        p_R = np.array([pR_land[0], pR_land[1], 0.0])
+
+    r_L = p_L - p_com
+    r_R = p_R - p_com
+    M[k, :] = (
+          np.cross(r_L, FL_sol[:, k])
+        + np.cross(r_R, FR_sol[:, k])
+        + ML_sol[:, k] + MR_sol[:, k]
+    )
+
+# Total wrench trajectory in world frame
+U = np.hstack((F, M))  # (N, 6)
+
+# ----------------------------------------------------------
+# Compute accelerations
+# ----------------------------------------------------------
+
+X_sol = X_sol.T          # (N+1, nx)
+q_opt = X_sol[:, 0:nq]   # (N+1, nq)
+v_opt = X_sol[:, nq:nx]  # (N+1, nv)
+a_opt = np.zeros_like(v_opt)
+
+for k in range(N):
+    xdot = np.array(srb.f_cont(X_sol[k, :], U[k, :])).squeeze()  # (nx,)
+    a_opt[k, :] = xdot[nq:nx]
+# last step: use last control (hold)
+a_opt[N, :] = a_opt[N-1, :]
+
+# ----------------------------------------------------------
+# Print results
+# ----------------------------------------------------------
+print(f"\nOptimal landing foot positions:")
+print(f"  Left  foot: x={pL_land[0]:.3f}, y={pL_land[1]:.3f}")
+print(f"  Right foot: x={pR_land[0]:.3f}, y={pR_land[1]:.3f}")
+
+print(f"\nPhase summary:")
+print(f"  Stance:  k=0  -> {stance_end-1}   (t=0.00 -> {stance_end*dt:.2f}s)")
+print(f"  Flight:  k={stance_end} -> {flight_end-1}  (t={stance_end*dt:.2f} -> {flight_end*dt:.2f}s)")
+print(f"  Landing: k={flight_end} -> {N-1}  (t={flight_end*dt:.2f} -> {N*dt:.2f}s)")
+
+print(f"\nTerminal state:")
+print(f"  p_com = {X_sol[N, 0:3]}")
+print(f"  quat  = {X_sol[N, 3:7]}")
+print(f"  v_com = {X_sol[N, 7:10]}")
 
 # ----------------------------------------------------------
 # Save
 # ----------------------------------------------------------
-
-# create the time array
 time = np.linspace(0, T, N+1)
 
-# save the solution as csv
 save_dir = "./results/srb_jump/"
-if not os.path.exists(save_dir):
-    os.makedirs(save_dir)
-time_file  = save_dir + "time.csv"
-q_file = save_dir + "q_opt.csv"
-v_file = save_dir + "v_opt.csv"
-a_file = save_dir + "a_opt.csv"
-tau_file = save_dir + "tau_opt.csv"
-np.savetxt(time_file, time, delimiter=",")
-np.savetxt(q_file, q_opt, delimiter=",")
-np.savetxt(v_file, v_opt, delimiter=",")
-np.savetxt(a_file, a_opt, delimiter=",")
-np.savetxt(tau_file, U, delimiter=",")
+os.makedirs(save_dir, exist_ok=True)
+
+np.savetxt(save_dir + "time.csv",    time,  delimiter=",")
+np.savetxt(save_dir + "q_opt.csv",   q_opt, delimiter=",")
+np.savetxt(save_dir + "v_opt.csv",   v_opt, delimiter=",")
+np.savetxt(save_dir + "a_opt.csv",   a_opt, delimiter=",")
+np.savetxt(save_dir + "tau_opt.csv", U,     delimiter=",")
 
 print(f"\nSaved results to {save_dir}")

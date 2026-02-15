@@ -758,6 +758,14 @@ if __name__ == "__main__":
     t1 = time.time()
     print(f"Rolled out {B} trajectories of length {N} in {t1 - t0:.4f} seconds.")
 
+    t0 = time.time()
+    q_log, v_log, tau_log = parallel_sim.rollout(q0, v0, U, jnp.float32(1.0))
+    q_log.block_until_ready()
+    v_log.block_until_ready()
+    tau_log.block_until_ready()
+    t1 = time.time()
+    print(f"Rolled out {B} trajectories of length {N} in {t1 - t0:.4f} seconds.")
+
     # convert to numpy for plotting
     q_log = np.array(q_log)
     v_log = np.array(v_log)
