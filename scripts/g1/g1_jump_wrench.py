@@ -18,6 +18,7 @@ import mujoco
 
 # custom imports
 from utils.algorithms.cem import *
+from utils.algorithms.annealing import *
 from utils.simulation.simulation import *
 from utils.spline import *
 
@@ -82,13 +83,6 @@ class G1_SRB_CEM(CrossEntropyMethod):
         quat_ref = self.sim.quat_ref
         omega_ref = self.sim.omega_ref
         alpha_ref = self.sim.alpha_ref
-        print("Loaded SRB data:")
-        print(f"  q_com_ref: {q_com_ref.shape}")
-        print(f"  v_com_ref: {v_com_ref.shape}")
-        print(f"  a_com_ref: {a_com_ref.shape}")
-        print(f"  quat_ref: {quat_ref.shape}")
-        print(f"  omega_ref: {omega_ref.shape}")
-        print(f"  alpha_ref: {alpha_ref.shape}")
 
         # broadcast the SRB reference trajectory to the batch size
         self.B = sim_config.batch_size
@@ -118,11 +112,11 @@ class G1_SRB_CEM(CrossEntropyMethod):
 
         # cost values
         self.w_p_base = 10.0
-        self.w_quat = 7.0
+        self.w_quat = 10.0
         self.w_v_base = 0.1
         self.w_omega_base = 0.1
-        self.w_q_joints = 1.0
-        self.w_v_joints = 0.1
+        self.w_q_joints = 7.0
+        self.w_v_joints = 2.0
         self.w_tau = 0.0001
 
         self.wf_p_base = 20.0 * self.w_p_base
@@ -236,8 +230,13 @@ class G1_SRB_CEM(CrossEntropyMethod):
             # evaluate the spline at simulation times
             y_val = self.spline.evaluate(self.t_sim[:-1])  # shape (B, N, nu)
 
+            # get annealing factor for this iteration
+            # a = linear_annealing(itr, self.cem_config.iterations, alpha_max=1.0)
+            a = exponential_annealing(itr, self.cem_config.iterations, 
+                                      alpha_max=0.5, lam=5.0)
+
             # do forward rollout
-            q_log, v_log, tau_log = self.sim.rollout(q0, v0, y_val)
+            q_log, v_log, tau_log = self.sim.rollout(q0, v0, y_val, a)
             q_log.block_until_ready()
 
             # compute costs
@@ -285,7 +284,8 @@ class G1_SRB_CEM(CrossEntropyMethod):
                   f"J_elite_avg: {J_elite_avg:.4f} | "
                   f"J_elite_best: {J_elite_best:.4f} | "
                   f"J_best: {J_opt:.4f} | "
-                  f"‖Σ‖: {cov_norm:.4f}")
+                  f"‖Σ‖: {cov_norm:.4f} | "
+                  f"α: {a:.4f}")
             
         return q_opt, v_opt, tau_opt
 
@@ -328,7 +328,7 @@ if __name__ == "__main__":
 
     # number of knots for the trajecotry
     T_SRB = times[-1]
-    knots_per_sec= 10
+    knots_per_sec= 5
     N_knots = int(T_SRB * knots_per_sec)
 
     # cem config
@@ -336,12 +336,12 @@ if __name__ == "__main__":
     cem_config = CrossEntropyMethod_Config(
         rng=cem_rng,
         T=T_SRB,
-        iterations=20,
+        iterations=100,
         N_elite=2048,
-        # N_knots=N_knots,
-        # spline_type="ZOH",
         N_knots=N_knots,
-        spline_type="Linear",
+        spline_type="ZOH",
+        # N_knots=N_knots,
+        # spline_type="Linear",
         # N_knots=20,
         # spline_type="Bezier",
     )
