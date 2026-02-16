@@ -32,9 +32,10 @@ import mujoco.viewer
 # xml_path = f"./models/g1/g1_planar.xml"
 # experiment = "g1_stand"
 # experiment = "g1_jump"
-# xml_path = f"./models/g1/g1_21dof.xml"
-experiment = "parallel_sim"
+experiment = "g1_jump_wrench"
 xml_path = f"./models/g1/g1_21dof.xml"
+# experiment = "parallel_sim"
+# xml_path = f"./models/g1/g1_21dof.xml"
 
 # load data from csv files
 time_file = f"./results/{experiment}/time.csv"
