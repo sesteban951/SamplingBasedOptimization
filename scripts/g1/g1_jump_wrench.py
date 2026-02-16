@@ -209,6 +209,85 @@ class G1_SRB_CEM(CrossEntropyMethod):
         )  # (B,)
 
         return running_cost + terminal_cost  # (B,)
+    
+    # Custom CEM optimization for this particualr task
+    def optimize(self, q0, v0):
+        """
+        Perform CEM optimization.
+
+        Args:
+            q0: jnp.array, shape (B, nq) - initial generalized positions.
+            v0: jnp.array, shape (B, nv) - initial generalized velocities.
+        Returns:
+            q_opt: jnp.array, shape (N+1, nq) - optimal generalized positions trajectory.
+            v_opt: jnp.array, shape (N+1, nv) - optimal generalized velocities trajectory.
+            tau_opt: jnp.array, shape (N, nu) - optimal control inputs trajectory.
+        """
+
+        # initialize the optimal solution
+        J_opt = jnp.inf
+        q_opt = None
+        v_opt = None
+        tau_opt = None
+
+        # perform CEM iterations
+        for itr in range(self.cem_config.iterations):
+
+            # evaluate the spline at simulation times
+            y_val = self.spline.evaluate(self.t_sim[:-1])  # shape (B, N, nu)
+
+            # do forward rollout
+            q_log, v_log, tau_log = self.sim.rollout(q0, v0, y_val)
+            q_log.block_until_ready()
+
+            # compute costs
+            J = self.cost(q_log, v_log, tau_log)  # shape (B,)
+            J.block_until_ready()
+
+            # select elite samples
+            J_elite_neg, elite_idx = jax.lax.top_k(-J, self.cem_config.N_elite)
+            J_elite = -J_elite_neg  # shape (N_elite,)
+
+            # select the elite splines
+            Y_elite = jnp.take(self.spline.Y, elite_idx, axis=0)  # shape (N_elite, N_knots, nu)
+
+            # update the distribution
+            self._update_distribution(Y_elite)
+
+            # sample new knot points from the updated distribution
+            Y_samples = self._sample_knot_points()  # shape (B, N_knots, nu)
+            self.spline.update_knots(Y_samples)
+
+            # compute the norm of the covariance for monitoring
+            cov_norm = jnp.linalg.norm(self.Sigma, ord='fro')
+
+            # record the best solution found so far
+            J_min = J_elite.min()
+            if J_min < J_opt:
+
+                # set best
+                J_opt = J_min
+                idx_in_elite = jnp.argmin(J_elite)  # Find best within elites
+                idx_opt = elite_idx[idx_in_elite]   # Map to actual batch index
+
+                # set optimal
+                q_opt = q_log[idx_opt, :, :]
+                v_opt = v_log[idx_opt, :, :]
+                tau_opt = tau_log[idx_opt, :, :]
+
+            # compute the average elite cost for monitoring
+            J_elite_avg = jnp.mean(J_elite)
+            J_elite_best = J_elite.min()
+
+            # print iteration info
+            itr_width = len(str(self.cem_config.iterations))  # e.g., 400 → width=3
+            print(f"Iteration {itr+1:0{itr_width}d}/{self.cem_config.iterations} | "
+                  f"J_elite_avg: {J_elite_avg:.4f} | "
+                  f"J_elite_best: {J_elite_best:.4f} | "
+                  f"J_best: {J_opt:.4f} | "
+                  f"‖Σ‖: {cov_norm:.4f}")
+            
+        return q_opt, v_opt, tau_opt
 
 #############################################################
 # EXAMPLE USAGE

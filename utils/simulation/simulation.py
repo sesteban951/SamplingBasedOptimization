@@ -281,7 +281,7 @@ class ParallelSim():
 
         # broadcast gravity and inertia
         self.gravity_batch = jnp.broadcast_to(self.dyn.gravity, (self.B, 3))
-        self.I_base_batch = jnp.broadcast_to(self.dyn.I_base, (self.B, 3, 3))
+        self.I_base_batch = jnp.broadcast_to(self.dyn.I_base_nom, (self.B, 3, 3))
 
         # PD gains for the external wrnech 
         self.kp_lin = sim_config.kp_lin
@@ -551,7 +551,7 @@ class ParallelSim():
 
         # inertia helper: I @ vec for batched (B, 3)
         I_B = self.I_base_batch                                          # (B, 3, 3)
-        Iv  = lambda vec: jnp.einsum('ij,bj->bi', self.dyn.I_base, vec)  # (B, 3)
+        Iv  = lambda vec: jnp.einsum('ij,bj->bi', self.dyn.I_base_nom, vec)  # (B, 3)
 
         # feedforward moment
         M_ff = Iv(alpha_ref_batch)  # (B, 3)

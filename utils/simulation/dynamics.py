@@ -108,8 +108,8 @@ class Dynamics:
         R_wb = mj_data.xmat[base_id].reshape(3, 3)  # base->world
         R_bw = R_wb.T
 
+        # compute the nominal inertia about the base body frame
         I_w = np.zeros((3, 3))
-
         for i in range(mj_model.nbody):
             m = mj_model.body_mass[i]
             if m == 0.0:
@@ -128,7 +128,7 @@ class Dynamics:
 
         # express in base frame
         I_base_ = R_bw @ I_w @ R_bw.T
-        self.I_base = jnp.array(I_base_, dtype=jnp.float32)  # shape (3, 3)
+        self.I_base_nom = jnp.array(I_base_, dtype=jnp.float32)  # shape (3, 3)
 
         # get gravity vector from model
         self.gravity = jnp.array(mj_model.opt.gravity, dtype=jnp.float32) # shape (3,)
@@ -168,6 +168,7 @@ class Dynamics:
 
     ################################## DYNAMICS ##################################
 
+    # WARNING: assumes a fixed base inertia, no accurate, OK, aligns with ZEST
     def _inertia_world(self, quat):
         """
         Computes the inertia matrix expressed in the world frame for all parallel environments.
@@ -181,7 +182,7 @@ class Dynamics:
         """
         quat = self._quat_normalize(quat)          # (B,4)
         R_wb = self._quat_to_rot_matrix(quat)      # (B,3,3)
-        I_world  = R_wb @ self.I_base @ jnp.swapaxes(R_wb, -1, -2)
+        I_world  = R_wb @ self.I_base_nom @ jnp.swapaxes(R_wb, -1, -2)
         I_world = 0.5 * (I_world + jnp.swapaxes(I_world, -1, -2))  # NOTE: enforce symmetry
         
         return I_world
