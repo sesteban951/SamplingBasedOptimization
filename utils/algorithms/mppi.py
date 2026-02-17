@@ -1,6 +1,6 @@
 ##
 #
-# Cross Entropy Method (CEM) for trajectory optimization.
+# Model Predictive Path Integral (MPPI) for trajectory optimization.
 #
 ##
 
@@ -25,12 +25,12 @@ from utils.spline.fourier import *
 
 
 #############################################################
-# CEM Optimizer
+# MPPI Optimizer
 #############################################################
 
 
 @dataclass
-class CrossEntropyMethod_Config:
+class MPPI_Config:
 
     # random key
     rng: jax.random.PRNGKey  # random key for sampling
@@ -39,40 +39,36 @@ class CrossEntropyMethod_Config:
     T: float         # total time horizon
     N_knots: int     # number of spline knot points
 
-    # basic CEM parameters
-    iterations: int  # number of CEM iterations
-    N_elite: int     # number of elite samples
+    # basic MPPI parameters
+    iterations: int  # number of MPPI iterations
+    lam: float       # temperature — lower = greedier, higher = more uniform
+    sigma: float     # fixed noise std for sampling
 
     # spline params
     spline_type: str = "ZOH"   # "ZOH" | "Linear" | "Cubic" | "Bezier" | "Fourier"
 
-    # other params
-    use_diagonal_cov: bool = False  # whether to only use the diagonal of the covariance matrix
-    use_step_size: bool = False     # whether to use step size in updating distribution
-    step_size: float = 0.5          # step size for distribution update
 
-
-class CrossEntropyMethod(ABC):
+class MPPI(ABC):
 
 
     def __init__(self, model_config: Model_Config,
                        sim_config: ParallelSim_Config,
-                       cem_config: CrossEntropyMethod_Config):
+                       mppi_config: MPPI_Config):
         
         # create the parallel sim object 
         self.sim = ParallelSim(model_config, sim_config)
         
         # store configs
-        self.cem_config = cem_config
+        self.mppi_config = mppi_config
         
         # internal rng
-        self.rng = cem_config.rng
+        self.rng = mppi_config.rng
 
         # check that the input params make sense
         self._check_valid_params()
 
         # construct the time array for simulation
-        self.N = int(round(self.cem_config.T / self.sim.dt)) # integer number of sim steps
+        self.N = int(round(self.mppi_config.T / self.sim.dt)) # integer number of sim steps
         self.t_sim = self.sim.dt * jnp.arange(self.N + 1)    # shape (N+1,)
         self.T_eff = self.N * self.sim.dt                    # effective total time
 
@@ -83,7 +79,7 @@ class CrossEntropyMethod(ABC):
         # initialize the spline knots points
         self._initialize_spline_knots()
 
-        print("CEM Optimizer initialized.")
+        print("MPPI Optimizer initialized.")
 
 
     def _check_valid_params(self):
@@ -96,28 +92,21 @@ class CrossEntropyMethod(ABC):
             raise ValueError(f"Batch size [B = {self.sim.B}] must be at least 2.")
         
         # check positive interval
-        if self.cem_config.T <= 0.0:
-            raise ValueError(f"Total time [T = {self.cem_config.T}] must be positive.")
+        if self.mppi_config.T <= 0.0:
+            raise ValueError(f"Total time [T = {self.mppi_config.T}] must be positive.")
         
         # check number of knots
-        if self.cem_config.N_knots < 2:
-            raise ValueError(f"Number of knots [N_knots = {self.cem_config.N_knots}]"
+        if self.mppi_config.N_knots < 2:
+            raise ValueError(f"Number of knots [N_knots = {self.mppi_config.N_knots}]"
                              f" must be greater than 1.")
-        
-        # check that there are enough elite samples
-        if self.cem_config.N_elite < 2:
-            raise ValueError(f"Number of elite samples [N_elite = {self.cem_config.N_elite}]"
-                             f" must be at least 2.")
 
-        # check that number of elite samples is less than batch size
-        if self.cem_config.N_elite > self.sim.B:
-            raise ValueError(f"Number of elite samples [N_elite = {self.cem_config.N_elite}]" 
-                             f" must be less than parallel sim envs [B = {self.sim.B}].")
-        
-        # if using step size, check that step_size is in (0, 1]
-        if self.cem_config.use_step_size == True:
-            if self.cem_config.step_size <= 0.0 or self.cem_config.step_size > 1.0:
-                raise ValueError(f"Step size step_size [{self.cem_config.step_size}] must be in (0, 1].")
+        # check that temperature is positive
+        if self.mppi_config.lam <= 0.0:
+            raise ValueError(f"Temperature [lam = {self.mppi_config.lam}] must be positive.")
+
+        # check that noise std is positive
+        if self.mppi_config.sigma <= 0.0:
+            raise ValueError(f"Noise std [sigma = {self.mppi_config.sigma}] must be positive.")
 
 
     def _initialize_spline_knots(self):
@@ -128,7 +117,7 @@ class CrossEntropyMethod(ABC):
         """
 
         # initialize an empty array for the knot points
-        y_size = (self.sim.B, self.cem_config.N_knots, self.sim.nu)
+        y_size = (self.sim.B, self.mppi_config.N_knots, self.sim.nu)
         Y0 = jnp.zeros(y_size)
 
         # knot points represent desired positions
@@ -154,7 +143,7 @@ class CrossEntropyMethod(ABC):
                 Y0 = Y0.at[:, :, i].set(
                     jax.random.uniform(
                         subkey,
-                        shape=(self.sim.B, self.cem_config.N_knots),
+                        shape=(self.sim.B, self.mppi_config.N_knots),
                         minval=pos_lo,
                         maxval=pos_hi
                     )
@@ -183,25 +172,25 @@ class CrossEntropyMethod(ABC):
                 Y0 = Y0.at[:, :, i].set(
                     jax.random.uniform(
                         subkey,
-                        shape=(self.sim.B, self.cem_config.N_knots),
+                        shape=(self.sim.B, self.mppi_config.N_knots),
                         minval=tau_lo,
                         maxval=tau_hi
                     )
                 )
 
         # create the spline object
-        if self.cem_config.spline_type == "ZOH":
+        if self.mppi_config.spline_type == "ZOH":
             self.spline = ZOH_Spline(Y0, self.T_eff)
-        elif self.cem_config.spline_type == "Linear":
+        elif self.mppi_config.spline_type == "Linear":
             self.spline = Linear_Spline(Y0, self.T_eff)
-        elif self.cem_config.spline_type == "Cubic":
+        elif self.mppi_config.spline_type == "Cubic":
             self.spline = Cubic_Spline(Y0, self.T_eff)
-        elif self.cem_config.spline_type == "Bezier":
+        elif self.mppi_config.spline_type == "Bezier":
             self.spline = Bezier_Spline(Y0, self.T_eff)
-        elif self.cem_config.spline_type == "Fourier":
+        elif self.mppi_config.spline_type == "Fourier":
             self.spline = Fourier_Spline(Y0, self.T_eff, periodic=False)
         else:
-            raise NotImplementedError(f"Spline type [{self.cem_config.spline_type}] not implemented.")
+            raise NotImplementedError(f"Spline type [{self.mppi_config.spline_type}] not implemented.")
 
         # update the spline knot points
         self.spline.update_knots(Y0)
@@ -227,58 +216,55 @@ class CrossEntropyMethod(ABC):
         # sample from standard normal
         Y_std = jax.random.normal(
             subkey,
-            shape=(self.sim.B, self.cem_config.N_knots * self.sim.nu)
+            shape=(self.sim.B, self.mppi_config.N_knots * self.sim.nu)
         )  # shape (B, N_knots*nu)
 
         # transform to desired distribution
         Y_flat = self.mu[None, :] + Y_std @ L.T  # shape (B, N_knots*nu)
 
         # reshape back to knot point matrices
-        Y_samples = jnp.reshape(Y_flat, (self.sim.B, self.cem_config.N_knots, self.sim.nu)) # shape (B, N_knots, nu)
+        Y_samples = jnp.reshape(Y_flat, (self.sim.B, self.mppi_config.N_knots, self.sim.nu)) # shape (B, N_knots, nu)
 
         return Y_samples
 
 
-    def _update_distribution(self, Y_elite):
+    def _update_distribution(self, Y_samples, J=None):
         """
-        Update the distribution based on elite samples.
+        Update the distribution based on softmax-weighted samples.
+
+        On the first call (J=None), just seeds mu/Sigma from the initial knot points.
 
         Args:
-            Y_elite: jnp.array, shape (N_elite, N_knots, nu) - elite spline knot points.
+            Y_samples: jnp.array, shape (B, N_knots, nu) - all sampled knot points.
+            J:         jnp.array, shape (B,) - cost for each sample, or None on init.
         """
 
-        # Flatten each elite's knot matrix (N_knots, nu) into a vector (N_knots*nu) in row-major order.
-        # Example: if Y_elite[k] = [[1,2,3],
-        #                           [4,5,6]]  (N_knots=2, nu=3)
+        # Flatten each sample's knot matrix (N_knots, nu) into a vector (N_knots*nu) in row-major order.
+        # Example: if Y_samples[k] = [[1,2,3],
+        #                             [4,5,6]]  (N_knots=2, nu=3)
         # then Y_flat[k] = [1,2,3,4,5,6].
-        K = Y_elite.shape[0]
-        Y_flat = jnp.reshape(Y_elite, (K, -1))  # shape (N_elite, N_knots * nu)
+        B = Y_samples.shape[0]
+        Y_flat = jnp.reshape(Y_samples, (B, -1))  # shape (B, N_knots * nu)
 
-        # compute mean along the elite samples
-        mu_ = jnp.mean(Y_flat, axis=0)  # shape (N_knots * nu,)
+        # on initialization, seed mu from the mean of the initial knot points
+        # and set Sigma to the fixed isotropic noise covariance
+        if J is None:
+            self.mu = jnp.mean(Y_flat, axis=0)  # shape (N_knots * nu,)
+            dim = self.mppi_config.N_knots * self.sim.nu
+            self.Sigma = (self.mppi_config.sigma ** 2) * jnp.eye(dim)
+            self._last_weights = jnp.ones((B,)) / B
+            return
 
-        # center the knots about the mean
-        Y_centered = Y_flat - mu_[None, :]  # shape (N_elite, N_knots * nu)
+        # MPPI weights, lower cost means higher weight, 
+        # with numerical stability fix by subtracting min cost
+        weights = jnp.exp(-(J - jnp.min(J)) / self.mppi_config.lam)  # shape (B,)
+        weights = weights / jnp.sum(weights)                    # normalize
 
-        # compute the unbiased sample covariance
-        Sigma_ = (Y_centered.T @ Y_centered) / (K - 1)  # shape (N_knots * nu, N_knots * nu)
+        # update mu as the softmax-weighted mean over all samples
+        self.mu = jnp.einsum('b,bd->d', weights, Y_flat)  # shape (N_knots * nu,)
 
-        # for numerical stability, symmetrize and add a small value to the diagonal
-        epsilon = 1e-6
-        Sigma_ = 0.5 * (Sigma_ + Sigma_.T) + epsilon * jnp.eye(Sigma_.shape[0], dtype=Sigma_.dtype)
-
-        # use a step size update if specified
-        if self.cem_config.use_step_size == True and self.mu is not None:
-            self.mu = (1 - self.cem_config.step_size) * self.mu + self.cem_config.step_size * mu_
-            self.Sigma = (1 - self.cem_config.step_size) * self.Sigma + self.cem_config.step_size * Sigma_
-        # just update directly
-        else:
-            self.mu = mu_
-            self.Sigma = Sigma_
-
-        # if using diagonal covariance, zero out the off-diagonal entries
-        if self.cem_config.use_diagonal_cov == True:
-            self.Sigma = jnp.diag(jnp.diag(self.Sigma))
+        # store weights for monitoring
+        self._last_weights = weights
 
 
     @abstractmethod
@@ -293,12 +279,12 @@ class CrossEntropyMethod(ABC):
         Returns:
             costs: jnp.array, shape (B,) - cost for each rollout.
         """
-        raise NotImplementedError("cost method must be implemented in CEM subclass.")
+        raise NotImplementedError("cost method must be implemented in MPPI subclass.")
     
 
     def optimize(self, q0, v0):
         """
-        Perform CEM optimization.
+        Perform MPPI optimization.
 
         Args:
             q0: jnp.array, shape (B, nq) - initial generalized positions.
@@ -315,8 +301,8 @@ class CrossEntropyMethod(ABC):
         v_opt = None
         tau_opt = None
 
-        # perform CEM iterations
-        for itr in range(self.cem_config.iterations):
+        # perform MPPI iterations
+        for itr in range(self.mppi_config.iterations):
 
             # evaluate the spline at simulation times
             y_val = self.spline.evaluate(self.t_sim[:-1])  # shape (B, N, nu)
@@ -329,48 +315,36 @@ class CrossEntropyMethod(ABC):
             J = self.cost(q_log, v_log, tau_log)  # shape (B,)
             J.block_until_ready()
 
-            # select elite samples
-            J_elite_neg, elite_idx = jax.lax.top_k(-J, self.cem_config.N_elite)
-            J_elite = -J_elite_neg  # shape (N_elite,)
-
-            # select the elite splines
-            Y_elite = jnp.take(self.spline.Y, elite_idx, axis=0)  # shape (N_elite, N_knots, nu)
-
-            # update the distribution
-            self._update_distribution(Y_elite)
+            # update the distribution using softmax weights over all samples
+            Y_current = self.spline.Y  # shape (B, N_knots, nu)
+            self._update_distribution(Y_current, J)
 
             # sample new knot points from the updated distribution
             Y_samples = self._sample_knot_points()  # shape (B, N_knots, nu)
             self.spline.update_knots(Y_samples)
 
-            # compute the norm of the covariance for monitoring
-            cov_norm = jnp.linalg.norm(self.Sigma, ord='fro')
+            # compute the effective sample size for monitoring (normalized to [0, 1])
+            # ideally should be 20-50% of the batch size, if too low means most weight is on very few samples
+            ess = 1.0 / (jnp.sum(self._last_weights ** 2) * self.sim.B)
 
             # record the best solution found so far
-            J_min = J_elite.min()
+            J_min = J.min()
             if J_min < J_opt:
 
                 # set best
                 J_opt = J_min
-                idx_in_elite = jnp.argmin(J_elite)  # Find best within elites
-                idx_opt = elite_idx[idx_in_elite]   # Map to actual batch index
+                idx_opt = jnp.argmin(J)  # best sample index
 
                 # set optimal
                 q_opt = q_log[idx_opt, :, :]
                 v_opt = v_log[idx_opt, :, :]
                 tau_opt = tau_log[idx_opt, :, :]
 
-            # compute the average elite cost for monitoring
-            J_elite_avg = jnp.mean(J_elite)
-            J_elite_best = J_elite.min()
-
             # print iteration info
-            itr_width = len(str(self.cem_config.iterations))  # e.g., 400 → width=3
-            print(f"Iteration {itr+1:0{itr_width}d}/{self.cem_config.iterations} | "
-                  f"J_elite_avg: {J_elite_avg:.4f} | "
-                  f"J_elite_best: {J_elite_best:.4f} | "
+            itr_width = len(str(self.mppi_config.iterations))  # e.g., 400 → width=3
+            print(f"Iteration {itr+1:0{itr_width}d}/{self.mppi_config.iterations} | "
+                  f"J_mean: {jnp.mean(J):.4f} | "
                   f"J_best: {J_opt:.4f} | "
-                  f"‖Σ‖: {cov_norm:.4f}")
+                  f"ESS: {ess:.2%}")
             
         return q_opt, v_opt, tau_opt
-    
