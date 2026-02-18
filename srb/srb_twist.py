@@ -32,14 +32,14 @@ class SRB_Jump(SRBDynamics):
         ))
 
         # foot placement cost weights
-        self.Q_foot = 10.0
+        self.Q_foot = 100.0
 
         # penalize forces and moments
         self.Q_force = 0.005
         self.Q_moment = 0.0005
 
         # terminal weights
-        self.Qx_f = 20.0 * self.Qx
+        self.Qx_f = 100.0 * self.Qx
 
 
     ###############################################################
@@ -166,12 +166,12 @@ M_L = opti.variable(3, N)   # ankle moments at left ankle
 M_R = opti.variable(3, N)   # ankle moments at right ankle
 
 # initial condition
-pitch0_deg = 0.0
+pitch0_deg = 1.0
 quat0 = np.array([
     np.cos(np.radians(pitch0_deg) / 2),  # qw
     0,                                   # qx
     np.sin(np.radians(pitch0_deg) / 2),  # qy
-    0,                                   # qz
+    0                                    # qz
 ])
 x0 = np.array([0, 0, 0.69,  # p_com
                quat0[0], quat0[1], quat0[2], quat0[3],  # quaternion
@@ -183,28 +183,25 @@ p0_R = np.array([0, -srb.hip_offset]) # initial right foot position
 p0_L = ca.DM(p0_L)
 p0_R = ca.DM(p0_R)
 
-# desired goal state - jump forward, stay upright
+# desired goal state - jump forward, land upright with 180 deg CCW yaw twist
 px_goal = 1.0
-pitchT_deg = 0.0
-quatT = np.array([
-    np.cos(np.radians(pitchT_deg) / 2),  # qw
-    0,                                   # qx
-    np.sin(np.radians(pitchT_deg) / 2),  # qy
-    0,                                   # qz
+yaw_goal = np.pi
+quat_goal = np.array([
+    np.cos(yaw_goal / 2),  # qw
+    0.0,                   # qx
+    0.0,                   # qy
+    np.sin(yaw_goal / 2),  # qz
 ])
-x_goal = np.array([px_goal, 0, 0.69, # p_com (forward, same height)
-                   quatT[0], quatT[1], quatT[2], quatT[3],  # quaternion (same orientation)
-                   0, 0, 0,          # v_com (stopped)
-                   0, 0, 0])         # w_body
+x_goal = np.array([px_goal, 0, 0.69,           # p_com (forward, same height)
+                   quat_goal[0], quat_goal[1], # quaternion (upright, yaw = +pi)
+                   quat_goal[2], quat_goal[3],
+                   0, 0, 0,                    # v_com (stopped)
+                   0, 0, 0])                   # w_body
 x_goal_ca = ca.DM(x_goal)
 
 # Desired landing foot positions
 p_L_goal = ca.DM([x_goal[0],  srb.hip_offset])
 p_R_goal = ca.DM([x_goal[0], -srb.hip_offset])
-
-# ----------------------------------------------------------
-# Dynamics Constraints
-# ----------------------------------------------------------
 
 # set the initial condition 
 opti.subject_to(X[:, 0] == x0_ca)
@@ -215,10 +212,6 @@ x_terminal_lb = x_goal_ca - epsilon
 x_terminal_ub = x_goal_ca + epsilon
 opti.subject_to(X[:, N] >= x_terminal_lb)
 opti.subject_to(X[:, N] <= x_terminal_ub)
-
-# kinematic limits
-L_max = 0.75   # [m] max leg length
-L_min = 0.30   # [m] min leg length
 
 # compute the dynamics constraints
 for k in range(N):
@@ -244,12 +237,6 @@ for k in range(N):
             + M_L[:, k] + M_R[:, k]
         )
 
-        # constrain the leg length 
-        opti.subject_to(ca.sumsqr(r_L) <= L_max**2)
-        opti.subject_to(ca.sumsqr(r_R) <= L_max**2)
-        opti.subject_to(ca.sumsqr(r_L) >= L_min**2)
-        opti.subject_to(ca.sumsqr(r_R) >= L_min**2)
-
     # FLIGHT
     elif (k>= stance_end) and (k < flight_end):
         F_total = ca.DM.zeros(3)
@@ -261,8 +248,8 @@ for k in range(N):
         p_com = X[0:3, k]
         
         # feet are decision variables but at fixed height
-        p_L = ca.vertcat(p_L_land, 0.0)
-        p_R = ca.vertcat(p_R_land, 0.0)
+        p_L = ca.vertcat(p_L_land, 0)
+        p_R = ca.vertcat(p_R_land, 0)
 
         # moment arms from COM to feet
         r_L = p_L - p_com
@@ -276,12 +263,6 @@ for k in range(N):
             + M_L[:, k] + M_R[:, k]
         )
 
-        # constrain the leg length 
-        opti.subject_to(ca.sumsqr(r_L) <= L_max**2)
-        opti.subject_to(ca.sumsqr(r_R) <= L_max**2)
-        opti.subject_to(ca.sumsqr(r_L) >= L_min**2)
-        opti.subject_to(ca.sumsqr(r_R) >= L_min**2)
-
     # Combined wrench as control input
     u = ca.vertcat(F_total, M_total)
     
@@ -291,7 +272,7 @@ for k in range(N):
 
 # add z_com constraints
 pz_min = 0.40
-pz_max = 0.95
+pz_max = 1.0
 for k in range(N+1):
     opti.subject_to(X[2, k] >= pz_min)  # enforce constant height
     opti.subject_to(X[2, k] <= pz_max)  # enforce constant height
@@ -359,7 +340,7 @@ for k in range(N):
         opti.subject_to(opti.bounded(-M_ankle_z_max, M_R[2, k], M_ankle_z_max))
 
 # landing foot placement constraint
-landing_tol = 0.01  # foot landing tolerance
+landing_tol = 0.1  # foot landing tolerance
 opti.subject_to(ca.sumsqr(p_L_land - p_L_goal) <= landing_tol**2)
 opti.subject_to(ca.sumsqr(p_R_land - p_R_goal) <= landing_tol**2)
 
@@ -371,8 +352,31 @@ opti.subject_to(ca.sumsqr(p_R_land - p_R_goal) <= landing_tol**2)
 J = 0
 for k in range(N):
 
+    # phase-aware state objective:
+    # keep initial orientation in stance, twist in flight, track final state in landing
+    if k < stance_end:
+        x_ref_k = x0.copy()
+        x_ref_k[7:13] = 0.0
+    elif k < flight_end:
+        alpha = (k - stance_end + 1) / N_flight
+        yaw_k = alpha * yaw_goal
+        quat_k = np.array([
+            np.cos(yaw_k / 2),
+            0.0,
+            0.0,
+            np.sin(yaw_k / 2),
+        ])
+        x_ref_k = x0.copy()
+        x_ref_k[0] = alpha * px_goal
+        x_ref_k[1] = 0.0
+        x_ref_k[2] = x_goal[2]
+        x_ref_k[3:7] = quat_k
+        x_ref_k[7:13] = 0.0
+    else:
+        x_ref_k = x_goal
+
     # state cost
-    J += srb.state_cost(X[:, k], x_goal_ca)
+    J += srb.state_cost(X[:, k], ca.DM(x_ref_k))
 
     # contact cost
     if k < stance_end or k >= flight_end:
@@ -402,7 +406,7 @@ for k in range(N + 1):
     opti.set_initial(X[0:3, k], p_com_guess)
 
     # quaternion, TODO: SLERP for better guess when orientations differ significantly
-    opti.set_initial(X[3:7, k], [1.0, 0.0, 0.0, 0.0])
+    opti.set_initial(X[3:7, k], [1, 0, 0, 0])
 
 # # landing foot positions
 opti.set_initial(p_L_land, p_L_goal)
@@ -412,16 +416,16 @@ opti.set_initial(p_R_land, p_R_goal)
 for k in range(N):
     if k < stance_end or k >= flight_end:
         # contact phases: split weight evenly
-        opti.set_initial(F_L[:, k], [0.0, 0.0, srb.m * srb.g / 2])
-        opti.set_initial(F_R[:, k], [0.0, 0.0, srb.m * srb.g / 2])
+        opti.set_initial(F_L[:, k], [0, 0, srb.m * srb.g / 2])
+        opti.set_initial(F_R[:, k], [0, 0, srb.m * srb.g / 2])
     else:
         # flight: zero
-        opti.set_initial(F_L[:, k], [0.0, 0.0, 0.0])
-        opti.set_initial(F_R[:, k], [0.0, 0.0, 0.0])
+        opti.set_initial(F_L[:, k], [0, 0, 0])
+        opti.set_initial(F_R[:, k], [0, 0, 0])
 
 # moments: zero
-opti.set_initial(M_L, 0.0)
-opti.set_initial(M_R, 0.0)
+opti.set_initial(M_L, 0)
+opti.set_initial(M_R, 0)
 
 # ----------------------------------------------------------
 # Solve the optimization
@@ -516,7 +520,7 @@ print(f"  v_com = {X_sol[N, 7:10]}")
 # ----------------------------------------------------------
 time = np.linspace(0, T, N+1)
 
-save_dir = "./results/srb/srb_jump/"
+save_dir = "./results/srb_twist/"
 os.makedirs(save_dir, exist_ok=True)
 
 np.savetxt(save_dir + "time.csv",    time,  delimiter=",")

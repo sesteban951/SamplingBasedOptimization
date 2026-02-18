@@ -24,7 +24,8 @@ from utils.kinematics import kin
 # which data to load
 # experiment = "srb/srb_free_wrench"
 # experiment = "srb/srb_jump"
-experiment = "srb/srb_jump_2d"
+# experiment = "srb/srb_jump_2d"
+experiment = "srb/srb_twist"
 
 # which data to load
 time_file = f"./results/{experiment}/time.csv"

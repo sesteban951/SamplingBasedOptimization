@@ -61,7 +61,7 @@ class SRBDynamics(ABC):
         self.nu = 6   # [F, M]
 
         # system parameters (pulled from pinocchio + 29dof urdf)
-        # nominal ocnfiguration is arms down, standing straight
+        # nominal configuration is arms down, standing straight
         self.pz_com = 0.693  # center of mass height in world frame
         self.m = 33.34      # mass [kg]
         self.g = 9.81       # gravity [m/s^2]
