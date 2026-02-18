@@ -62,7 +62,7 @@ class Bezier_Spline(Base_Spline):
 
         # binomial coefficients
         # WARNING: high num knots can give rise to huge coeff values
-        coeffs = jnp.array([math.comb(n, ki) for ki in k], dtype=jnp.float64)
+        coeffs = jnp.array([math.comb(n, ki) for ki in k], dtype=self.Y.dtype)
 
         return coeffs
     
