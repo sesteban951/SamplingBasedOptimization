@@ -3,14 +3,19 @@ name: env_sbo
 channels:
   - conda-forge
 dependencies:
-  - python=3.10
+  - python=3.11
   - numpy
   - scipy
   - casadi
   - matplotlib
+  - tk
   - pip
   - pinocchio
   - pip:
       - "jax[cuda12]"
-      - mujoco>=3.4.0
-      - mujoco-mjx>=3.4.0
+      - "mujoco>=3.5.0"
+      - "mujoco-mjx>=3.5.0"
+      - "warp-lang>=1.11.1"
+      - "cma"
+variables:
+  MPLBACKEND: TkAgg    # for matplotlib in a conda env

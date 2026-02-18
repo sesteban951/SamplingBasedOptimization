@@ -20,6 +20,7 @@ import mujoco.viewer
 
 # which data to load
 # experiment = "cartpole"
+# experiment = "cartpole_cmaes"
 # xml_path = f"./models/cartpole/cartpole.xml"
 # experiment = "cartpole_walls"
 # xml_path = f"./models/cartpole/cartpole_walls.xml"
