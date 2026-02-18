@@ -1,7 +1,7 @@
 <mujoco model="g1_21dof">
   <compiler angle="radian" meshdir="assets" autolimits="true" />
 
-  <option timestep="0.01" iterations="5" ls_iterations="5">
+  <option timestep="0.01" iterations="10" ls_iterations="10">
     <flag eulerdamp="disable" />
   </option>
 
@@ -14,8 +14,9 @@
     <geom condim="3" solimp="0.0 0.95 0.01" />
     <default class="g1">
       <site rgba="1 0 0 1" size="0.01" group="5" />
-      <!-- <joint damping="0.0" armature="1.0" frictionloss="0.0" /> -->
-      <joint damping="1.0" armature="0.01" frictionloss="0.1" />
+      <!-- NOTE: stability of the sim depends heavily on the joint params -->
+      <joint damping="0.0" armature="1.0" frictionloss="0.0" />
+      <!-- <joint damping="1.0" armature="0.01" frictionloss="0.1" /> -->
       <position kp="500" dampratio="1" inheritrange="1" />
       <default class="visual">
         <geom group="2" type="mesh" contype="0" conaffinity="0" density="0" material="metal" />

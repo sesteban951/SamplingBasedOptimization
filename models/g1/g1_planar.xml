@@ -14,8 +14,9 @@
     <geom condim="3" solimp="0.0 0.95 0.01" />
     <default class="g1">
       <site rgba="1 0 0 1" size="0.01" group="5" />
-      <!-- <joint damping="0.0" armature="1.0" frictionloss="0.0" /> -->
-      <joint damping="1.0" armature="0.01" frictionloss="0.1" />
+      <!-- NOTE: stability of the sim depends heavily on the joint params -->
+      <joint damping="0.0" armature="1.0" frictionloss="0.0" />
+      <!-- <joint damping="1.0" armature="0.01" frictionloss="0.1" /> -->
       <position kp="500" dampratio="1" inheritrange="1" />
       <default class="visual">
         <geom group="2" type="mesh" contype="0" conaffinity="0" density="0" material="metal" />
@@ -102,9 +103,9 @@
     <body name="pelvis" pos="0 0 0" childclass="g1">
       <inertial pos="0 0 -0.07605" quat="1 0 -0.000399148 0" mass="3.813" diaginertia="0.010549 0.0093089 0.0079184" />
       <!-- <freejoint name="floating_base_joint" /> -->
-      <joint name="root_x" type="slide" axis="1 0 0" limited="false"/>
-      <joint name="root_z" type="slide" axis="0 0 1" limited="false"/>
-      <joint name="root_y_rotation" type="hinge" axis="0 1 0" limited="false"/> 
+      <joint name="root_x" type="slide" axis="1 0 0" limited="false" damping="0.0" armature="0" frictionloss="0"/>
+      <joint name="root_z" type="slide" axis="0 0 1" limited="false" damping="0.0" armature="0" frictionloss="0"/>
+      <joint name="root_y_rotation" type="hinge" axis="0 1 0" limited="false" damping="0.0" armature="0" frictionloss="0"/> 
 
       <geom class="visual" material="black" mesh="pelvis" />
       <geom class="visual" mesh="pelvis_contour_link" />

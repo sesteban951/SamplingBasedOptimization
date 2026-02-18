@@ -57,16 +57,16 @@ class G1_Walk_CEM(CrossEntropyMethod):
 
         # Running cost weights (per timestep)
         self.w_px      = 1.0     # horizontal position tracking
-        self.w_pz      = 10.0    # vertical position tracking (keep at default height)
+        self.w_pz      = 20.0    # vertical position tracking (keep at default height)
         self.w_theta   = 10.0    # pitch angle (stay upright)
         
         self.w_vx      = 0.1     # forward velocity tracking
         self.w_vz      = 0.1     # vertical velocity tracking
         self.w_omega   = 0.1     # pitch velocity tracking
 
-        self.w_p_hip   = 1.0     # hip joint tracking
-        self.w_p_knee  = 1.0     # knee joint tracking
-        self.w_p_ankle = 1.0     # ankle joint tracking
+        self.w_p_hip   = 5.0     # hip joint tracking
+        self.w_p_knee  = 5.0     # knee joint tracking
+        self.w_p_ankle = 5.0     # ankle joint tracking
         self.w_p_shoulder = 0.5  # shoulder joint tracking
         self.w_p_elbow = 0.5     # elbow joint tracking
         
@@ -75,9 +75,9 @@ class G1_Walk_CEM(CrossEntropyMethod):
         self.w_v_ankle = 0.1     # ankle joint velocity tracking
         self.w_v_shoulder = 0.05 # shoulder joint velocity tracking
         self.w_v_elbow = 0.05    # elbow joint velocity tracking
-        self.w_control = 0.001    # control effort
+        self.w_control = 0.0001    # control effort
 
-        terminal_scale = 10.0
+        terminal_scale = 1.0
 
         self.wf_px = terminal_scale * self.w_px
         self.wf_pz = terminal_scale * self.w_pz
@@ -277,9 +277,14 @@ if __name__ == "__main__":
     # model config
     model_config = Model_Config(
         xml_path="./models/g1/g1_planar.xml",
-        Kp=[300, 300, 100, 300, 300, 100, # legs
-            150, 150, 150, 150],        # arms
-        Kd=[3.0, ] * 10,  
+        Kp=[100, 150, 40, 
+            100, 150, 40, 
+            100, 50, 
+            100, 50],
+        Kd=[2, 4, 2, 
+            2, 4, 2, 
+            2, 2, 
+            2, 2],
         q_actuated_idx=list(range(3,13)),
         v_actuated_idx=list(range(3,13)),
         action_mode="pos"
@@ -294,13 +299,15 @@ if __name__ == "__main__":
     cem_rng = jax.random.PRNGKey(42)
     cem_config = CrossEntropyMethod_Config(
         rng=cem_rng,
-        T=3.0,
-        iterations=100,
-        N_elite=32,
+        T=2.0,
+        iterations=30,
+        N_elite=512,
+        N_knots=10,
+        spline_type="Bezier",
         # N_knots=20,
-        # spline_type="Bezier",
-        N_knots=20,
-        spline_type="Linear",
+        # spline_type="Linear",
+        # N_knots=10,
+        # spline_type="Cubic",
     )
 
     # create the CEM optimizer
