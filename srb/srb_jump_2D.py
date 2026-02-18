@@ -150,8 +150,10 @@ p0_R = ca.DM([x0[0]])  # right foot x
 # Goal state: jumped forward, same height, upright, stopped
 px_goal = 1.0
 x_goal = np.array([
-    px_goal, 0.69, 0.0,  # px, pz, theta
-    0.0,     0.0,  0.0   # vx, vz, w
+    px_goal, 0.69,  # px, pz, 
+    0.0,            # theta
+    0.0, 0.0,       # vx, vz, 
+    0.0             # w
 ])
 x_goal_ca = ca.DM(x_goal)
 
@@ -167,7 +169,7 @@ p_R_goal = ca.DM([px_goal])
 opti.subject_to(X[:, 0] == x0_ca)
 
 # Box constraint on terminal state
-epsilon = 0.001
+epsilon = 0.005
 opti.subject_to(X[:, N] >= x_goal_ca - epsilon)
 opti.subject_to(X[:, N] <= x_goal_ca + epsilon)
 
@@ -231,7 +233,7 @@ for k in range(N):
 
 # COM height bounds
 pz_min = 0.40
-pz_max = 1.0
+pz_max = 0.95
 for k in range(N + 1):
     opti.subject_to(X[1, k] >= pz_min)
     opti.subject_to(X[1, k] <= pz_max)
@@ -286,7 +288,7 @@ for k in range(N):
         opti.subject_to(opti.bounded(-M_ankle_max, M_R[:, k], M_ankle_max))
 
 # Landing foot placement
-landing_tol = 0.001
+landing_tol = 0.005
 opti.subject_to(ca.sumsqr(p_L_land - p_L_goal) <= landing_tol**2)
 opti.subject_to(ca.sumsqr(p_R_land - p_R_goal) <= landing_tol**2)
 
