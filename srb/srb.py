@@ -199,10 +199,10 @@ class SRBDynamics(ABC):
 class SRBDynamics2D(ABC):
 
     # state indices
-    IDX_P = slice(0, 2)
-    IDX_PX    = 0
-    IDX_PZ    = 1
-    IDX_THETA = 2
+    IDX_P  = slice(0, 2)
+    IDX_PX = 0
+    IDX_PZ = 1
+    IDX_Q  = 2
 
     # force indices
     IDX_VX = 3
