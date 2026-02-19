@@ -173,6 +173,10 @@ epsilon = 0.005
 opti.subject_to(X[:, N] >= x_goal_ca - epsilon)
 opti.subject_to(X[:, N] <= x_goal_ca + epsilon)
 
+# kinematic limits
+L_max = 0.75   # [m] max leg length
+L_min = 0.30   # [m] min leg length
+
 # dynamics constraints
 for k in range(N):
 
@@ -196,6 +200,12 @@ for k in range(N):
           + cross2d(r_R, F_R[:, k])
           + M_L[:, k] + M_R[:, k]
         )
+
+        # constrain the leg length
+        opti.subject_to(ca.sumsqr(r_L) <= L_max**2)
+        opti.subject_to(ca.sumsqr(r_R) <= L_max**2)
+        opti.subject_to(ca.sumsqr(r_L) >= L_min**2)
+        opti.subject_to(ca.sumsqr(r_R) >= L_min**2)
 
     # FLIGHT
     elif (k>= stance_end) and (k < flight_end):
@@ -222,6 +232,12 @@ for k in range(N):
           + cross2d(r_R, F_R[:, k])
           + M_L[:, k] + M_R[:, k]
         )
+
+        # constrain the leg length
+        opti.subject_to(ca.sumsqr(r_L) <= L_max**2)
+        opti.subject_to(ca.sumsqr(r_R) <= L_max**2)
+        opti.subject_to(ca.sumsqr(r_L) >= L_min**2)
+        opti.subject_to(ca.sumsqr(r_R) >= L_min**2)
 
     # Combined wrench as input to SRB
     u = ca.vertcat(F_total, M_total)

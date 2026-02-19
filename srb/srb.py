@@ -121,16 +121,12 @@ class SRBDynamics(ABC):
         # net moment about COM
         M_net_W = M
         M_net_B = R_BW.T @ M_net_W  # express moment in body frame
-        # M_net_B = M_net_W  # express moment in body frame
 
         # translational dynamics
         p_com_dot = v_com
         v_com_dot = (1.0 / self.m) * F_net_W
 
         # quaternion rate
-        # w_world = R_BW @ w_body  # express angular velocity in world frame
-        # w_world_quat = ca.vertcat(0, w_world)  
-        # quat_dot = 0.5 * kin.quat_mult_ca(quat, w_world_quat)
         w_body_quat = ca.vertcat(0, w_body)  # augment angular velocity to quaternion form [0, wx, wy, wz]
         quat_dot = 0.5 * kin.quat_mult_ca(quat, w_body_quat)
         
@@ -168,7 +164,7 @@ class SRBDynamics(ABC):
         
         # project back to unit quaternion manifold
         quat_next = x_next[3:7]
-        quat_next = quat_next / (ca.norm_2(quat_next) + 1e-12)
+        quat_next = quat_next / ca.norm_2(quat_next)
         
         # rebuild state to avoid slice assignment
         x_next = ca.vertcat(

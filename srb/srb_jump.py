@@ -184,7 +184,7 @@ p0_L = ca.DM(p0_L)
 p0_R = ca.DM(p0_R)
 
 # desired goal state - jump forward, stay upright
-px_goal = 1.0                        
+px_goal = 1.0
 pitchT_deg = 0.0
 quatT = np.array([
     np.cos(np.radians(pitchT_deg) / 2),  # qw
@@ -202,6 +202,10 @@ x_goal_ca = ca.DM(x_goal)
 p_L_goal = ca.DM([x_goal[0],  srb.hip_offset])
 p_R_goal = ca.DM([x_goal[0], -srb.hip_offset])
 
+# ----------------------------------------------------------
+# Dynamics Constraints
+# ----------------------------------------------------------
+
 # set the initial condition 
 opti.subject_to(X[:, 0] == x0_ca)
 
@@ -211,6 +215,10 @@ x_terminal_lb = x_goal_ca - epsilon
 x_terminal_ub = x_goal_ca + epsilon
 opti.subject_to(X[:, N] >= x_terminal_lb)
 opti.subject_to(X[:, N] <= x_terminal_ub)
+
+# kinematic limits
+L_max = 0.75   # [m] max leg length
+L_min = 0.30   # [m] min leg length
 
 # compute the dynamics constraints
 for k in range(N):
@@ -235,6 +243,12 @@ for k in range(N):
             + ca.cross(r_R, F_R[:, k]) 
             + M_L[:, k] + M_R[:, k]
         )
+
+        # constrain the leg length 
+        opti.subject_to(ca.sumsqr(r_L) <= L_max**2)
+        opti.subject_to(ca.sumsqr(r_R) <= L_max**2)
+        opti.subject_to(ca.sumsqr(r_L) >= L_min**2)
+        opti.subject_to(ca.sumsqr(r_R) >= L_min**2)
 
     # FLIGHT
     elif (k>= stance_end) and (k < flight_end):
@@ -261,6 +275,12 @@ for k in range(N):
             + ca.cross(r_R, F_R[:, k])
             + M_L[:, k] + M_R[:, k]
         )
+
+        # constrain the leg length 
+        opti.subject_to(ca.sumsqr(r_L) <= L_max**2)
+        opti.subject_to(ca.sumsqr(r_R) <= L_max**2)
+        opti.subject_to(ca.sumsqr(r_L) >= L_min**2)
+        opti.subject_to(ca.sumsqr(r_R) >= L_min**2)
 
     # Combined wrench as control input
     u = ca.vertcat(F_total, M_total)
