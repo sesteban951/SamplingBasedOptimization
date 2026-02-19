@@ -1,7 +1,8 @@
 ##
 #
-# Annealing schedules for Sampling Based Optimization algorithms.
+# Schedules for Sampling Based Optimization algorithms.
 # https://www.desmos.com/calculator/hddzxvbzo0
+# 
 ##
 
 # standard imports
@@ -11,19 +12,19 @@ import numpy as np
 # LINEAR
 ######################################################
 
-def linear_annealing(itr, I, alpha_max=1.0):
+def linear_schedule(itr, I, alpha_max=1.0):
     """
-    Linear annealing schedule.
+    Linear schedule.
     α(i) = αₘ * (1 − i / I)
-    where: αₘ ∈ [0, 1] is the maximum value of the annealing coefficient
+    where: αₘ ∈ [0, 1] is the maximum value of the schedule coefficient
            I is the total number of iterations
 
     Args:
         itr: (int) Current iteration number.
         I: (int) Total number of iterations.
-        alpha_max: (float) Maximum value of the annealing coefficient.
+        alpha_max: (float) Maximum value of the schedule coefficient.
     Returns:
-        alpha: (float) Annealing coefficient.
+        alpha: (float) Schedule coefficient.
     """
 
     # ensure that total iterations is positive
@@ -33,7 +34,7 @@ def linear_annealing(itr, I, alpha_max=1.0):
     # clip the maximum value
     alpha_max = np.clip(alpha_max, 0.0, 1.0)
 
-    # compute the annealing coefficient
+    # compute the schedule coefficient
     alpha = alpha_max * (1 - itr / I)
 
     return alpha
@@ -42,20 +43,20 @@ def linear_annealing(itr, I, alpha_max=1.0):
 # EXPONENTIAL
 ######################################################
 
-def exponential_annealing(itr, I, alpha_max=1.0, lam=5.0):
+def exponential_schedule(itr, I, alpha_max=1.0, lam=5.0):
     """
-    Exponential annealing schedule.
+    Exponential schedule.
     α(i) = αₘ * [ e^(−λ * i /I) − e^(−λ) ] / [ 1 − e^(−λ) ]
-    where: αₘ ∈ [0, 1] is the maximum value of the annealing coefficient
+    where: αₘ ∈ [0, 1] is the maximum value of the schedule coefficient
            λ ≠ 0 is the decay rate
 
     Args:
         itr: (int) Current iteration number.
         I: (int) Total number of iterations.
-        alpha_max: (float) Maximum value of the annealing coefficient.
+        alpha_max: (float) Maximum value of the schedule coefficient.
         lam: (float) Decay rate (λ).
     Returns:
-        alpha: (float) Annealing coefficient.
+        alpha: (float) Schedule coefficient.
     """
     # ensure that total iterations is positive
     if I <= 0:
@@ -64,7 +65,7 @@ def exponential_annealing(itr, I, alpha_max=1.0, lam=5.0):
     # clip the maximum value
     alpha_max = np.clip(alpha_max, 0.0, 1.0)
 
-    # compute the annealing coefficient
+    # compute the schedule coefficient
     alpha = alpha_max * (np.exp(-lam * itr) - np.exp(-lam * I)) / (1 - np.exp(-lam * I))
 
     return alpha
@@ -73,18 +74,18 @@ def exponential_annealing(itr, I, alpha_max=1.0, lam=5.0):
 # COSINE
 ######################################################
 
-def cosine_annealing(itr, I, alpha_max=1.0):
+def cosine_schedule(itr, I, alpha_max=1.0):
     """
-    Cosine annealing schedule.
+    Cosine schedule.
     α(i) = 0.5 * αₘ * (1 + cos(π * i / I))
-    where: αₘ ∈ [0, 1] is the maximum value of the annealing coefficient
+    where: αₘ ∈ [0, 1] is the maximum value of the schedule coefficient
 
     Args:
         itr: (int) Current iteration number.
         I: (int) Total number of iterations.
-        alpha_max: (float) Maximum value of the annealing coefficient.
+        alpha_max: (float) Maximum value of the schedule coefficient.
     Returns:
-        alpha: (float) Annealing coefficient.
+        alpha: (float) Schedule coefficient.
     """
     # ensure that total iterations is positive
     if I <= 0:
@@ -93,7 +94,7 @@ def cosine_annealing(itr, I, alpha_max=1.0):
     # clip the maximum value
     alpha_max = np.clip(alpha_max, 0.0, 1.0)
 
-    # compute the annealing coefficient
+    # compute the schedule coefficient
     alpha = 0.5 * alpha_max * (1 + np.cos(np.pi * itr / I))
 
     return alpha
@@ -102,20 +103,20 @@ def cosine_annealing(itr, I, alpha_max=1.0):
 # TANH
 ######################################################
 
-def tanh_annealing(itr, I, alpha_max=1.0, sigma=5.0):
+def tanh_schedule(itr, I, alpha_max=1.0, sigma=5.0):
     """
-    Tanh annealing schedule.
+    Tanh schedule.
     α(i) = 0.5 * αₘ * (1 − tanh(σ * (i / I − 0.5)) / tanh(σ * 0.5))
-    where: αₘ ∈ [0, 1] is the maximum value of the annealing coefficient
+    where: αₘ ∈ [0, 1] is the maximum value of the schedule coefficient
            σ > 0 is the steepness of the tanh function
 
     Args:
         itr: (int) Current iteration number.
         I: (int) Total number of iterations.
-        alpha_max: (float) Maximum value of the annealing coefficient.
+        alpha_max: (float) Maximum value of the schedule coefficient.
         sigma: (float) Steepness of the tanh function.
     Returns:
-        alpha: (float) Annealing coefficient.
+        alpha: (float) Schedule coefficient.
     """
 
     # ensure that total iterations is positive
@@ -125,7 +126,7 @@ def tanh_annealing(itr, I, alpha_max=1.0, sigma=5.0):
     # clip the maximum value
     alpha_max = np.clip(alpha_max, 0.0, 1.0)
 
-    # compute the annealing coefficient
+    # compute the schedule coefficient
     term1 = np.tanh(sigma * (itr/I - 0.5))
     term2 = np.tanh(sigma * 0.5)
     alpha = 0.5 * alpha_max * (1 - term1 / term2)
@@ -144,35 +145,35 @@ if __name__ == "__main__":
     iters = np.arange(I_tot)
     alpha_max = 1.0
 
-    # ------------------- Linear Annealing -------------------
+    # ------------------- Linear schedule -------------------
     alpha_linear = np.zeros(I_tot)
     for i in range(I_tot):
-        alpha_linear[i] = linear_annealing(i, I_tot, alpha_max=alpha_max)
+        alpha_linear[i] = linear_schedule(i, I_tot, alpha_max=alpha_max)
 
-    # ------------------- Exp Annealing -------------------
+    # ------------------- Exp schedule -------------------
     alpha_exp = np.zeros(I_tot)
     for i in range(I_tot):
-        alpha_exp[i] = exponential_annealing(i, I_tot, alpha_max=alpha_max, lam=0.05)
+        alpha_exp[i] = exponential_schedule(i, I_tot, alpha_max=alpha_max, lam=0.05)
 
-    # ------------------- Cosine Annealing -------------------
+    # ------------------- Cosine schedule -------------------
     alpha_cosine = np.zeros(I_tot)
     for i in range(I_tot):
-        alpha_cosine[i] = cosine_annealing(i, I_tot, alpha_max=alpha_max)
+        alpha_cosine[i] = cosine_schedule(i, I_tot, alpha_max=alpha_max)
 
-    # ------------------- Tanh Annealing -------------------
+    # ------------------- Tanh schedule -------------------
     alpha_tanh = np.zeros(I_tot)
     for i in range(I_tot):
-        alpha_tanh[i] = tanh_annealing(i, I_tot, alpha_max=alpha_max, sigma=5.0)
+        alpha_tanh[i] = tanh_schedule(i, I_tot, alpha_max=alpha_max, sigma=5.0)
 
     # ------------------- Plotting -------------------
     plt.figure()
-    plt.plot(iters, alpha_linear, label='Linear Annealing')
-    plt.plot(iters, alpha_exp, label='Exponential Annealing')
-    plt.plot(iters, alpha_cosine, label='Cosine Annealing')
-    plt.plot(iters, alpha_tanh, label='Tanh Annealing')
+    plt.plot(iters, alpha_linear, label='Linear Schedule')
+    plt.plot(iters, alpha_exp, label='Exponential Schedule')
+    plt.plot(iters, alpha_cosine, label='Cosine Schedule')
+    plt.plot(iters, alpha_tanh, label='Tanh Schedule')
     plt.xlabel('Iteration')
     plt.ylabel('Alpha')
-    plt.title('Annealing Schedules')
+    plt.title('Schedules')
     plt.legend()
     plt.grid()
     plt.show()
