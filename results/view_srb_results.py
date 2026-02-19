@@ -71,7 +71,7 @@ def srb_2D_to_3D(q_2d_traj):
     q_3d_traj[:, 2] = p_com[:, 1]  # pz
 
     # orientation (quaternion)
-    angle_half = theta / 2.0
+    angle_half = -theta / 2.0 # (negative, bc planar SRB y+ is out of page, Mujoco y+ into page)
     q_3d_traj[:, 3] = np.cos(angle_half)  # qw
     q_3d_traj[:, 4] = 0.0                 # qx
     q_3d_traj[:, 5] = np.sin(angle_half)  # qy
