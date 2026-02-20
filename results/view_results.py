@@ -24,19 +24,23 @@ import mujoco.viewer
 # xml_path = f"./models/cartpole/cartpole.xml"
 # experiment = "cartpole_walls"
 # xml_path = f"./models/cartpole/cartpole_walls.xml"
+
 # experiment = "hopper"
 # experiment = "hopper_backflip"
 # xml_path = f"./models/hopper/hopper.xml"
+
 # experiment = "cube"
 # xml_path = f"./models/cube/scene.xml"
+
 # experiment = "g1_walk_cem"
-experiment = "g1_walk_mppi"
+# experiment = "g1_planar_walk_mppi"
+experiment = "g1_planar_jump"
 xml_path = f"./models/g1/g1_planar.xml"
+
 # experiment = "g1_stand"
-# experiment = "g1_jump"
 # experiment = "g1_jump_wrench"
-# xml_path = f"./models/g1/g1_21dof.xml"
 # experiment = "parallel_sim"
+# xml_path = f"./models/g1/g1_21dof.xml"
 # xml_path = f"./models/g1/g1_21dof.xml"
 
 # load data from csv files
