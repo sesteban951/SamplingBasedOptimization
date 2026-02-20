@@ -64,11 +64,11 @@ class G1_Walk_CEM(CrossEntropyMethod):
         self.w_vz      = 0.1     # vertical velocity tracking
         self.w_omega   = 0.1     # pitch velocity tracking
 
-        self.w_p_hip   = 5.0     # hip joint tracking
-        self.w_p_knee  = 5.0     # knee joint tracking
-        self.w_p_ankle = 5.0     # ankle joint tracking
-        self.w_p_shoulder = 0.5  # shoulder joint tracking
-        self.w_p_elbow = 0.5     # elbow joint tracking
+        self.w_p_hip   = 1.0     # hip joint tracking
+        self.w_p_knee  = 1.0     # knee joint tracking
+        self.w_p_ankle = 1.0     # ankle joint tracking
+        self.w_p_shoulder = 2.0  # shoulder joint tracking
+        self.w_p_elbow = 2.0     # elbow joint tracking
         
         self.w_v_hip   = 0.1     # hip joint velocity tracking
         self.w_v_knee  = 0.1     # knee joint velocity tracking
@@ -301,13 +301,14 @@ if __name__ == "__main__":
         rng=cem_rng,
         T=2.0,
         iterations=30,
-        N_elite=512,
+        N_elite=256,
         N_knots=10,
         spline_type="Bezier",
         # N_knots=20,
         # spline_type="Linear",
         # N_knots=10,
         # spline_type="Cubic",
+        initial_action_range_scale=0.75,
     )
 
     # create the CEM optimizer

@@ -48,8 +48,8 @@ elbow_idx = jnp.array([10, 12])
 joints_idx = jnp.array([3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
 
 # joint mirroring index (mirror left with right corresponding joints)
-state_mirror_idx   = {3:6, 4:7, 5:8, 9:11, 10:12}  # hip, knee, ankle, shoulder, elbow
-control_mirror_idx = {0:3, 1:4, 2:5, 6:8, 7:9}     # hip, knee, ankle, shoulder, elbow
+state_mirror_dict   = {3:6, 4:7, 5:8, 9:11, 10:12}  # hip, knee, ankle, shoulder, elbow
+control_mirror_dict = {0:3, 1:4, 2:5, 6:8, 7:9}     # hip, knee, ankle, shoulder, elbow
 
 # CEM optimizer class
 class G1_Walk_Mirrored_CEM(CrossEntropyMethod):
@@ -60,6 +60,9 @@ class G1_Walk_Mirrored_CEM(CrossEntropyMethod):
         
         # initialize the parent class
         super().__init__(model_config, sim_config, cem_config)
+
+        # reinitialize the initial spline sampling
+        self._initialize_spline_knots()
 
         # Create reference trajectory (simple linear interpolation)
         self._make_reference()
@@ -107,6 +110,97 @@ class G1_Walk_Mirrored_CEM(CrossEntropyMethod):
         self.wf_v_ankle = terminal_scale * self.w_v_ankle
         self.wf_v_shoulder = terminal_scale * self.w_v_shoulder
         self.wf_v_elbow = terminal_scale * self.w_v_elbow
+
+
+    def _initialize_spline_knots(self):
+        """ 
+        Depending on the actuation mode, initialize the spline knot points
+        within the position or control limits. NOTE: does not use a
+        pre-defined mu and Sigma.
+        """
+
+        # size of the mirror
+        nj = len(control_mirror_dict)
+
+        # initialize an empty array for the knot points
+        y_size = (self.sim.B, self.cem_config.N_knots, nj)
+        Y0 = jnp.zeros(y_size)
+
+        # knot points represent desired positions
+        if self.sim.use_pd == True:
+            # get the position limits at actuated joints
+            pos_limits = self.sim.pos_limits  # shape (nu, 2)
+
+            # create initial knot points within the position limits
+            for i, key in enumerate(control_mirror_dict):
+
+                # get low and high limits
+                pos_lo = pos_limits[key, 0] * self.cem_config.initial_action_range_scale
+                pos_hi = pos_limits[key, 1] * self.cem_config.initial_action_range_scale
+
+                # error out if no position limits are defined
+                if abs(pos_hi) <1e-6 and abs(pos_lo) <1e-6:
+                    raise ValueError(f"No position limits defined at actuated actuator index {key}.")
+
+                # split the key
+                self.rng, subkey = jax.random.split(self.rng)
+
+                # replace the ith dimension of all knot points
+                y_rand = jax.random.uniform(
+                        subkey,
+                        shape=(self.sim.B, self.cem_config.N_knots),
+                        minval=pos_lo,
+                        maxval=pos_hi
+                )
+                Y0 = Y0.at[:, :, i].set(y_rand)
+
+        # knot points represent direct torques
+        else:
+            # get the control limits at actuated joints
+            ctrl_limits = self.sim.ctrl_limits  # shape (nu, 2)
+
+            # create initial knot points within the control limits
+            for _, key in enumerate(control_mirror_dict):
+                
+                # get low and high limits
+                tau_lo = ctrl_limits[key, 0] * self.cem_config.initial_action_range_scale
+                tau_hi = ctrl_limits[key, 1] * self.cem_config.initial_action_range_scale
+
+                # error out if no control limits are defined
+                if abs(tau_hi) <1e-6 and abs(tau_lo) <1e-6:
+                    raise ValueError(f"No control limits defined at actuated actuator index {key}.")
+
+                # split the key
+                self.rng, subkey = jax.random.split(self.rng)
+
+                # replace the ith dimension of all knot points
+                y_rand = jax.random.uniform(
+                        subkey,
+                        shape=(self.sim.B, self.cem_config.N_knots),
+                        minval=pos_lo,
+                        maxval=pos_hi
+                )
+                Y0 = Y0.at[:, :, i].set(y_rand)
+
+        # create the spline object
+        if self.cem_config.spline_type == "ZOH":
+            self.spline = ZOH_Spline(Y0, self.T_eff)
+        elif self.cem_config.spline_type == "Linear":
+            self.spline = Linear_Spline(Y0, self.T_eff)
+        elif self.cem_config.spline_type == "Cubic":
+            self.spline = Cubic_Spline(Y0, self.T_eff)
+        elif self.cem_config.spline_type == "Bezier":
+            self.spline = Bezier_Spline(Y0, self.T_eff)
+        elif self.cem_config.spline_type == "Fourier":
+            self.spline = Fourier_Spline(Y0, self.T_eff, periodic=False)
+        else:
+            raise NotImplementedError(f"Spline type [{self.cem_config.spline_type}] not implemented.")
+
+        # update the spline knot points
+        self.spline.update_knots(Y0)
+
+        # update the distribution with the initial knot points
+        self._update_distribution(Y0)
 
     def _make_reference(self):
         
@@ -186,26 +280,14 @@ class G1_Walk_Mirrored_CEM(CrossEntropyMethod):
         self.p_com_ref = p_com_ref
         self.v_com_ref = v_com_ref
         self.a_com_ref = a_com_ref
-        self.theta_ref = theta_ref
-        self.omega_ref = omega_ref
-        self.alpha_ref = alpha_ref
         self.F_W_ref = F_W_ref
+
+        # WARNING: the angular references are s.t. positive is CCW. I.e., y+ is going out of hte page
+        #          you must account for this when computing costs.
+        self.theta_ref = theta_ref 
+        self.omega_ref = omega_ref 
+        self.alpha_ref = alpha_ref
         self.M_W_ref = M_W_ref
-
-        # plot the reference trajectory
-        import matplotlib.pyplot as plt
-        plt.figure(figsize=(12, 8))
-        plt.plot(t_sim, p_com_ref[:, 0], label="p_com_x_ref")
-        plt.show()
-
-        print(f"Loaded SRB trajectory from [{dir}].")
-        print(f"   [Nx_traj: {q_SRB.shape[0]}]")
-        print(f"   [Nu_traj: {tau_SRB.shape[1]}]")
-        print(f"   [dt_traj: {dt_traj}]")
-        print(f"   [T_traj: {times[-1]:.4f} seconds]")
-        print(f"   [N_sim:   {N_sim} steps at dt={dt_sim:.4f}s]")
-
-        exit(0)
 
 
     def cost(self, q, v, tau):
@@ -331,6 +413,96 @@ class G1_Walk_Mirrored_CEM(CrossEntropyMethod):
         J = cost_running + cost_terminal  # (B,)
         
         return J
+    
+
+    def optimize(self, q0, v0):
+        """
+        Perform CEM optimization.
+
+        Args:
+            q0: jnp.array, shape (B, nq) - initial generalized positions.
+            v0: jnp.array, shape (B, nv) - initial generalized velocities.
+        Returns:
+            q_opt: jnp.array, shape (N+1, nq) - optimal generalized positions trajectory.
+            v_opt: jnp.array, shape (N+1, nv) - optimal generalized velocities trajectory.
+            tau_opt: jnp.array, shape (N, nu) - optimal control inputs trajectory.
+        """
+
+        # initialize the optimal solution
+        J_opt = jnp.inf
+        q_opt = None
+        v_opt = None
+        tau_opt = None
+
+        # perform CEM iterations
+        for itr in range(self.cem_config.iterations):
+
+            # evaluate the spline at simulation times
+            y_val = self.spline.evaluate(self.t_sim[:-1])  # shape (B, N, nu)
+
+            # mirror the spline values according to the mirror dict
+            full_size = (self.sim.B, y_val.shape[1], self.sim.nu)
+            y_val_full = jnp.zeros(full_size)
+            for left_idx, right_idx in control_mirror_dict.items():
+                y_joint = y_val[:, :, left_idx]  # shape (B, N)
+                y_val_full = y_val_full.at[:, :, left_idx].set(y_joint)
+                y_val_full = y_val_full.at[:, :, right_idx].set(y_joint)
+
+            # do forward rollout
+            q_log, v_log, tau_log = self.sim.rollout(q0, v0, y_val_full)
+            q_log.block_until_ready()
+
+            exit(0)
+            # TODO: need to implement new cost
+
+            # compute costs
+            J = self.cost(q_log, v_log, tau_log)  # shape (B,)
+            J.block_until_ready()
+
+            # select elite samples
+            J_elite_neg, elite_idx = jax.lax.top_k(-J, self.cem_config.N_elite)
+            J_elite = -J_elite_neg  # shape (N_elite,)
+
+            # select the elite splines
+            Y_elite = jnp.take(self.spline.Y, elite_idx, axis=0)  # shape (N_elite, N_knots, nu)
+
+            # update the distribution
+            self._update_distribution(Y_elite)
+
+            # sample new knot points from the updated distribution
+            Y_samples = self._sample_knot_points()  # shape (B, N_knots, nu)
+            self.spline.update_knots(Y_samples)
+
+            # compute the norm of the covariance for monitoring
+            cov_norm = jnp.linalg.norm(self.Sigma, ord=2)
+
+            # record the best solution found so far
+            J_min = J_elite.min()
+            if J_min < J_opt:
+
+                # set best
+                J_opt = J_min
+                idx_in_elite = jnp.argmin(J_elite)  # Find best within elites
+                idx_opt = elite_idx[idx_in_elite]   # Map to actual batch index
+
+                # set optimal
+                q_opt = q_log[idx_opt, :, :]
+                v_opt = v_log[idx_opt, :, :]
+                tau_opt = tau_log[idx_opt, :, :]
+
+            # compute the average elite cost for monitoring
+            J_elite_avg = jnp.mean(J_elite)
+            J_elite_best = J_elite.min()
+
+            # print iteration info
+            itr_width = len(str(self.cem_config.iterations))  # e.g., 400 → width=3
+            print(f"Iteration {itr+1:0{itr_width}d}/{self.cem_config.iterations} | "
+                  f"J_elite_avg: {J_elite_avg:.4f} | "
+                  f"J_elite_best: {J_elite_best:.4f} | "
+                  f"J_best: {J_opt:.4f} | "
+                  f"‖Σ‖₂: {cov_norm:.4f}")
+            
+        return q_opt, v_opt, tau_opt
 
 #############################################################
 # EXAMPLE USAGE
@@ -348,17 +520,13 @@ if __name__ == "__main__":
         gpu_info = jax.devices("gpu")[0]
         print(f"GPU device: {gpu_info}")
 
-    # fix the random seed
-    s = int(time.time())
-    np.random.seed(s)
-
     # model config
     model_config = Model_Config(
         xml_path="./models/g1/g1_planar.xml",
-        Kp=[100, 150, 40, 
-            100, 150, 40, 
-            100, 50, 
-            100, 50],
+        Kp=[400, 450, 500, 
+            400, 450, 500, 
+            150, 50, 
+            150, 50],
         Kd=[2, 4, 2, 
             2, 4, 2, 
             2, 2, 
@@ -412,7 +580,7 @@ if __name__ == "__main__":
     tau_opt = np.array(tau_opt)
 
     # save as csv files in the results folder
-    save_dir = "./results/g1_walk_mirrored_cem/"
+    save_dir = "./results/g1_planar_jump/"
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
         print(f"Created directory: {save_dir}")

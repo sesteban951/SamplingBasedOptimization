@@ -18,7 +18,7 @@ import mujoco
 
 # custom imports
 from utils.algorithms.cem import *
-from utils.algorithms.annealing import *
+from utils.algorithms.schedule import *
 from utils.simulation.simulation import *
 from utils.spline import *
 
@@ -232,7 +232,7 @@ class G1_SRB_CEM(CrossEntropyMethod):
 
             # get annealing factor for this iteration
             # a = linear_annealing(itr, self.cem_config.iterations, alpha_max=1.0)
-            a = exponential_annealing(itr, self.cem_config.iterations, 
+            a = exponential_schedule(itr, self.cem_config.iterations, 
                                       alpha_max=0.5, lam=5.0)
 
             # do forward rollout
