@@ -46,6 +46,9 @@ class CrossEntropyMethod_Config:
     # spline params
     spline_type: str = "ZOH"   # "ZOH" | "Linear" | "Cubic" | "Bezier" | "Fourier"
 
+    # sampling range scaling for both the torque and position knots
+    initial_action_range_scale: float = 1.0  
+
     # other params
     use_diagonal_cov: bool = False  # whether to only use the diagonal of the covariance matrix
     use_step_size: bool = False     # whether to use step size in updating distribution
@@ -114,6 +117,12 @@ class CrossEntropyMethod(ABC):
             raise ValueError(f"Number of elite samples [N_elite = {self.cem_config.N_elite}]" 
                              f" must be less than parallel sim envs [B = {self.sim.B}].")
         
+        # ensure that the initial action range scale makes sense
+        if (   self.cem_config.initial_action_range_scale <= 0.0 
+            or self.cem_config.initial_action_range_scale > 1.0):
+            raise ValueError(f"Initial action range scale [{self.cem_config.initial_action_range_scale}]"
+                             f" must be in (0, 1].")
+        
         # if using step size, check that step_size is in (0, 1]
         if self.cem_config.use_step_size == True:
             if self.cem_config.step_size <= 0.0 or self.cem_config.step_size > 1.0:
@@ -140,8 +149,8 @@ class CrossEntropyMethod(ABC):
             for i in range(self.sim.nu):
                 
                 # get low and high limits
-                pos_lo = pos_limits[i, 0]
-                pos_hi = pos_limits[i, 1]
+                pos_lo = pos_limits[i, 0] * self.cem_config.initial_action_range_scale
+                pos_hi = pos_limits[i, 1] * self.cem_config.initial_action_range_scale
 
                 # error out if no position limits are defined
                 if abs(pos_hi) <1e-6 and abs(pos_lo) <1e-6:
@@ -169,8 +178,8 @@ class CrossEntropyMethod(ABC):
             for i in range(self.sim.nu):
                 
                 # get low and high limits
-                tau_lo = ctrl_limits[i, 0]
-                tau_hi = ctrl_limits[i, 1]
+                tau_lo = ctrl_limits[i, 0] * self.cem_config.initial_action_range_scale
+                tau_hi = ctrl_limits[i, 1] * self.cem_config.initial_action_range_scale
 
                 # error out if no control limits are defined
                 if abs(tau_hi) <1e-6 and abs(tau_lo) <1e-6:
@@ -227,14 +236,15 @@ class CrossEntropyMethod(ABC):
         # sample from standard normal
         Y_std = jax.random.normal(
             subkey,
-            shape=(self.sim.B, self.cem_config.N_knots * self.sim.nu)
+            shape=(self.sim.B, L.shape[0])
         )  # shape (B, N_knots*nu)
 
         # transform to desired distribution
         Y_flat = self.mu[None, :] + Y_std @ L.T  # shape (B, N_knots*nu)
 
         # reshape back to knot point matrices
-        Y_samples = jnp.reshape(Y_flat, (self.sim.B, self.cem_config.N_knots, self.sim.nu)) # shape (B, N_knots, nu)
+        action_dim = L.shape[0] // self.cem_config.N_knots
+        Y_samples = jnp.reshape(Y_flat, (self.sim.B, self.cem_config.N_knots, action_dim)) # shape (B, N_knots, nu)
 
         return Y_samples
 
@@ -343,8 +353,8 @@ class CrossEntropyMethod(ABC):
             Y_samples = self._sample_knot_points()  # shape (B, N_knots, nu)
             self.spline.update_knots(Y_samples)
 
-            # compute the norm of the covariance for monitoring
-            cov_norm = jnp.linalg.norm(self.Sigma, ord='fro')
+            # largest singular value
+            cov_norm = jnp.linalg.norm(self.Sigma, ord=2)
 
             # record the best solution found so far
             J_min = J_elite.min()
@@ -370,7 +380,7 @@ class CrossEntropyMethod(ABC):
                   f"J_elite_avg: {J_elite_avg:.4f} | "
                   f"J_elite_best: {J_elite_best:.4f} | "
                   f"J_best: {J_opt:.4f} | "
-                  f"‖Σ‖: {cov_norm:.4f}")
+                  f"‖Σ‖₂: {cov_norm:.4f}")
             
         return q_opt, v_opt, tau_opt
     

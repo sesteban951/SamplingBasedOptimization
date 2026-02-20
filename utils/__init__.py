@@ -2,7 +2,7 @@
 
 # different optimization algorithms
 from .algorithms.cem import *
-from .algorithms.annealing import *
+from .algorithms.schedule import *
 
 # simulation utils
 from .simulation.simulation import *   
