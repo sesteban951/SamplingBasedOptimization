@@ -226,7 +226,7 @@ for k in range(N):
 time = np.linspace(0, T, N+1)
 
 # save the solution as csv
-save_dir = "./results/srb_free_wrench/"
+save_dir = "./results/srb/srb_free_wrench/"
 if not os.path.exists(save_dir):
     os.makedirs(save_dir)
 time_file  = save_dir + "time.csv"

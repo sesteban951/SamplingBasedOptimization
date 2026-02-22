@@ -4,6 +4,8 @@
 #
 ##
 
+import config
+
 # standard imports
 import numpy as np
 
@@ -303,7 +305,7 @@ if __name__ == "__main__":
     # model config
     model_config = Model_Config(
         xml_path="./models/hopper/hopper.xml",
-        Kp=[20.0, 1000.0], 
+        Kp=[50.0, 1000.0], 
         Kd=[1.0, 10.0],  
         q_actuated_idx=[2, 3], # theta, leg
         v_actuated_idx=[2, 3], # theta ang vel, leg vel
@@ -319,9 +321,9 @@ if __name__ == "__main__":
     cem_rng = jax.random.PRNGKey(42)
     cem_config = CrossEntropyMethod_Config(
         rng=cem_rng,
-        T=1.0,
-        iterations=200,
-        N_elite=3000,
+        T=1.25,
+        iterations=100,
+        N_elite=256,
         N_knots=2*10,
         spline_type="ZOH",
     )

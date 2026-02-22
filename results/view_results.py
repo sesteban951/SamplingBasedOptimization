@@ -35,13 +35,12 @@ xml_path = f"./models/cartpole/cartpole.xml"
 
 # experiment = "g1/g1_planar_walk_cem"
 # experiment = "g1/g1_planar_walk_mppi"
-# experiment = "g1/g1_planar_jump"
+# experiment = "g1/g1_planar_jump_mirror_cem"
 # xml_path = f"./models/g1/g1_planar.xml"
 
 # experiment = "g1/g1_stand_cem"
-# experiment = "g1/g1_jump_wrench"
+# experiment = "g1/g1_jump_wrench_cem"
 # experiment = "parallel_sim/parallel_sim"
-# xml_path = f"./models/g1/g1_21dof.xml"
 # xml_path = f"./models/g1/g1_21dof.xml"
 
 # load data from csv files

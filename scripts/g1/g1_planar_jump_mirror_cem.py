@@ -4,6 +4,8 @@
 #
 ##
 
+import config
+
 # standard imports
 import numpy as np
 
@@ -17,6 +19,9 @@ from utils.simulation.simulation import *
 from utils.interpolation import interp
 from utils.spline.bezier import *
 from utils.spline.zoh import *
+from utils.spline.linear import *
+from utils.spline.cubic import *
+from utils.spline.fourier import *
 
 # load the a model config
 xml_path = "./models/g1/g1_planar.xml"
@@ -30,7 +35,7 @@ qpos_standing = jnp.array(mj_model.key_qpos[key_id])
 qvel_standing = jnp.array(mj_model.key_qvel[key_id])
 
 # load SRB data
-srb_dir = "./results/srb_jump_2d/"
+srb_dir = "./results/srb/srb_jump_2d/"
 t_SRB = np.loadtxt(srb_dir + "time.csv", delimiter=",")      # (T, )
 
 #############################################################
@@ -69,9 +74,9 @@ class G1_Walk_Mirrored_CEM(CrossEntropyMethod):
         self._make_joint_reference()
 
         # Running cost weights (per timestep)
-        self.w_px      = 20.0     # horizontal position tracking
+        self.w_px      = 5.0     # horizontal position tracking
         self.w_pz      = 20.0    # vertical position tracking (keep at default height)
-        self.w_theta   = 0.1    # pitch angle (stay upright)
+        self.w_theta   = 5.0    # pitch angle (stay upright)
         
         self.w_vx      = 1.0     # forward velocity tracking
         self.w_vz      = 1.0     # vertical velocity tracking
@@ -608,7 +613,7 @@ if __name__ == "__main__":
     tau_opt = np.array(tau_opt)
 
     # save as csv files in the results folder
-    save_dir = "./results/g1/g1_planar_jump/"
+    save_dir = "./results/g1/g1_planar_jump_mirror_cem/"
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
         print(f"Created directory: {save_dir}")

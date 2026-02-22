@@ -693,7 +693,7 @@ if __name__ == "__main__":
     sim_config = ParallelSim_Config(
         batch_size = 512,
         use_external_wrench=True,
-        srb_traj_dir="./results/srb_jump/"
+        srb_traj_dir="./results/srb/srb_jump/"
     )
 
     # create the parallel sim object

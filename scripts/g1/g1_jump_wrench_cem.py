@@ -40,7 +40,7 @@ qpos_standing = jnp.array(mj_model.key_qpos[key_id])
 qvel_standing = jnp.array(mj_model.key_qvel[key_id])
 
 # load SRB data
-srb_dir = "./results/srb_jump/"
+srb_dir = "./results/srb/srb_jump/"
 times = np.loadtxt(srb_dir + "time.csv", delimiter=",")
 
 
@@ -235,7 +235,7 @@ class G1_SRB_CEM(CrossEntropyMethod):
             # get annealing factor for this iteration
             # a = linear_annealing(itr, self.cem_config.iterations, alpha_max=1.0)
             a = exponential_schedule(itr, self.cem_config.iterations, 
-                                      alpha_max=0.5, lam=5.0)
+                                     alpha_max=1.0, lam=5.0)
 
             # do forward rollout
             q_log, v_log, tau_log = self.sim.rollout(q0, v0, y_val, a)
@@ -338,14 +338,15 @@ if __name__ == "__main__":
     cem_config = CrossEntropyMethod_Config(
         rng=cem_rng,
         T=T_SRB,
-        iterations=100,
+        iterations=50,
         N_elite=2048,
-        N_knots=N_knots,
-        spline_type="ZOH",
+        # N_knots=N_knots,
+        # spline_type="ZOH",
         # N_knots=N_knots,
         # spline_type="Linear",
-        # N_knots=20,
-        # spline_type="Bezier",
+        N_knots=20,
+        spline_type="Bezier",
+        initial_action_range_scale=0.1
     )
 
     # create the CEM optimizer
@@ -376,7 +377,7 @@ if __name__ == "__main__":
     tau_opt = np.array(tau_opt)
 
     # save as csv files in the results folder
-    save_dir = "./results/g1/g1_jump_wrench/"
+    save_dir = "./results/g1/g1_jump_wrench_cem/"
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
         print(f"Created directory: {save_dir}")

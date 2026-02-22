@@ -464,7 +464,7 @@ print(f"  w     = {X_sol[N, 5]:.4f} rad/s")
 
 time = np.linspace(0, T, N + 1)
 
-save_dir = "./results/srb_jump_2d/"
+save_dir = "./results/srb/srb_jump_2d/"
 os.makedirs(save_dir, exist_ok=True)
 
 np.savetxt(save_dir + "time.csv",    time,    delimiter=",")

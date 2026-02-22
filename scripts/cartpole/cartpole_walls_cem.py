@@ -4,6 +4,8 @@
 #
 ##
 
+import config
+
 # standard imports
 import numpy as np
 
@@ -198,8 +200,10 @@ if __name__ == "__main__":
         T=3.0,
         iterations=100,
         N_elite=512,
+        # N_knots=3*5,
+        # spline_type="ZOH",
         N_knots=3*5,
-        spline_type="ZOH",
+        spline_type="Linear",
         # N_knots=30,
         # spline_type="Bezier",
     )

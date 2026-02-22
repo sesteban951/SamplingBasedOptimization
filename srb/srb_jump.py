@@ -516,7 +516,7 @@ print(f"  v_com = {X_sol[N, 7:10]}")
 # ----------------------------------------------------------
 time = np.linspace(0, T, N+1)
 
-save_dir = "./results/srb_jump/"
+save_dir = "./results/srb/srb_jump/"
 os.makedirs(save_dir, exist_ok=True)
 
 np.savetxt(save_dir + "time.csv",    time,  delimiter=",")
