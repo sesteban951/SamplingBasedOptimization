@@ -1,20 +1,19 @@
 # utils/__init__.py
 
 # different optimization algorithms
-from .algorithms.cem import *
-from .algorithms.schedule import *
+from .algorithms import cem, mppi, schedule
 
-# simulation utils
-from .simulation.simulation import *   
-from .simulation.dynamics import *
+# simulation and dynamics utils
+from .simulation import simulation, dynamics
 
 # kinematics and interpolation utils
 from .kinematics.kin import *
 from .interpolation.interp import *
 
 # different spline implementations
-from .spline.zoh import *
-from .spline.linear import *
-from .spline.cubic import *
-from .spline.bezier import *
-from .spline.fourier import *
+from .spline import zoh, linear, cubic, bezier, fourier
+
+__all__ = ["cem", "mppi", "schedule",
+           "simulation", "dynamics",
+           "kin", "interp",
+           "zoh", "linear", "cubic", "bezier", "fourier"]

@@ -17,11 +17,7 @@ import jax.numpy as jnp
 
 # custom imports
 from utils.simulation.simulation import *
-from utils.spline.zoh import *
-from utils.spline.linear import *
-from utils.spline.cubic import *
-from utils.spline.bezier import *
-from utils.spline.fourier import *
+from utils.spline import zoh, linear, cubic, bezier, fourier
 
 
 #############################################################
@@ -49,7 +45,7 @@ class CrossEntropyMethod_Config:
     # sampling range scaling for both the torque and position knots
     initial_action_range_scale: float = 1.0  
 
-    # other params
+    # dsitribution update params
     use_diagonal_cov: bool = False  # whether to only use the diagonal of the covariance matrix
     use_step_size: bool = False     # whether to use step size in updating distribution
     step_size: float = 0.5          # step size for distribution update
@@ -200,15 +196,15 @@ class CrossEntropyMethod(ABC):
 
         # create the spline object
         if self.cem_config.spline_type == "ZOH":
-            self.spline = ZOH_Spline(Y0, self.T_eff)
+            self.spline = zoh.ZOH_Spline(Y0, self.T_eff)
         elif self.cem_config.spline_type == "Linear":
-            self.spline = Linear_Spline(Y0, self.T_eff)
+            self.spline = linear.Linear_Spline(Y0, self.T_eff)
         elif self.cem_config.spline_type == "Cubic":
-            self.spline = Cubic_Spline(Y0, self.T_eff)
+            self.spline = cubic.Cubic_Spline(Y0, self.T_eff)
         elif self.cem_config.spline_type == "Bezier":
-            self.spline = Bezier_Spline(Y0, self.T_eff)
+            self.spline = bezier.Bezier_Spline(Y0, self.T_eff)
         elif self.cem_config.spline_type == "Fourier":
-            self.spline = Fourier_Spline(Y0, self.T_eff, periodic=False)
+            self.spline = fourier.Fourier_Spline(Y0, self.T_eff, periodic=False)
         else:
             raise NotImplementedError(f"Spline type [{self.cem_config.spline_type}] not implemented.")
 
@@ -377,9 +373,9 @@ class CrossEntropyMethod(ABC):
             # print iteration info
             itr_width = len(str(self.cem_config.iterations))  # e.g., 400 → width=3
             print(f"Iteration {itr+1:0{itr_width}d}/{self.cem_config.iterations} | "
-                  f"J_elite_avg: {J_elite_avg:.4f} | "
-                  f"J_elite_best: {J_elite_best:.4f} | "
-                  f"J_best: {J_opt:.4f} | "
+                  f"J_elite_avg: {J_elite_avg:.2f} | "
+                  f"J_elite_best: {J_elite_best:.2f} | "
+                  f"J_best: {J_opt:.2f} | "
                   f"‖Σ‖₂: {cov_norm:.4f}")
             
         return q_opt, v_opt, tau_opt

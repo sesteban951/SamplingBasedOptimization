@@ -17,11 +17,8 @@ import jax.numpy as jnp
 
 # custom imports
 from utils.simulation.simulation import *
-from utils.spline.zoh import *
-from utils.spline.linear import *
-from utils.spline.cubic import *
-from utils.spline.bezier import *
-from utils.spline.fourier import *
+from utils.algorithms.schedule import *
+from utils.spline import *
 
 
 #############################################################
@@ -50,6 +47,10 @@ class MPPI_Config:
     # sampling range scaling for both the torque and position knots
     initial_action_range_scale: float = 1.0  
 
+    # covariance contraction params
+    use_cov_contraction: bool = False  # whether to contract covariance
+    contraction_schedule: str = None
+    sigma_min: float = 0.01            # minimum noise std
 
 class MPPI(ABC):
 
@@ -189,15 +190,15 @@ class MPPI(ABC):
 
         # create the spline object
         if self.mppi_config.spline_type == "ZOH":
-            self.spline = ZOH_Spline(Y0, self.T_eff)
+            self.spline = zoh.ZOH_Spline(Y0, self.T_eff)
         elif self.mppi_config.spline_type == "Linear":
-            self.spline = Linear_Spline(Y0, self.T_eff)
+            self.spline = linear.Linear_Spline(Y0, self.T_eff)
         elif self.mppi_config.spline_type == "Cubic":
-            self.spline = Cubic_Spline(Y0, self.T_eff)
+            self.spline = cubic.Cubic_Spline(Y0, self.T_eff)
         elif self.mppi_config.spline_type == "Bezier":
-            self.spline = Bezier_Spline(Y0, self.T_eff)
+            self.spline = bezier.Bezier_Spline(Y0, self.T_eff)
         elif self.mppi_config.spline_type == "Fourier":
-            self.spline = Fourier_Spline(Y0, self.T_eff, periodic=False)
+            self.spline = fourier.Fourier_Spline(Y0, self.T_eff, periodic=False)
         else:
             raise NotImplementedError(f"Spline type [{self.mppi_config.spline_type}] not implemented.")
 
@@ -354,9 +355,9 @@ class MPPI(ABC):
             # print iteration info
             itr_width = len(str(self.mppi_config.iterations))  # e.g., 400 → width=3
             print(f"Iteration {itr+1:0{itr_width}d}/{self.mppi_config.iterations} | "
-                  f"J_mean: {jnp.mean(J):.4f} | "
-                  f"J_best: {J_opt:.4f} | "
-                  f"ESS%: {ESS_percent:.2f} | "
+                  f"J_mean: {jnp.mean(J):.2f} | "
+                  f"J_best: {J_opt:.2f} | "
+                  f"ESS: {ESS_percent:.1f}% | "
                   f"Entropy: {entropy:.2f}"
             )
             

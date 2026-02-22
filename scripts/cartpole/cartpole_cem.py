@@ -14,8 +14,7 @@ import jax.numpy as jnp
 # custom imports
 from utils.algorithms.cem import *
 from utils.simulation.simulation import *
-from utils.spline.bezier import *
-from utils.spline.zoh import *
+from utils.spline import *
 
 
 #############################################################
