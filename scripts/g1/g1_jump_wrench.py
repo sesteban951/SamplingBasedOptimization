@@ -4,6 +4,8 @@
 #
 ##
 
+import config
+
 # standard imports
 import numpy as np
 import time

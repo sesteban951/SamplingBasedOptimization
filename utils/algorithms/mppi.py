@@ -18,7 +18,7 @@ import jax.numpy as jnp
 # custom imports
 from utils.simulation.simulation import *
 from utils.algorithms.schedule import *
-from utils.spline import *
+from utils.spline import zoh, linear, cubic, bezier, fourier
 
 
 #############################################################
