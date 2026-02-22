@@ -66,7 +66,7 @@ def exponential_schedule(itr, I, alpha_max=1.0, lam=5.0):
     alpha_max = np.clip(alpha_max, 0.0, 1.0)
 
     # compute the schedule coefficient
-    alpha = alpha_max * (np.exp(-lam * itr) - np.exp(-lam * I)) / (1 - np.exp(-lam * I))
+    alpha = alpha_max * (np.exp(-lam * itr / I) - np.exp(-lam)) / (1 - np.exp(-lam))
 
     return alpha
 
