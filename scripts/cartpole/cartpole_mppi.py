@@ -196,7 +196,7 @@ if __name__ == "__main__":
     mppi_config = MPPI_Config(
         rng=mppi_rng,
         T=3.0,
-        iterations=150,
+        iterations=100,
         lam=150.0,    # temperature - tune this (lower = greedier)
         sigma=0.1,    # noise std - tune this
         N_knots=10,

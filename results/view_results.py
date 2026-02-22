@@ -19,9 +19,9 @@ import mujoco.viewer
 #################################################################
 
 # which data to load
-# experiment = "cartpole"
+experiment = "cartpole"
 # experiment = "cartpole_cmaes"
-# xml_path = f"./models/cartpole/cartpole.xml"
+xml_path = f"./models/cartpole/cartpole.xml"
 # experiment = "cartpole_walls"
 # xml_path = f"./models/cartpole/cartpole_walls.xml"
 
@@ -34,8 +34,8 @@ import mujoco.viewer
 
 # experiment = "g1_walk_cem"
 # experiment = "g1_planar_walk_mppi"
-experiment = "g1_planar_jump"
-xml_path = f"./models/g1/g1_planar.xml"
+# experiment = "g1_planar_jump"
+# xml_path = f"./models/g1/g1_planar.xml"
 
 # experiment = "g1_stand"
 # experiment = "g1_jump_wrench"

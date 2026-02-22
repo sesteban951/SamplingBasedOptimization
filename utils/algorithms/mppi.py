@@ -259,22 +259,23 @@ class MPPI(ABC):
         # on initialization, seed mu from the mean of the initial knot points
         # and set Sigma to the fixed isotropic noise covariance
         if J is None:
+            # mean 
             self.mu = jnp.mean(Y_flat, axis=0)  # shape (N_knots * nu,)
-            dim = self.mppi_config.N_knots * self.sim.nu
+            # covariance
+            dim = self.mppi_config.N_knots * Y_samples.shape[2]
             self.Sigma = (self.mppi_config.sigma ** 2) * jnp.eye(dim)
-            self._last_weights = jnp.ones((B,)) / B
-            return
+            # uniform weights
+            return jnp.ones((B,)) / B
 
         # MPPI weights, lower cost means higher weight, 
         # with numerical stability fix by subtracting min cost
         weights = jnp.exp(-(J - jnp.min(J)) / self.mppi_config.lam)  # shape (B,)
-        weights = weights / jnp.sum(weights)                    # normalize
+        weights_normalized = weights / jnp.sum(weights)              # normalize
 
         # update mu as the softmax-weighted mean over all samples
-        self.mu = jnp.einsum('b,bd->d', weights, Y_flat)  # shape (N_knots * nu,)
+        self.mu = jnp.einsum('b,bd->d', weights_normalized, Y_flat)  # shape (N_knots * nu,)
 
-        # store weights for monitoring
-        self._last_weights = weights
+        return weights_normalized
 
 
     @abstractmethod
@@ -326,26 +327,26 @@ class MPPI(ABC):
             J.block_until_ready()
 
             # update the distribution using softmax weights over all samples
-            Y_current = self.spline.Y  # shape (B, N_knots, nu)
-            self._update_distribution(Y_current, J)
+            weights_normalized = self._update_distribution( self.spline.Y, J)
 
             # sample new knot points from the updated distribution
             Y_samples = self._sample_knot_points()  # shape (B, N_knots, nu)
             self.spline.update_knots(Y_samples)
 
-            # compute the effective sample size for monitoring (normalized to [0, 1])
-            # ideally should be 20-50% of the batch size, if too low means most weight is on very few samples
-            ess = 1.0 / (jnp.sum(self._last_weights ** 2) * self.sim.B)
+            # compute the effective sample size (ESS) to monitor exploration vs exploitation
+            ESS = 1.0 / jnp.sum(weights_normalized ** 2)
+            ESS_percent = ESS / self.sim.B * 100.0
+
+            # compute entropy of the distribution (up to a constant) to monitor convergence
+            entropy = -jnp.sum(weights_normalized * jnp.log(weights_normalized + 1e-9))
 
             # record the best solution found so far
-            J_min = J.min()
-            if J_min < J_opt:
-
-                # set best
-                J_opt = J_min
-                idx_opt = jnp.argmin(J)  # best sample index
-
-                # set optimal
+            J_min = jnp.min(J)
+            J_min_val = float(J_min)
+            J_opt_val = float(J_opt)
+            if J_min_val < J_opt_val:
+                J_opt = J_min_val  # store as Python float for printing
+                idx_opt = int(jnp.argmin(J))
                 q_opt = q_log[idx_opt, :, :]
                 v_opt = v_log[idx_opt, :, :]
                 tau_opt = tau_log[idx_opt, :, :]
@@ -355,6 +356,8 @@ class MPPI(ABC):
             print(f"Iteration {itr+1:0{itr_width}d}/{self.mppi_config.iterations} | "
                   f"J_mean: {jnp.mean(J):.4f} | "
                   f"J_best: {J_opt:.4f} | "
-                  f"ESS: {ess:.2%}")
+                  f"ESS%: {ESS_percent:.2f} | "
+                  f"Entropy: {entropy:.2f}"
+            )
             
         return q_opt, v_opt, tau_opt
