@@ -505,7 +505,7 @@ if __name__ == "__main__":
     tau_opt = np.array(tau_opt)
 
     # save results
-    save_dir = "./results/cartpole_cmaes/"
+    save_dir = "./results/cartpole/cartpole_cmaes/"
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
         print(f"Created directory: {save_dir}")

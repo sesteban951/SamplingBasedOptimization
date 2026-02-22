@@ -790,7 +790,7 @@ if __name__ == "__main__":
     v_opt = v_log[k]      # (N+1, nv)
     tau_opt = tau_log[k]  # (N, nu)
     # save as csv files in the results folder
-    save_dir = "./results/parallel_sim/"
+    save_dir = "./results/parallel_sim/parallel_sim/"
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
         print(f"Created directory: {save_dir}")

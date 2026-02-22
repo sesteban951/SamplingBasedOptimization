@@ -19,27 +19,28 @@ import mujoco.viewer
 #################################################################
 
 # which data to load
-experiment = "cartpole"
-# experiment = "cartpole_cmaes"
+# experiment = "cartpole/cartpole_cem"
+experiment = "cartpole/cartpole_mppi"
+# experiment = "cartpole/cartpole_cmaes"
 xml_path = f"./models/cartpole/cartpole.xml"
-# experiment = "cartpole_walls"
+# experiment = "cartpole/cartpole_walls_cem"
 # xml_path = f"./models/cartpole/cartpole_walls.xml"
 
-# experiment = "hopper"
-# experiment = "hopper_backflip"
+# experiment = "hopper/hopper_cem"
+# experiment = "hopper/hopper_backflip_cem"
 # xml_path = f"./models/hopper/hopper.xml"
 
-# experiment = "cube"
+# experiment = "cube/cube_cem"
 # xml_path = f"./models/cube/scene.xml"
 
-# experiment = "g1_walk_cem"
-# experiment = "g1_planar_walk_mppi"
-# experiment = "g1_planar_jump"
+# experiment = "g1/g1_planar_walk_cem"
+# experiment = "g1/g1_planar_walk_mppi"
+# experiment = "g1/g1_planar_jump"
 # xml_path = f"./models/g1/g1_planar.xml"
 
-# experiment = "g1_stand"
-# experiment = "g1_jump_wrench"
-# experiment = "parallel_sim"
+# experiment = "g1/g1_stand_cem"
+# experiment = "g1/g1_jump_wrench"
+# experiment = "parallel_sim/parallel_sim"
 # xml_path = f"./models/g1/g1_21dof.xml"
 # xml_path = f"./models/g1/g1_21dof.xml"
 

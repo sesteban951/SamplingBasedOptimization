@@ -470,7 +470,7 @@ if __name__ == "__main__":
     # SAVE RESULTS
     # ---------------------------------------------------
     
-    save_dir = "./results/cube/"
+    save_dir = "./results/cube/cube_cem/"
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
         print(f"\nCreated directory: {save_dir}")

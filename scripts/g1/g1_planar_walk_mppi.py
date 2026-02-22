@@ -296,7 +296,7 @@ if __name__ == "__main__":
     tau_opt = np.array(tau_opt)
 
     # save results
-    save_dir = "./results/g1_walk_mppi/"
+    save_dir = "./results/g1/g1_walk_mppi/"
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
         print(f"Created directory: {save_dir}")
