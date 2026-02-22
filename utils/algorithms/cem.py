@@ -274,7 +274,7 @@ class CrossEntropyMethod(ABC):
         Sigma_ = (Y_centered.T @ Y_centered) / (K - 1)  # shape (N_knots * nu, N_knots * nu)
 
         # for numerical stability, symmetrize and add a small value to the diagonal
-        epsilon = 1e-6
+        epsilon = 1e-9
         Sigma_ = 0.5 * (Sigma_ + Sigma_.T) + epsilon * jnp.eye(Sigma_.shape[0], dtype=Sigma_.dtype)
 
         # use a step size update if specified

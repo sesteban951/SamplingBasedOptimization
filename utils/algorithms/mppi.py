@@ -47,6 +47,9 @@ class MPPI_Config:
     # spline params
     spline_type: str = "ZOH"   # "ZOH" | "Linear" | "Cubic" | "Bezier" | "Fourier"
 
+    # sampling range scaling for both the torque and position knots
+    initial_action_range_scale: float = 1.0  
+
 
 class MPPI(ABC):
 
@@ -103,10 +106,16 @@ class MPPI(ABC):
         # check that temperature is positive
         if self.mppi_config.lam <= 0.0:
             raise ValueError(f"Temperature [lam = {self.mppi_config.lam}] must be positive.")
-
+        
         # check that noise std is positive
         if self.mppi_config.sigma <= 0.0:
             raise ValueError(f"Noise std [sigma = {self.mppi_config.sigma}] must be positive.")
+        
+        # ensure that the initial action range scale makes sense
+        if (   self.mppi_config.initial_action_range_scale <= 0.0
+            or self.mppi_config.initial_action_range_scale > 1.0):
+            raise ValueError(f"Initial action range scale [{self.mppi_config.initial_action_range_scale}]"
+                             f" must be in (0, 1].")
 
 
     def _initialize_spline_knots(self):
@@ -129,8 +138,8 @@ class MPPI(ABC):
             for i in range(self.sim.nu):
                 
                 # get low and high limits
-                pos_lo = pos_limits[i, 0]
-                pos_hi = pos_limits[i, 1]
+                pos_lo = pos_limits[i, 0] * self.mppi_config.initial_action_range_scale
+                pos_hi = pos_limits[i, 1] * self.mppi_config.initial_action_range_scale
 
                 # error out if no position limits are defined
                 if abs(pos_hi) <1e-6 and abs(pos_lo) <1e-6:
@@ -158,8 +167,8 @@ class MPPI(ABC):
             for i in range(self.sim.nu):
                 
                 # get low and high limits
-                tau_lo = ctrl_limits[i, 0]
-                tau_hi = ctrl_limits[i, 1]
+                tau_lo = ctrl_limits[i, 0] * self.mppi_config.initial_action_range_scale
+                tau_hi = ctrl_limits[i, 1] * self.mppi_config.initial_action_range_scale
 
                 # error out if no control limits are defined
                 if abs(tau_hi) <1e-6 and abs(tau_lo) <1e-6:
@@ -216,14 +225,15 @@ class MPPI(ABC):
         # sample from standard normal
         Y_std = jax.random.normal(
             subkey,
-            shape=(self.sim.B, self.mppi_config.N_knots * self.sim.nu)
+            shape=(self.sim.B, L.shape[0])
         )  # shape (B, N_knots*nu)
 
         # transform to desired distribution
         Y_flat = self.mu[None, :] + Y_std @ L.T  # shape (B, N_knots*nu)
 
         # reshape back to knot point matrices
-        Y_samples = jnp.reshape(Y_flat, (self.sim.B, self.mppi_config.N_knots, self.sim.nu)) # shape (B, N_knots, nu)
+        action_dim = L.shape[0] // self.mppi_config.N_knots
+        Y_samples = jnp.reshape(Y_flat, (self.sim.B, self.mppi_config.N_knots, action_dim)) # shape (B, N_knots, nu)
 
         return Y_samples
 
