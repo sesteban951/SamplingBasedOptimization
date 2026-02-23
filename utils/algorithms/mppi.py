@@ -239,14 +239,13 @@ class MPPI(ABC):
         return Y_samples
 
 
-    def _update_distribution(self, Y_samples, J=None, itr=0):
+    def _update_distribution(self, Y_samples, J=None):
         """
         Update the distribution parameters (mu and Sigma) based on the sampled knot points.
 
         Args:
             Y_samples: jnp.array, shape (B, N_knots, nu)
             J:         jnp.array, shape (B,) or None on init
-            itr:       int, current iteration (used for covariance contraction)
         Returns:
             weights_normalized: jnp.array, shape (B,)
         """
@@ -261,7 +260,7 @@ class MPPI(ABC):
         else:
             sigma_max  = self.mppi_config.sigma
             sigma_min  = self.mppi_config.sigma_min
-            progress   = itr / max(self.mppi_config.iterations - 1, 1)
+            progress   = self.itr / max(self.mppi_config.iterations - 1, 1)
             self.sigma = float(sigma_max * (sigma_min / sigma_max) ** progress)
 
         # initialization path
@@ -321,6 +320,9 @@ class MPPI(ABC):
         # perform MPPI iterations
         for itr in range(self.mppi_config.iterations):
 
+            # set the iterations
+            self.itr = itr
+
             # evaluate the spline at simulation times
             y_val = self.spline.evaluate(self.t_sim[:-1])  # shape (B, N, nu)
 
@@ -333,7 +335,7 @@ class MPPI(ABC):
             J.block_until_ready()
 
             # update the distribution using softmax weights over all samples
-            weights_normalized = self._update_distribution(self.spline.Y, J, itr)
+            weights_normalized = self._update_distribution(self.spline.Y, J)
 
             # sample new knot points from the updated distribution
             Y_samples = self._sample_knot_points()  # shape (B, N_knots, nu)
@@ -341,7 +343,7 @@ class MPPI(ABC):
 
             # compute the effective sample size (ESS) to monitor exploration vs exploitation
             ESS = 1.0 / jnp.sum(weights_normalized ** 2)
-            ESS_percent = ESS / self.sim.B * 100.0
+            ESS_percent = (ESS / self.sim.B) * 100.0
 
             # compute entropy of the distribution (up to a constant) to monitor convergence
             entropy = -jnp.sum(weights_normalized * jnp.log(weights_normalized + 1e-9))

@@ -299,15 +299,17 @@ if __name__ == "__main__":
     )
 
     # mppi config
-    mppi_rng = jax.random.PRNGKey(42)
+    mppi_rng = jax.random.PRNGKey(s)
     mppi_config = MPPI_Config(
         rng=mppi_rng,
         T=2.0,
         N_knots=10,
-        iterations=30,
-        lam=5.0,       # temperature: lower = greedier exploitation
+        iterations=50,
+        lam=1.0,       # temperature: lower = greedier exploitation
         sigma=0.1,     # noise std for sampling
         spline_type="Bezier",
+        use_cov_contraction=True,
+        sigma_min=0.01
     )
 
     # create the MPPI optimizer

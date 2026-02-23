@@ -327,6 +327,9 @@ class CrossEntropyMethod(ABC):
         # perform CEM iterations
         for itr in range(self.cem_config.iterations):
 
+            # set the iterations
+            self.itr = itr
+
             # evaluate the spline at simulation times
             y_val = self.spline.evaluate(self.t_sim[:-1])  # shape (B, N, nu)
 
