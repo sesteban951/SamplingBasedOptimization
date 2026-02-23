@@ -88,7 +88,7 @@ class ParallelSim():
 
         # external wrench
         self.use_external_wrench = sim_config.use_external_wrench
-        if (self.use_external_wrench == True) and (self.has_3D_floating_base == True):
+        if (self.use_external_wrench == True) and (self.base_type in ["planar", "free"]):
             self._initialize_dynamics(model_config)
             self._initialize_SRB_trajectories(sim_config)
 
@@ -124,7 +124,7 @@ class ParallelSim():
         self.nu = self.mjx_model.nu
 
         # check if there is a floating base system
-        self.has_3D_floating_base = bool((mj_model.jnt_type == mujoco.mjtJoint.mjJNT_FREE).any())
+        self.base_type = self._detect_base_type(mj_model)
 
         # load simulation dt (rounded) # NOTE: can change integrator and sim_dt here
         self.dt = round(float(self.mjx_model.opt.timestep), 6)
@@ -152,7 +152,7 @@ class ParallelSim():
 
         # print message
         print(f"Initialized batched MJX model from [{model_config.xml_path}].")
-        print(f"   [3D Floating Base: {self.has_3D_floating_base}]")
+        print(f"   [Floating Base: {self.base_type}]")
         print(f"   [dt: {self.dt:.4f} seconds]")
         print(f"   [nq: {self.nq}]")
         print(f"   [nv: {self.nv}]")
@@ -588,27 +588,77 @@ class ParallelSim():
         https://github.com/google-deepmind/mujoco/discussions/2350
         https://mujoco.readthedocs.io/en/stable/mjx_api.html#mujoco.mjx.Data.qfrc_applied
 
-        Assumed (MuJoCo freejoint) convention:
-        qfrc_applied[..., 0:3] = world linear force
-        qfrc_applied[..., 3:6] = body-frame torque
-
-        Inputs:
-        F_W: (B,3) world force
-        M_B: (B,3) body frame torque
+        Args:
+            F_W: (B,3) or (B,2) world force
+            M_B: (B,3) or (B,1) body frame torque
+        Returns:
+            data: mjx.Data, with the wrench applied in qfrc_applied
         """
-        # build qfrc_applied (overwrite each step)
-        qfrc = jnp.zeros_like(data.qfrc_applied)  # (B,nv)
-        qfrc = qfrc.at[:, 0:3].set(F_W)
-        qfrc = qfrc.at[:, 3:6].set(M_B)
+        qfrc = jnp.zeros_like(data.qfrc_applied)  # (B, nv) — default: no wrench
+
+        # 3D floating base wrench
+        if self.base_type == "free":
+            # freejoint: [0:3] = world force, [3:6] = body torque
+            qfrc = qfrc.at[:, 0:3].set(F_W)
+            qfrc = qfrc.at[:, 3:6].set(M_B)
+
+        # planar wrench 
+        elif self.base_type == "planar":
+            # slide_x, slide_z, hinge_y -> Fx, Fz, torque_y
+            qfrc = qfrc.at[:, 0].set(F_W[:, 0])  # Fx
+            qfrc = qfrc.at[:, 1].set(F_W[:, 2])  # Fz
+            qfrc = qfrc.at[:, 2].set(M_B[:, 1])  # torque_y
 
         return data.replace(qfrc_applied=qfrc)
+    
+
+    def _detect_base_type(self, mj_model):
+        """
+        Detects root DOF type by inspecting only joints on the root body.
+        
+        Args:
+            mj_model: mujoco.MjModel, the mujoco model to inspect
+        Returns: 'free' (3D floating), 'planar' (2D planar floating), or 'none'.
+            'none'   = no unactuated root DOFs (e.g. cartpole, fixed-base arm)
+            'planar' = slide_x + slide_z + hinge_y at root (e.g. biped, hopper, g1_planar)
+            'free'   = freejoint at root (e.g. g1_21dof)
+        """
+
+        # iterate over joints that are attached to the root body and check their types
+        root_body_id = 1
+        root_joint_ids = []
+        for j in range(mj_model.njnt):
+            if mj_model.jnt_bodyid[j] == root_body_id:
+                root_joint_ids.append(j)
+        
+        # no joints attached to the root body, so we assume it's not floating base type
+        if not root_joint_ids:
+            return "none"
+
+        # label the root joint types
+        root_joint_types = []
+        for j in root_joint_ids:
+            root_joint_types.append(mj_model.jnt_type[j])
+
+        # 3D floating base 
+        if mujoco.mjtJoint.mjJNT_FREE in root_joint_types:
+            return "free"
+
+        # 2D planar base
+        n_slide = sum(1 for t in root_joint_types if t == mujoco.mjtJoint.mjJNT_SLIDE)
+        n_hinge = sum(1 for t in root_joint_types if t == mujoco.mjtJoint.mjJNT_HINGE)
+        if n_slide == 2 and n_hinge == 1:
+            return "planar"
+
+        # catch all, return none
+        return "none"
 
 
 #############################################################
 # EXAMPLE USAGE
 #############################################################
 
-if __name__ == "__main__":
+if __name__ != "__main__":
 
     import numpy as np
     import matplotlib.pyplot as plt
@@ -620,9 +670,6 @@ if __name__ == "__main__":
     if jax.default_backend() == "gpu":
         gpu_info = jax.devices("gpu")[0]
         print(f"GPU device: {gpu_info}")
-
-    # fix the random seed
-    # np.random.seed(0)
 
     # model config
     # model_config = Model_Config(
@@ -666,6 +713,18 @@ if __name__ == "__main__":
     #     0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
     #     0.0, 0.0, 0.0, 0.0
     # ])
+    # model_config = Model_Config(
+    #     xml_path="./models/cube/scene.xml",
+    #     Kp=[10.0]*16,   # Reduced from 30 (lower = more stable)
+    #     Kd=[1.0]*16,    # Reduced from 2 (lower = more stable)
+    #     q_actuated_idx=list(range(16)),  # Hand joints
+    #     v_actuated_idx=list(range(16)),  # Hand joint velocities
+    #     action_mode="pos"
+    # )
+    # q0 = jnp.zeros(23)
+    # v0 = jnp.zeros(22)
+    # q0 = q0.at[16:19].set(jnp.array([0.11, 0.0, 0.10]))      # Position (x, y, z)
+    # q0 = q0.at[19:23].set(jnp.array([1.0, 0.0, 0.0, 0.0]))   # Identity quaternion (w, x, y, z)
 
     # load mujoco model
     xml_path = "./models/g1/g1_21dof.xml"
