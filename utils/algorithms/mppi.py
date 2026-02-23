@@ -48,9 +48,8 @@ class MPPI_Config:
     initial_action_range_scale: float = 1.0  
 
     # covariance contraction params
-    use_cov_contraction: bool = False  # whether to contract covariance
-    contraction_schedule: str = None
-    sigma_min: float = 0.01            # minimum noise std
+    use_cov_contraction: bool = False    # whether to contract covariance
+    sigma_min: float = 0.01              # minimum noise std
 
 class MPPI(ABC):
 
@@ -79,6 +78,7 @@ class MPPI(ABC):
         # empty distribution
         self.mu = None
         self.Sigma = None
+        self.sigma = None
 
         # initialize the spline knots points
         self._initialize_spline_knots()
@@ -239,42 +239,44 @@ class MPPI(ABC):
         return Y_samples
 
 
-    def _update_distribution(self, Y_samples, J=None):
+    def _update_distribution(self, Y_samples, J=None, itr=0):
         """
-        Update the distribution based on softmax-weighted samples.
-
-        On the first call (J=None), just seeds mu/Sigma from the initial knot points.
+        Update the distribution parameters (mu and Sigma) based on the sampled knot points.
 
         Args:
-            Y_samples: jnp.array, shape (B, N_knots, nu) - all sampled knot points.
-            J:         jnp.array, shape (B,) - cost for each sample, or None on init.
+            Y_samples: jnp.array, shape (B, N_knots, nu)
+            J:         jnp.array, shape (B,) or None on init
+            itr:       int, current iteration (used for covariance contraction)
+        Returns:
+            weights_normalized: jnp.array, shape (B,)
         """
 
-        # Flatten each sample's knot matrix (N_knots, nu) into a vector (N_knots*nu) in row-major order.
-        # Example: if Y_samples[k] = [[1,2,3],
-        #                             [4,5,6]]  (N_knots=2, nu=3)
-        # then Y_flat[k] = [1,2,3,4,5,6].
         B = Y_samples.shape[0]
-        Y_flat = jnp.reshape(Y_samples, (B, -1))  # shape (B, N_knots * nu)
+        Y_flat = jnp.reshape(Y_samples, (B, -1))  # shape (B, N_knots*nu)
+        dim = self.mppi_config.N_knots * Y_samples.shape[2]
 
-        # on initialization, seed mu from the mean of the initial knot points
-        # and set Sigma to the fixed isotropic noise covariance
+        # compute sigma for this iteration — always sets self.sigma
+        if not self.mppi_config.use_cov_contraction or J is None:
+            self.sigma = self.mppi_config.sigma
+        else:
+            sigma_max  = self.mppi_config.sigma
+            sigma_min  = self.mppi_config.sigma_min
+            progress   = itr / max(self.mppi_config.iterations - 1, 1)
+            self.sigma = float(sigma_max * (sigma_min / sigma_max) ** progress)
+
+        # initialization path
         if J is None:
-            # mean 
-            self.mu = jnp.mean(Y_flat, axis=0)  # shape (N_knots * nu,)
-            # covariance
-            dim = self.mppi_config.N_knots * Y_samples.shape[2]
-            self.Sigma = (self.mppi_config.sigma ** 2) * jnp.eye(dim)
-            # uniform weights
+            self.mu    = jnp.mean(Y_flat, axis=0)
+            self.Sigma = (self.sigma ** 2) * jnp.eye(dim)
             return jnp.ones((B,)) / B
 
-        # MPPI weights, lower cost means higher weight, 
-        # with numerical stability fix by subtracting min cost
-        weights = jnp.exp(-(J - jnp.min(J)) / self.mppi_config.lam)  # shape (B,)
-        weights_normalized = weights / jnp.sum(weights)              # normalize
+        # compute softmax weights
+        weights            = jnp.exp(-(J - jnp.min(J)) / self.mppi_config.lam)
+        weights_normalized = weights / jnp.sum(weights)
 
-        # update mu as the softmax-weighted mean over all samples
-        self.mu = jnp.einsum('b,bd->d', weights_normalized, Y_flat)  # shape (N_knots * nu,)
+        # update mu and Sigma
+        self.mu    = jnp.einsum('b,bd->d', weights_normalized, Y_flat)
+        self.Sigma = (self.sigma ** 2) * jnp.eye(dim)
 
         return weights_normalized
 
@@ -313,6 +315,9 @@ class MPPI(ABC):
         v_opt = None
         tau_opt = None
 
+        # for printing iterations
+        itr_width = len(str(self.mppi_config.iterations))
+
         # perform MPPI iterations
         for itr in range(self.mppi_config.iterations):
 
@@ -328,7 +333,7 @@ class MPPI(ABC):
             J.block_until_ready()
 
             # update the distribution using softmax weights over all samples
-            weights_normalized = self._update_distribution( self.spline.Y, J)
+            weights_normalized = self._update_distribution(self.spline.Y, J, itr)
 
             # sample new knot points from the updated distribution
             Y_samples = self._sample_knot_points()  # shape (B, N_knots, nu)
@@ -353,12 +358,13 @@ class MPPI(ABC):
                 tau_opt = tau_log[idx_opt, :, :]
 
             # print iteration info
-            itr_width = len(str(self.mppi_config.iterations))  # e.g., 400 → width=3
+            sigma_str = f" | σ: {self.sigma:.4f}" if self.mppi_config.use_cov_contraction else ""
             print(f"Iteration {itr+1:0{itr_width}d}/{self.mppi_config.iterations} | "
-                  f"J_mean: {jnp.mean(J):.2f} | "
-                  f"J_best: {J_opt:.2f} | "
-                  f"ESS: {ESS_percent:.1f}% | "
-                  f"Entropy: {entropy:.2f}"
+                f"J_mean: {jnp.mean(J):.2f} | "
+                f"J_best: {J_opt:.2f} | "
+                f"ESS: {ESS_percent:.1f}% | "
+                f"Entropy: {entropy:.2f}"
+                f"{sigma_str}"
             )
-            
+
         return q_opt, v_opt, tau_opt

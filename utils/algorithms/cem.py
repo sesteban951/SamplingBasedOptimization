@@ -321,6 +321,9 @@ class CrossEntropyMethod(ABC):
         v_opt = None
         tau_opt = None
 
+        # for printing iterations
+        itr_width = len(str(self.cem_config.iterations))
+
         # perform CEM iterations
         for itr in range(self.cem_config.iterations):
 
@@ -371,7 +374,6 @@ class CrossEntropyMethod(ABC):
             J_elite_best = J_elite.min()
 
             # print iteration info
-            itr_width = len(str(self.cem_config.iterations))  # e.g., 400 → width=3
             print(f"Iteration {itr+1:0{itr_width}d}/{self.cem_config.iterations} | "
                   f"J_elite_avg: {J_elite_avg:.2f} | "
                   f"J_elite_best: {J_elite_best:.2f} | "
