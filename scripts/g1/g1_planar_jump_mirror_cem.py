@@ -90,20 +90,20 @@ class G1_Walk_Mirrored_CEM(CrossEntropyMethod):
         self.w_vz      = 1.0     # vertical velocity tracking
         self.w_omega   = 0.1     # pitch velocity tracking
 
-        self.w_p_hip   = 0.1     # hip joint tracking
-        self.w_p_knee  = 0.05     # knee joint tracking
-        self.w_p_ankle = 0.05     # ankle joint tracking
-        self.w_p_shoulder = 0.01  # shoulder joint tracking
-        self.w_p_elbow = 0.01     # elbow joint tracking
+        self.w_p_hip   = 0.5     # hip joint tracking
+        self.w_p_knee  = 1.0     # knee joint tracking
+        self.w_p_ankle = 1.0     # ankle joint tracking
+        self.w_p_shoulder = 0.05  # shoulder joint tracking
+        self.w_p_elbow = 0.05     # elbow joint tracking
         
         self.w_v_hip   = 0.01     # hip joint velocity tracking
         self.w_v_knee  = 0.01     # knee joint velocity tracking
         self.w_v_ankle = 0.01     # ankle joint velocity tracking
         self.w_v_shoulder = 0.01  # shoulder joint velocity tracking
         self.w_v_elbow = 0.01     # elbow joint velocity tracking
-        self.w_control = 0.00001  # control effort
+        self.w_control = 1e-6  # control effort
 
-        terminal_scale = 10.0
+        terminal_scale = 20.0
 
         self.wf_px = terminal_scale * self.w_px
         self.wf_pz = terminal_scale * self.w_pz
@@ -498,10 +498,10 @@ class G1_Walk_Mirrored_CEM(CrossEntropyMethod):
             # print iteration info
             itr_width = len(str(self.cem_config.iterations))  # e.g., 400 → width=3
             print(f"Iteration {itr+1:0{itr_width}d}/{self.cem_config.iterations} | "
-                  f"J_elite_avg: {J_elite_avg:.4f} | "
-                  f"J_elite_best: {J_elite_best:.4f} | "
-                  f"J_best: {J_opt:.4f} | "
-                  f"‖Σ‖: {cov_norm:.4f} | "
+                  f"J_elite_avg: {J_elite_avg:.1f} | "
+                  f"J_elite_best: {J_elite_best:.1f} | "
+                  f"J_best: {J_opt:.1f} | "
+                  f"‖Σ‖₂: {cov_norm:.4f} | "
                   f"α: {a:.3f}")
             
         return q_opt, v_opt, tau_opt
@@ -542,6 +542,10 @@ if __name__ == "__main__":
     sim_config = ParallelSim_Config(
         batch_size = 4096,
         use_external_wrench=True,
+        kp_lin=10,
+        kd_lin=2,
+        kp_ang=10,
+        kd_ang=2,
     )
 
     # cem config
@@ -551,10 +555,12 @@ if __name__ == "__main__":
         T=t_SRB[-1],  
         iterations=30,
         N_elite=512,
-        N_knots=10,
-        spline_type="Bezier",
+        # N_knots = 20,
+        # spline_type="ZOH",
         # N_knots=20,
         # spline_type="Linear",
+        N_knots=6,
+        spline_type="Bezier",
         # N_knots=10,
         # spline_type="Cubic",
     )
