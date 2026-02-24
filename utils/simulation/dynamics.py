@@ -834,10 +834,10 @@ if __name__ == "__main__":
     assert_close("vec round-trip R^T(Rv)=v", vec_B_rec, vec_B, atol=2e-6, rtol=2e-6)
 
     # ---------- inertia_world tests ----------
-    I_base = dyn.I_base
+    I_base_nom = dyn.I_base_nom
 
     # (a) inertia_world == R I_base R^T
-    I_w_ref = R @ I_base @ jnp.swapaxes(R, -1, -2)  # (B,3,3)
+    I_w_ref = R @ I_base_nom @ jnp.swapaxes(R, -1, -2)  # (B,3,3)
     I_w = dyn.inertia_world(quat)
     assert_close("inertia_world matches R I R^T", I_w, I_w_ref, atol=2e-6, rtol=2e-6)
 
@@ -846,7 +846,7 @@ if __name__ == "__main__":
     err_RI = jnp.max(jnp.linalg.norm(R_I - jnp.tile(jnp.eye(3, dtype=R_I.dtype)[None,:,:], (B,1,1)), axis=(1,2)))
     print(f"||R(qI) - I|| max: {float(err_RI):.6e}")
 
-    I_expected_id = R_I @ I_base @ jnp.swapaxes(R_I, -1, -2)
+    I_expected_id = R_I @ I_base_nom @ jnp.swapaxes(R_I, -1, -2)
     I_w_id = dyn.inertia_world(qI)
     assert_close("inertia_world at qI matches R(qI) I R(qI)^T", I_w_id, I_expected_id, atol=2e-6, rtol=2e-6)
 
@@ -857,7 +857,7 @@ if __name__ == "__main__":
         raise AssertionError("I_world not symmetric enough")
 
     # (d) eigenvalues invariant (principal moments)
-    evals_base = jnp.sort(jnp.linalg.eigvalsh(0.5 * (I_base + I_base.T)))
+    evals_base = jnp.sort(jnp.linalg.eigvalsh(0.5 * (I_base_nom + I_base_nom.T)))
     evals_w = jnp.sort(
         jnp.linalg.eigvalsh(0.5 * (I_w + jnp.swapaxes(I_w, -1, -2))),
         axis=-1

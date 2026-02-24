@@ -44,8 +44,8 @@ class Model_Config:
     v_actuated_idx: List[int]   # indices of actuated velocities (qvel)
 
     # action mode
-    action_mode: str = "tau"   # action mode:    "tau" (pure torque) 
-                               #              or "pos" (PD tracking) 
+    action_mode: str = "pos"   # action mode:    "pos" (PD tracking)
+                               #              or "tau" (pure torque) 
 
 
 # parallel sim config
@@ -449,7 +449,7 @@ class ParallelSim():
             data = data.replace(ctrl=tau)
 
             # inject external wrench (NOTE: decided once at compile time)
-            F_W, M_B = self._compute_virtual_wrench(data, step_idx, w_scale)
+            F_W, M_B = self._compute_virtual_wrench_3D(data, step_idx, w_scale)
             data = self._base_wrench_qfrc(data, F_W, M_B)
 
             # step the simulation forward
@@ -492,7 +492,7 @@ class ParallelSim():
 
         return tau
 
-    def _compute_virtual_wrench(self, data, step_idx, w_scale):
+    def _compute_virtual_wrench_3D(self, data, step_idx, w_scale):
         """
         Compute the virtual wrench that tracks the SRB trajectory
         Fᵂ = m  (â + kₚᵛ (p̂ - p) + k_dᵛ (v̂ - v) - g)
@@ -578,6 +578,89 @@ class ParallelSim():
         M_B = (M_ff + C + M_ori - M_grav) * w_scale  # (B, 3)
 
         return F_W, M_B
+    
+
+    def _compute_virtual_wrench_2D(self, data, step_idx, w_scale):
+        """
+        Compute the virtual wrench that tracks the planar SRB trajectory.
+        Fˣ = m (âₓ + kₚ(p̂ₓ - pₓ) + kd(v̂ₓ - vₓ))
+        Fᶻ = m (âᶻ + kₚ(p̂ᶻ - pᶻ) + kd(v̂ᶻ - vᶻ) - g)
+        Mʸ = Iyy(α̂ + kₚ(θ̂ - θ) + kd(ω̂ - ω)) - r × mg
+
+        W = w_scale * [Fˣ, Fᶻ, Mʸ], w_scale ∈ [0, 1]
+
+        Args:
+            data:      mjx.Data, current simulation state
+            step_idx:  int, current rollout step
+            w_scale:   jnp.float32, wrench scale factor
+        Returns:
+            Fx:  (B,) world-frame force in x
+            Fz:  (B,) world-frame force in z
+            My:  (B,) body-frame torque about y
+        """
+        w_scale = jnp.clip(w_scale, 0.0, 1.0)
+
+        # ----------------------- current state -----------------------
+
+        # planar qpos = [x, z, theta, ...joint angles...]
+        # planar qvel = [vx, vz, omega_y, ...joint velocities...]
+        p_base_x = data.qpos[:, 0]  # (B,)
+        theta    = data.qpos[:, 2]  # (B,)
+        omega_y  = data.qvel[:, 2]  # (B,)
+
+        # current COM state in world frame
+        p_com_batch, v_com_batch = self.dyn.com_state_in_world(data.qpos, data.qvel)  # (B, 3)
+
+        # ----------------------- references -----------------------
+
+        # reference states from the SRB trajectory
+        p_com_ref = self.p_com_ref[step_idx]  # (2,) [px, pz]
+        v_com_ref = self.v_com_ref[step_idx]  # (2,) [vx, vz]
+        a_com_ref = self.a_com_ref[step_idx]  # (2,) [ax, az]
+        theta_ref = self.theta_ref[step_idx]  # scalar
+        omega_ref = self.omega_ref[step_idx]  # scalar
+        alpha_ref = self.alpha_ref[step_idx]  # scalar
+
+        # broadcast to batch
+        p_com_ref_batch = jnp.broadcast_to(p_com_ref, (self.B, 2))  # (B, 2)
+        v_com_ref_batch = jnp.broadcast_to(v_com_ref, (self.B, 2))  # (B, 2)
+        a_com_ref_batch = jnp.broadcast_to(a_com_ref, (self.B, 2))  # (B, 2)
+        theta_ref_batch = jnp.broadcast_to(theta_ref, (self.B,))    # (B,)
+        omega_ref_batch = jnp.broadcast_to(omega_ref, (self.B,))    # (B,)
+        alpha_ref_batch = jnp.broadcast_to(alpha_ref, (self.B,))    # (B,)
+
+        # ----------------------- Force in World -----------------------
+
+        # p_com_batch and v_com_batch xz components: (B, 2)
+        p_com_xz = jnp.stack([p_com_batch[:, 0], p_com_batch[:, 2]], axis=-1)  # (B, 2)
+        v_com_xz = jnp.stack([v_com_batch[:, 0], v_com_batch[:, 2]], axis=-1)  # (B, 2)
+
+        F_W = self.dyn.mass * (
+            a_com_ref_batch
+            + self.kp_lin * (p_com_ref_batch - p_com_xz)
+            + self.kd_lin * (v_com_ref_batch - v_com_xz)
+            - jnp.stack([jnp.zeros(self.B), self.gravity_batch[:, 2]], axis=-1)
+        ) * w_scale  # (B, 2)
+
+        # ----------------------- Moment in Body -----------------------
+
+        Iyy = self.dyn.I_base_nom[1, 1]  # scalar
+
+        # feedforward + PD on pitch angle and angular velocity
+        My = Iyy * (
+            alpha_ref_batch
+            + self.kp_ang * (theta_ref_batch - theta)
+            + self.kd_ang * (omega_ref_batch - omega_y)
+        )  # (B,)
+
+        # gravity compensation: (r_com × F_grav)_y = r_com_x * F_grav_z
+        r_com_x  = p_com_batch[:, 0] - p_base_x             # (B,)
+        F_grav_z = self.dyn.mass * self.gravity_batch[:, 2]  # (B,) — negative (-mg)
+        M_grav_y = r_com_x * F_grav_z                        # (B,)
+
+        M_B = (My - M_grav_y) * w_scale  # (B,)
+
+        return F_W, M_B
 
 
     def _base_wrench_qfrc(self, data, F_W, M_B):
@@ -658,7 +741,7 @@ class ParallelSim():
 # EXAMPLE USAGE
 #############################################################
 
-if __name__ != "__main__":
+if __name__ == "__main__":
 
     import numpy as np
     import matplotlib.pyplot as plt

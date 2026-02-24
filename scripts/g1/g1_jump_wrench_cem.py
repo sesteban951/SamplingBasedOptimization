@@ -117,8 +117,8 @@ class G1_SRB_CEM(CrossEntropyMethod):
         self.w_quat = 10.0
         self.w_v_base = 0.1
         self.w_omega_base = 0.1
-        self.w_q_joints = 7.0
-        self.w_v_joints = 2.0
+        self.w_q_joints = 1.0
+        self.w_v_joints = 0.1
         self.w_tau = 0.0001
 
         self.wf_p_base = 20.0 * self.w_p_base
@@ -235,7 +235,7 @@ class G1_SRB_CEM(CrossEntropyMethod):
             # get annealing factor for this iteration
             # a = linear_annealing(itr, self.cem_config.iterations, alpha_max=1.0)
             a = exponential_schedule(itr, self.cem_config.iterations, 
-                                     alpha_max=1.0, lam=5.0)
+                                     alpha_max=0.1, lam=20.0)
 
             # do forward rollout
             q_log, v_log, tau_log = self.sim.rollout(q0, v0, y_val, a)
