@@ -509,6 +509,8 @@ class Dynamics:
         Returns:
             vec_W: (B,3) vectors expressed in world frame
         """
+        # TODO: consider using the quaternion directly to rotate the vector
+        #       v_W = q ⊗ v_B ⊗ q*
         quat = self._quat_normalize(quat)          # (B,4)
         R_wb = self._quat_to_rot_matrix(quat)      # (B,3,3)
         vec_W = jnp.einsum('bij,bj->bi', R_wb, vec_B)
@@ -525,6 +527,8 @@ class Dynamics:
         Returns:
             vec_B: (B,3) vectors expressed in body frame
         """
+        # TODO: consider using the quaternion directly to rotate the vector
+        #       v_B = q* ⊗ v_W ⊗ q
         quat  = self._quat_normalize(quat)              # (B,4)
         R_wb  = self._quat_to_rot_matrix(quat)          # (B,3,3)
         vec_B = jnp.einsum('bji,bj->bi', R_wb, vec_W)  # R^T @ vec_W
