@@ -1,6 +1,6 @@
 ##
 #
-# G1 Walk CEM
+# G1 Jump Mirrored CEM
 #
 ##
 
@@ -15,13 +15,15 @@ import jax.numpy as jnp
 
 # custom imports
 from utils.algorithms.cem import *
+from utils.algorithms.schedule import *
 from utils.simulation.simulation import *
+from utils.spline import *
 from utils.interpolation import interp
-from utils.spline.bezier import *
-from utils.spline.zoh import *
-from utils.spline.linear import *
-from utils.spline.cubic import *
-from utils.spline.fourier import *
+
+
+#################################################################
+# LOAD DATA
+#################################################################
 
 # load the a model config
 xml_path = "./models/g1/g1_planar.xml"
@@ -36,13 +38,18 @@ qvel_standing = jnp.array(mj_model.key_qvel[key_id])
 
 # load SRB data
 srb_dir = "./results/srb/srb_jump_2d/"
-t_SRB = np.loadtxt(srb_dir + "time.csv", delimiter=",")      # (T, )
+t_SRB = np.loadtxt(srb_dir + "time.csv", delimiter=",")
+q_SRB = np.loadtxt(srb_dir + "q_opt.csv", delimiter=",")
+v_SRB = np.loadtxt(srb_dir + "v_opt.csv", delimiter=",")
+a_SRB = np.loadtxt(srb_dir + "a_opt.csv", delimiter=",")
+tau_SRB = np.loadtxt(srb_dir + "tau_opt.csv", delimiter=",")
+
 
 #############################################################
 # G1 Walk CEM
 #############################################################
 
-# joint indices
+# useful joint indices
 base_idx = jnp.array([0, 1])
 ori_idx = jnp.array([2])
 hip_idx = jnp.array([3, 6])
@@ -54,9 +61,9 @@ joints_idx = jnp.array([3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
 
 # joint mirroring index (mirror left with right corresponding joints)
 state_mirror_dict   = {3:6, 4:7, 5:8, 9:11, 10:12}  # hip, knee, ankle, shoulder, elbow
-control_mirror_dict = {0:3, 1:4, 2:5, 6:8, 7:9}     # hip, knee, ankle, shoulder, elbow
+control_mirror_dict = {0:3, 1:4, 2:5, 6:8,  7:9}     # hip, knee, ankle, shoulder, elbow
 
-# CEM optimizer class
+
 class G1_Walk_Mirrored_CEM(CrossEntropyMethod):
 
     def __init__(self, model_config: Model_Config,
@@ -66,12 +73,13 @@ class G1_Walk_Mirrored_CEM(CrossEntropyMethod):
         # initialize the parent class
         super().__init__(model_config, sim_config, cem_config)
 
+        self.sim_config = sim_config
+
         # reinitialize the initial spline sampling
         self._initialize_spline_knots()
 
-        # Create reference trajectory (simple linear interpolation)
-        self._make_SRB_reference()
-        self._make_joint_reference()
+        # make the reference trajectory
+        self._make_reference_trajectory()
 
         # Running cost weights (per timestep)
         self.w_px      = 5.0     # horizontal position tracking
@@ -116,6 +124,95 @@ class G1_Walk_Mirrored_CEM(CrossEntropyMethod):
         self.wf_v_ankle = terminal_scale * self.w_v_ankle
         self.wf_v_shoulder = terminal_scale * self.w_v_shoulder
         self.wf_v_elbow = terminal_scale * self.w_v_elbow
+
+    def _make_reference_trajectory(self):
+        
+        # extract the trajectory components
+        p_com = q_SRB[:, 0:2]  # (T_SRB, 2)
+        v_com = v_SRB[:, 0:2]  # (T_SRB, 2)
+        a_com = a_SRB[:, 0:2]  # (T_SRB, 2)
+        theta = q_SRB[:, 2]    # (T_SRB, 1)
+        omega = v_SRB[:, 2]    # (T_SRB, 1)
+        alpha = a_SRB[:, 2]    # (T_SRB, 1)
+
+        # make simulation time array
+        T_SRB = t_SRB[-1]         
+        dt_sim = self.sim.dt
+        t_sim = jnp.arange(0, T_SRB + dt_sim, dt_sim) # [0, dt_sim, 2*dt_sim, ..., T_SRB]
+        nodes_sim = len(t_sim)
+
+        # interpolate the reference trajectory at simulation time steps
+        p_com_ref = np.zeros((nodes_sim, 2))
+        v_com_ref = np.zeros((nodes_sim, 2))
+        a_com_ref = np.zeros((nodes_sim, 2))
+        theta_ref = np.zeros((nodes_sim, 1))
+        omega_ref = np.zeros((nodes_sim, 1))
+        alpha_ref = np.zeros((nodes_sim, 1))
+        for i in range(nodes_sim):
+            
+            # current sim time point
+            t = t_sim[i]
+
+            # before the start of the SRB trajectory, hold the initial state
+            if t < t_SRB[0]:
+                p_com_ref[i] = p_com[0]
+                v_com_ref[i] = v_com[0]
+                a_com_ref[i] = a_com[0]
+                theta_ref[i] = theta[0]
+                omega_ref[i] = omega[0]
+                alpha_ref[i] = alpha[0]
+
+            # after the end of the SRB trajectory, hold the final state
+            elif t > t_SRB[-1]:
+                p_com_ref[i] = p_com[-1]
+                v_com_ref[i] = v_com[-1]
+                a_com_ref[i] = a_com[-1]
+                theta_ref[i] = theta[-1]
+                omega_ref[i] = omega[-1]
+                alpha_ref[i] = alpha[-1]
+
+            # within the SRB trajectory, interpolate between the two nearest points
+            else: 
+                # find the two SRB time points that bracket the current sim time
+                idx_2 = np.searchsorted(t_SRB, t, side='right')
+                idx_2 = min(idx_2, len(t_SRB) - 1)  # clamp to last valid index
+                idx_1 = max(idx_2 - 1, 0)
+                t1, t2 = t_SRB[idx_1], t_SRB[idx_2]
+
+                # interpolation coeff
+                coeff = (t - t1) / (t2 - t1)
+                coeff = np.clip(coeff, 0.0, 1.0)  # ensure coeff is within [0, 1]
+
+                # interpolate the reference trajectory
+                p_com_ref[i]  = interp.lerp(p_com[idx_1],  p_com[idx_2],  coeff)
+                v_com_ref[i]  = interp.lerp(v_com[idx_1],  v_com[idx_2],  coeff)
+                a_com_ref[i]  = interp.lerp(a_com[idx_1],  a_com[idx_2],  coeff)
+                theta_ref[i]  = interp.lerp(theta[idx_1],  theta[idx_2],  coeff)
+                omega_ref[i]  = interp.lerp(omega[idx_1],  omega[idx_2],  coeff)
+                alpha_ref[i]  = interp.lerp(alpha[idx_1],  alpha[idx_2],  coeff)
+        
+        self.px_ref       = jnp.array(p_com_ref[:, 0])  # (nodes_sim,)
+        self.pz_ref       = jnp.array(p_com_ref[:, 1])  # (nodes_sim,)
+        self.vx_ref       = jnp.array(v_com_ref[:, 0])  # (nodes_sim,)
+        self.vz_ref       = jnp.array(v_com_ref[:, 1])  # (nodes_sim,)
+        self.theta_ref    = jnp.array(theta_ref[:, 0])  # (nodes_sim,)
+        self.thetadot_ref = jnp.array(omega_ref[:, 0])  # (nodes_sim,)
+        self.a_com_ref = jnp.array(a_com_ref)           # (nodes_sim, 2)
+        self.alpha_ref = jnp.array(alpha_ref[:, 0])     # (nodes_sim,)
+
+        # take joint state references
+        self.p_hip_ref = qpos_standing[3]      # scalar
+        self.p_knee_ref = qpos_standing[4]   
+        self.p_ankle_ref = qpos_standing[5]
+        self.p_shoulder_ref = qpos_standing[9]
+        self.p_elbow_ref = qpos_standing[10]
+
+        # take the joint velocity references
+        self.v_hip_ref = qvel_standing[3]      # scalar
+        self.v_knee_ref = qvel_standing[4]
+        self.v_ankle_ref = qvel_standing[5]
+        self.v_shoulder_ref = qvel_standing[9]
+        self.v_elbow_ref = qvel_standing[10]
 
 
     def _initialize_spline_knots(self):
@@ -183,22 +280,22 @@ class G1_Walk_Mirrored_CEM(CrossEntropyMethod):
                 y_rand = jax.random.uniform(
                         subkey,
                         shape=(self.sim.B, self.cem_config.N_knots),
-                        minval=pos_lo,
-                        maxval=pos_hi
+                        minval=tau_lo,
+                        maxval=tau_hi
                 )
                 Y0 = Y0.at[:, :, i].set(y_rand)
 
         # create the spline object
         if self.cem_config.spline_type == "ZOH":
-            self.spline = ZOH_Spline(Y0, self.T_eff)
+            self.spline = zoh.ZOH_Spline(Y0, self.T_eff)
         elif self.cem_config.spline_type == "Linear":
-            self.spline = Linear_Spline(Y0, self.T_eff)
+            self.spline = linear.Linear_Spline(Y0, self.T_eff)
         elif self.cem_config.spline_type == "Cubic":
-            self.spline = Cubic_Spline(Y0, self.T_eff)
+            self.spline = cubic.Cubic_Spline(Y0, self.T_eff)
         elif self.cem_config.spline_type == "Bezier":
-            self.spline = Bezier_Spline(Y0, self.T_eff)
+            self.spline = bezier.Bezier_Spline(Y0, self.T_eff)
         elif self.cem_config.spline_type == "Fourier":
-            self.spline = Fourier_Spline(Y0, self.T_eff, periodic=False)
+            self.spline = fourier.Fourier_Spline(Y0, self.T_eff, periodic=False)
         else:
             raise NotImplementedError(f"Spline type [{self.cem_config.spline_type}] not implemented.")
 
@@ -208,248 +305,109 @@ class G1_Walk_Mirrored_CEM(CrossEntropyMethod):
         # update the distribution with the initial knot points
         self._update_distribution(Y0)
 
-    def _make_SRB_reference(self):
-        
-        # load the rest of the SRB reference data
-        t_SRB = np.loadtxt(srb_dir + "time.csv", delimiter=",")      # (T, )
-        q_SRB = np.loadtxt(srb_dir + "q_opt.csv", delimiter=",")     # (T, nq)
-        v_SRB = np.loadtxt(srb_dir + "v_opt.csv", delimiter=",")     # (T, nv)
-        a_SRB = np.loadtxt(srb_dir + "a_opt.csv", delimiter=",")     # (T, na)
-        tau_SRB = np.loadtxt(srb_dir + "tau_opt.csv", delimiter=",") # (T-1, nu)
-
-        # extract all the data
-        p_com_traj = q_SRB[:, :2]    # world com position
-        v_com_traj = v_SRB[:, :2]    # world com linear velocity
-        a_com_traj = a_SRB[:, :2]    # world com linear acceleration
-        theta_traj = q_SRB[:, 2]     # body frame pitch angle
-        omega_traj = v_SRB[:, 2]     # body frame angular velocity
-        alpha_traj = a_SRB[:, 2]     # body frame angular acceleration
-        F_W_traj   = tau_SRB[:, :2]  # world forces
-        M_W_traj   = tau_SRB[:, 2]   # world moments
-
-        # add the last element to make it length T (for reference tracking)
-        F_W_traj = np.vstack([F_W_traj, F_W_traj[-1]])
-        M_W_traj = np.hstack([M_W_traj, M_W_traj[-1]])
-
-        # trajectory length and time
-        dt_sim = self.sim.dt
-        t0 = t_SRB[0]
-        tf = t_SRB[-1]
-
-        # time array 
-        t_sim = np.arange(t0, tf, dt_sim, dtype=np.float64)
-        N_sim = t_sim.shape[0]
-
-        # allocate the SRB trajectory in the class
-        p_com_ref = np.zeros((N_sim, 2), dtype=np.float32)
-        v_com_ref = np.zeros((N_sim, 2), dtype=np.float32)
-        a_com_ref = np.zeros((N_sim, 2), dtype=np.float32)
-        theta_ref = np.zeros((N_sim, 1), dtype=np.float32)
-        omega_ref = np.zeros((N_sim, 1), dtype=np.float32)
-        alpha_ref = np.zeros((N_sim, 1), dtype=np.float32)
-        F_W_ref = np.zeros((N_sim, 2), dtype=np.float32)
-        M_W_ref = np.zeros((N_sim, 1), dtype=np.float32)
-
-        for k in range(N_sim):
-            t = float(t_sim[k])
-
-            idx_2 = int(np.searchsorted(t_SRB, t, side="right"))
-            idx_1 = idx_2 - 1
-
-            if idx_2 >= len(t_SRB):
-                idx_1 = idx_2 = len(t_SRB) - 1
-                coeff = 0.0
-            elif idx_1 < 0:
-                idx_1 = idx_2 = 0
-                coeff = 0.0
-            else:
-                t1_ = float(t_SRB[idx_1])
-                t2_ = float(t_SRB[idx_2])
-                denom = (t2_ - t1_)
-                if abs(denom) < 1e-12:
-                    coeff = 0.0
-                else:
-                    coeff = (t - t1_) / denom
-                    coeff = float(np.clip(coeff, 0.0, 1.0))
-
-            p_com_ref[k] = interp.lerp(p_com_traj[idx_1], p_com_traj[idx_2], coeff)
-            v_com_ref[k] = interp.lerp(v_com_traj[idx_1], v_com_traj[idx_2], coeff)
-            a_com_ref[k] = interp.lerp(a_com_traj[idx_1], a_com_traj[idx_2], coeff)
-            theta_ref[k] = interp.lerp(theta_traj[idx_1], theta_traj[idx_2], coeff)
-            omega_ref[k] = interp.lerp(omega_traj[idx_1], omega_traj[idx_2], coeff)
-            alpha_ref[k] = interp.lerp(alpha_traj[idx_1], alpha_traj[idx_2], coeff)
-            F_W_ref[k] = interp.lerp(F_W_traj[idx_1], F_W_traj[idx_2], coeff)
-            M_W_ref[k] = interp.lerp(M_W_traj[idx_1], M_W_traj[idx_2], coeff)
-
-        # store the reference trajectory in the class (as jnp for use in cost)
-        self.p_com_ref = jnp.array(p_com_ref)  # (N_sim, 2)
-        self.v_com_ref = jnp.array(v_com_ref)  # (N_sim, 2)
-        self.a_com_ref = jnp.array(a_com_ref)  # (N_sim, 2)
-        self.F_W_ref = jnp.array(F_W_ref)      # (N_sim, 2)
-
-        # WARNING: the angular references are s.t. positive is CCW. I.e., y+ is going out of the page
-        #          you must account for this when computing costs.
-        self.theta_ref = -jnp.array(theta_ref)  # (N_sim, 1)
-        self.omega_ref = -jnp.array(omega_ref)  # (N_sim, 1)
-        self.alpha_ref = -jnp.array(alpha_ref)  # (N_sim, 1)
-        self.M_W_ref = -jnp.array(M_W_ref)      # (N_sim, 1)
-
-        # precompute convenience views for cost (strip trailing dim where needed)
-        px_ref = self.p_com_ref[:, 0]        # (N_sim,)
-        pz_ref = self.p_com_ref[:, 1]        # (N_sim,)
-        vx_ref = self.v_com_ref[:, 0]        # (N_sim,)
-        vz_ref = self.v_com_ref[:, 1]        # (N_sim,)
-        thetadot_ref = self.omega_ref[:, 0]  # (N_sim,)
-        theta_ref = self.theta_ref[:, 0]     # (N_sim,)
-        
-        # pad all refs by 1 to handle N+1 vs N_sim edge cases
-        self.px_ref       = jnp.concatenate([px_ref,       px_ref[-1:]])
-        self.pz_ref       = jnp.concatenate([pz_ref,       pz_ref[-1:]])
-        self.vx_ref       = jnp.concatenate([vx_ref,       vx_ref[-1:]])
-        self.vz_ref       = jnp.concatenate([vz_ref,       vz_ref[-1:]])
-        self.theta_ref    = jnp.concatenate([theta_ref,    theta_ref[-1:]])
-        self.thetadot_ref = jnp.concatenate([thetadot_ref, thetadot_ref[-1:]])
-
-    # make the joint reference
-    def _make_joint_reference(self):
-
-        # take joint state references
-        self.p_hip_ref = qpos_standing[3]      # scalar
-        self.p_knee_ref = qpos_standing[4]   
-        self.p_ankle_ref = qpos_standing[5]
-        self.p_shoulder_ref = qpos_standing[9]
-        self.p_elbow_ref = qpos_standing[10]
-
-        # take the joint velocity references
-        self.v_hip_ref = qvel_standing[3]      # scalar
-        self.v_knee_ref = qvel_standing[4]
-        self.v_ankle_ref = qvel_standing[5]
-        self.v_shoulder_ref = qvel_standing[9]
-        self.v_elbow_ref = qvel_standing[10]
 
     def cost(self, q, v, tau):
-        """
-        Args:
-            q:   (B, N+1, nq)
-            v:   (B, N+1, nv)
-            tau: (B, N, nu)
-        Returns:
-            J: (B,)
-        """
-        B, N_plus_1, _ = q.shape
-        N = N_plus_1 - 1
+            """
+            Cost function to evaluate the rollouts.
 
-        # ===== BASE STATE =====
-        px    = q[:, :, 0]     # (B, N+1)
-        pz    = q[:, :, 1]     # (B, N+1)
-        theta = q[:, :, 2]     # (B, N+1)
-        vx       = v[:, :, 0]  # (B, N+1)
-        vz       = v[:, :, 1]  # (B, N+1)
-        thetadot = v[:, :, 2]  # (B, N+1)
+            Args:
+                q: jnp.array,   shape (B, N+1, nq) - generalized positions trajectory.
+                v: jnp.array,   shape (B, N+1, nv) - generalized velocities trajectory.
+                tau: jnp.array, shape (B, N, nu) - control inputs trajectory.
+            Returns:
+                costs: jnp.array, shape (B,) - cost for each rollout.
+            """
 
-        px_ref = (self.px_ref[:N_plus_1] - self.px_ref[0])[None, :] + px[:, 0:1]  # (B, N+1)
-        pz_ref = self.pz_ref[:N_plus_1][None, :]
-        theta_ref = self.theta_ref[:N_plus_1][None, :]
-        vx_ref = self.vx_ref[:N_plus_1][None, :]
-        vz_ref = self.vz_ref[:N_plus_1][None, :]
-        thetadot_ref = self.thetadot_ref[:N_plus_1][None, :]
+            N = tau.shape[1]
 
-        # error state
-        err_px = px_ref - px
-        err_pz = pz_ref - pz
-        err_theta = theta_ref - theta
-        err_vx = vx_ref - vx
-        err_vz = vz_ref - vz
-        err_thetadot = thetadot_ref - thetadot
+            # base state: full trajectory -> (B, N+1, *)
+            px       = q[:, :N+1, 0]   # (B, N+1)
+            pz       = q[:, :N+1, 1]   # (B, N+1)
+            theta    = q[:, :N+1, 2]   # (B, N+1)
+            vx       = v[:, :N+1, 0]   # (B, N+1)
+            vz       = v[:, :N+1, 1]   # (B, N+1)
+            thetadot = v[:, :N+1, 2]   # (B, N+1)
 
-        # ===== JOINT STATE =====
-        
-        # only the left joint state
-        p_hip      = q[:, :, 3]  # (B, N+1)
-        p_knee     = q[:, :, 4]  # (B, N+1)
-        p_ankle    = q[:, :, 5]  # (B, N+1)
-        p_shoulder = q[:, :, 9]  # (B, N+1)
-        p_elbow    = q[:, :, 10] # (B, N+1)
-        
-        v_hip      = v[:, :, 3]
-        v_knee     = v[:, :, 4]
-        v_ankle    = v[:, :, 5]
-        v_shoulder = v[:, :, 9]
-        v_elbow    = v[:, :, 10]
+            p_hip      = q[:, :N+1, 3]   # (B, N+1)
+            p_knee     = q[:, :N+1, 4]   # (B, N+1)
+            p_ankle    = q[:, :N+1, 5]   # (B, N+1)
+            p_shoulder = q[:, :N+1, 9]   # (B, N+1)
+            p_elbow    = q[:, :N+1, 10]  # (B, N+1)
 
-        # joint references
-        err_p_hip = self.p_hip_ref - p_hip
-        err_p_knee = self.p_knee_ref - p_knee
-        err_p_ankle = self.p_ankle_ref - p_ankle
-        err_p_shoulder = self.p_shoulder_ref - p_shoulder
-        err_p_elbow = self.p_elbow_ref - p_elbow 
+            v_hip      = v[:, :N+1, 3]   # (B, N+1)
+            v_knee     = v[:, :N+1, 4]   # (B, N+1)
+            v_ankle    = v[:, :N+1, 5]   # (B, N+1)
+            v_shoulder = v[:, :N+1, 9]   # (B, N+1)
+            v_elbow    = v[:, :N+1, 10]  # (B, N+1)
 
-        err_v_hip = self.v_hip_ref - v_hip
-        err_v_knee = self.v_knee_ref - v_knee
-        err_v_ankle = self.v_ankle_ref - v_ankle
-        err_v_shoulder = self.v_shoulder_ref - v_shoulder
-        err_v_elbow = self.v_elbow_ref - v_elbow
+            # errors over full trajectory -> (B, N+1)
+            e_px       = px       - self.px_ref[:N+1]        # (B, N+1)
+            e_pz       = pz       - self.pz_ref[:N+1]        # (B, N+1)
+            e_theta    = theta    - self.theta_ref[:N+1]     # (B, N+1)
+            e_vx       = vx       - self.vx_ref[:N+1]        # (B, N+1)
+            e_vz       = vz       - self.vz_ref[:N+1]        # (B, N+1)
+            e_thetadot = thetadot - self.thetadot_ref[:N+1]  # (B, N+1)
 
-        def sq(x):
-            """Element-wise square, summed over all non-batch dims."""
-            return jnp.sum(x ** 2, axis=tuple(range(1, x.ndim)))
+            e_p_hip      = p_hip      - self.p_hip_ref       # (B, N+1)
+            e_p_knee     = p_knee     - self.p_knee_ref      # (B, N+1)
+            e_p_ankle    = p_ankle    - self.p_ankle_ref     # (B, N+1)
+            e_p_shoulder = p_shoulder - self.p_shoulder_ref  # (B, N+1)
+            e_p_elbow    = p_elbow    - self.p_elbow_ref     # (B, N+1)
 
-        # ===== RUNNING COST (t = 0..N-1) =====
-        r = slice(None, -1)  # excludes terminal step
+            e_v_hip      = v_hip      - self.v_hip_ref       # (B, N+1)
+            e_v_knee     = v_knee     - self.v_knee_ref      # (B, N+1)
+            e_v_ankle    = v_ankle    - self.v_ankle_ref     # (B, N+1)
+            e_v_shoulder = v_shoulder - self.v_shoulder_ref  # (B, N+1)
+            e_v_elbow    = v_elbow    - self.v_elbow_ref     # (B, N+1)
 
-        cost_running = (
-            # --- base position / orientation ---
-            self.w_px    * sq(err_px      [:, r])
-            + self.w_pz    * sq(err_pz      [:, r])
-            + self.w_theta * sq(err_theta   [:, r])
-            # --- base velocity ---
-            + self.w_vx    * sq(err_vx      [:, r])
-            + self.w_vz    * sq(err_vz      [:, r])
-            + self.w_omega * sq(err_thetadot[:, r])
-            # --- joint positions ---
-            + self.w_p_hip      * sq(err_p_hip     [:, r])
-            + self.w_p_knee     * sq(err_p_knee    [:, r])
-            + self.w_p_ankle    * sq(err_p_ankle   [:, r])
-            + self.w_p_shoulder * sq(err_p_shoulder[:, r])
-            + self.w_p_elbow    * sq(err_p_elbow   [:, r])
-            # --- joint velocities ---
-            + self.w_v_hip      * sq(err_v_hip     [:, r])
-            + self.w_v_knee     * sq(err_v_knee    [:, r])
-            + self.w_v_ankle    * sq(err_v_ankle   [:, r])
-            + self.w_v_shoulder * sq(err_v_shoulder[:, r])
-            + self.w_v_elbow    * sq(err_v_elbow   [:, r])
-            # --- control effort ---
-            + self.w_control * sq(tau)
-        ) * self.sim.dt   # (B,)
-        
+            # squared error helper: sum over time, exclude terminal step
+            def se(e): return jnp.sum(e[:, :-1]**2, axis=-1)   # (B,)
+            def se_f(e): return e[:, -1]**2                     # (B,)
 
-        # ===== TERMINAL COST (t = N) =====
-        cost_terminal = (
-            # --- base position / orientation ---
-            self.wf_px    * sq(err_px      [:, -1:])
-            + self.wf_pz    * sq(err_pz      [:, -1:])
-            + self.wf_theta * sq(err_theta   [:, -1:])
-            # --- base velocity ---
-            + self.wf_vx    * sq(err_vx      [:, -1:])
-            + self.wf_vz    * sq(err_vz      [:, -1:])
-            + self.wf_omega * sq(err_thetadot[:, -1:])
-            # --- joint positions ---
-            + self.wf_p_hip      * sq(err_p_hip     [:, -1:])
-            + self.wf_p_knee     * sq(err_p_knee    [:, -1:])
-            + self.wf_p_ankle    * sq(err_p_ankle   [:, -1:])
-            + self.wf_p_shoulder * sq(err_p_shoulder[:, -1:])
-            + self.wf_p_elbow    * sq(err_p_elbow   [:, -1:])
-            # --- joint velocities ---
-            + self.wf_v_hip      * sq(err_v_hip     [:, -1:])
-            + self.wf_v_knee     * sq(err_v_knee    [:, -1:])
-            + self.wf_v_ankle    * sq(err_v_ankle   [:, -1:])
-            + self.wf_v_shoulder * sq(err_v_shoulder[:, -1:])
-            + self.wf_v_elbow    * sq(err_v_elbow   [:, -1:])
-        )  # (B,)
+            # ========================== Running cost ==========================
 
-        J = cost_running + cost_terminal  # (B,)
-        
-        return J
+            running_cost = (
+                self.w_px        * se(e_px)       +
+                self.w_pz        * se(e_pz)       +
+                self.w_theta     * se(e_theta)    +
+                self.w_vx        * se(e_vx)       +
+                self.w_vz        * se(e_vz)       +
+                self.w_omega     * se(e_thetadot) +
+                self.w_p_hip     * se(e_p_hip)    +
+                self.w_p_knee    * se(e_p_knee)   +
+                self.w_p_ankle   * se(e_p_ankle)  +
+                self.w_p_shoulder* se(e_p_shoulder)+
+                self.w_p_elbow   * se(e_p_elbow)  +
+                self.w_v_hip     * se(e_v_hip)    +
+                self.w_v_knee    * se(e_v_knee)   +
+                self.w_v_ankle   * se(e_v_ankle)  +
+                self.w_v_shoulder* se(e_v_shoulder)+
+                self.w_v_elbow   * se(e_v_elbow)  +
+                self.w_control   * jnp.sum(jnp.sum(tau**2, axis=-1), axis=-1)
+            ) * self.sim.dt  # (B,)
+
+            # ========================== Terminal cost ==========================
+
+            terminal_cost = (
+                self.wf_px        * se_f(e_px)       +
+                self.wf_pz        * se_f(e_pz)       +
+                self.wf_theta     * se_f(e_theta)    +
+                self.wf_vx        * se_f(e_vx)       +
+                self.wf_vz        * se_f(e_vz)       +
+                self.wf_omega     * se_f(e_thetadot) +
+                self.wf_p_hip     * se_f(e_p_hip)    +
+                self.wf_p_knee    * se_f(e_p_knee)   +
+                self.wf_p_ankle   * se_f(e_p_ankle)  +
+                self.wf_p_shoulder* se_f(e_p_shoulder)+
+                self.wf_p_elbow   * se_f(e_p_elbow)  +
+                self.wf_v_hip     * se_f(e_v_hip)    +
+                self.wf_v_knee    * se_f(e_v_knee)   +
+                self.wf_v_ankle   * se_f(e_v_ankle)  +
+                self.wf_v_shoulder* se_f(e_v_shoulder)+
+                self.wf_v_elbow   * se_f(e_v_elbow)
+            )  # (B,)
+
+            return running_cost + terminal_cost  # (B,)
 
     def optimize(self, q0, v0):
         """
@@ -485,7 +443,17 @@ class G1_Walk_Mirrored_CEM(CrossEntropyMethod):
                 y_val_full = y_val_full.at[:, :, right_idx].set(y_joint)
 
             # do forward rollout
-            q_log, v_log, tau_log = self.sim.rollout(q0, v0, y_val_full)
+            N = y_val_full.shape[1]
+            q_srb_ref = jnp.stack([self.px_ref[:N], self.pz_ref[:N], self.theta_ref[:N]],    axis=-1)  # (N, 3)
+            v_srb_ref = jnp.stack([self.vx_ref[:N], self.vz_ref[:N], self.thetadot_ref[:N]], axis=-1)  # (N, 3)
+            a_srb_ref = jnp.concatenate([self.a_com_ref[:N], self.alpha_ref[:N, None]],      axis=-1)  # (N, 3)
+            # a = linear_schedule(itr, self.cem_config.iterations, alpha_max=1.0)
+            a = exponential_schedule(itr, self.cem_config.iterations, alpha_max=1.0, lam=20.0)
+            q_log, v_log, tau_log = self.sim.rollout(q0, v0, y_val_full,
+                                                    q_srb_ref=q_srb_ref,
+                                                    v_srb_ref=v_srb_ref,
+                                                    a_srb_ref=a_srb_ref,
+                                                    w_scale=a)
             q_log.block_until_ready()
 
             # compute costs
@@ -533,7 +501,8 @@ class G1_Walk_Mirrored_CEM(CrossEntropyMethod):
                   f"J_elite_avg: {J_elite_avg:.4f} | "
                   f"J_elite_best: {J_elite_best:.4f} | "
                   f"J_best: {J_opt:.4f} | "
-                  f"‖Σ‖₂: {cov_norm:.4f}")
+                  f"‖Σ‖: {cov_norm:.4f} | "
+                  f"α: {a:.3f}")
             
         return q_opt, v_opt, tau_opt
 
@@ -572,6 +541,7 @@ if __name__ == "__main__":
     # parallel sim config
     sim_config = ParallelSim_Config(
         batch_size = 4096,
+        use_external_wrench=True,
     )
 
     # cem config

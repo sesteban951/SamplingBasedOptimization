@@ -23,6 +23,8 @@ from utils.algorithms.cem import *
 from utils.algorithms.schedule import *
 from utils.simulation.simulation import *
 from utils.spline import *
+from utils.interpolation import interp
+
 
 #################################################################
 # LOAD DATA
@@ -41,7 +43,11 @@ qvel_standing = jnp.array(mj_model.key_qvel[key_id])
 
 # load SRB data
 srb_dir = "./results/srb/srb_jump/"
-times = np.loadtxt(srb_dir + "time.csv", delimiter=",")
+t_SRB = np.loadtxt(srb_dir + "time.csv", delimiter=",")
+q_SRB = np.loadtxt(srb_dir + "q_opt.csv", delimiter=",")
+v_SRB = np.loadtxt(srb_dir + "v_opt.csv", delimiter=",")
+a_SRB = np.loadtxt(srb_dir + "a_opt.csv", delimiter=",")
+tau_SRB = np.loadtxt(srb_dir + "tau_opt.csv", delimiter=",")
 
 
 #################################################################
@@ -78,39 +84,9 @@ class G1_SRB_CEM(CrossEntropyMethod):
 
         super().__init__(model_config, sim_config, cem_config)
 
-        # take the SRB reference trajecotry from the simulation class
-        q_com_ref = self.sim.p_com_ref
-        v_com_ref = self.sim.v_com_ref
-        a_com_ref = self.sim.a_com_ref
-        quat_ref = self.sim.quat_ref
-        omega_ref = self.sim.omega_ref
-        alpha_ref = self.sim.alpha_ref
+        self.sim_config = sim_config
 
-        # broadcast the SRB reference trajectory to the batch size
-        self.B = sim_config.batch_size
-        self.q_SRB_ref = jnp.broadcast_to(q_com_ref, (self.B, q_com_ref.shape[0], q_com_ref.shape[1]))
-        self.v_SRB_ref = jnp.broadcast_to(v_com_ref, (self.B, v_com_ref.shape[0], v_com_ref.shape[1]))
-        self.a_SRB_ref = jnp.broadcast_to(a_com_ref, (self.B, a_com_ref.shape[0], a_com_ref.shape[1]))
-        self.quat_SRB_ref = jnp.broadcast_to(quat_ref, (self.B, quat_ref.shape[0], quat_ref.shape[1]))
-        self.omega_SRB_ref = jnp.broadcast_to(omega_ref, (self.B, omega_ref.shape[0], omega_ref.shape[1]))
-        self.alpha_SRB_ref = jnp.broadcast_to(alpha_ref, (self.B, alpha_ref.shape[0], alpha_ref.shape[1]))
-        print("Broadcasted SRB data:")
-        print(f"  q_SRB_ref: {self.q_SRB_ref.shape}")
-        print(f"  v_SRB_ref: {self.v_SRB_ref.shape}")
-        print(f"  a_SRB_ref: {self.a_SRB_ref.shape}")
-        print(f"  quat_SRB_ref: {self.quat_SRB_ref.shape}")
-        print(f"  omega_SRB_ref: {self.omega_SRB_ref.shape}")
-        print(f"  alpha_SRB_ref: {self.alpha_SRB_ref.shape}")
-
-        # extract nominal joint trajectories from standing position
-        q_base_standing  = qpos_standing[jnp.concatenate([pos_base_idx, quat_base_idx])]        
-        v_base_standing  = qvel_standing[jnp.concatenate([vel_base_idx, omega_base_idx])]
-        q_joints_standing = qpos_standing[pos_joints]
-        v_joints_standing = qvel_standing[vel_joints]
-        self.q_base_standing = jnp.broadcast_to(q_base_standing, (self.B, q_base_standing.shape[0]))
-        self.q_joints_standing = jnp.broadcast_to(q_joints_standing, (self.B, q_joints_standing.shape[0]))
-        self.v_base_standing = jnp.broadcast_to(v_base_standing, (self.B, v_base_standing.shape[0]))
-        self.v_joints_standing = jnp.broadcast_to(v_joints_standing, (self.B, v_joints_standing.shape[0]))
+        self._make_reference_trajectory()
 
         # cost values
         self.w_p_base = 10.0
@@ -129,51 +105,131 @@ class G1_SRB_CEM(CrossEntropyMethod):
         self.wf_v_joints = 20.0 * self.w_v_joints
 
 
+    def _make_reference_trajectory(self):
+
+        # extract the trajectory components
+        p_com = q_SRB[:, 0:3]   # (T_SRB, 3)
+        v_com = v_SRB[:, 0:3]   # (T_SRB, 3)
+        a_com = a_SRB[:, 0:3]   # (T_SRB, 3)
+        quat  = q_SRB[:, 3:7]   # (T_SRB, 4)
+        omega = v_SRB[:, 3:6]   # (T_SRB, 3)
+        alpha = a_SRB[:, 3:6]   # (T_SRB, 3)
+
+        # make simulation time array
+        T_SRB = t_SRB[-1]         
+        dt_sim = self.sim.dt
+        t_sim = jnp.arange(0, T_SRB + dt_sim, dt_sim) # [0, dt_sim, 2*dt_sim, ..., T_SRB]
+        nodes_sim = len(t_sim)
+
+        # interpolate the reference trajectory at simulation time steps
+        p_com_ref = np.zeros((nodes_sim, 3))
+        v_com_ref = np.zeros((nodes_sim, 3))
+        a_com_ref = np.zeros((nodes_sim, 3))
+        quat_ref = np.zeros((nodes_sim,  4))
+        omega_ref = np.zeros((nodes_sim, 3))
+        alpha_ref = np.zeros((nodes_sim, 3))
+        for i in range(nodes_sim):
+            
+            # current sim time point
+            t = t_sim[i]
+
+            # before the start of the SRB trajectory, hold the initial state
+            if t < t_SRB[0]:
+                p_com_ref[i] = p_com[0]
+                v_com_ref[i] = v_com[0]
+                a_com_ref[i] = a_com[0]
+                quat_ref[i] = quat[0]
+                omega_ref[i] = omega[0]
+                alpha_ref[i] = alpha[0]
+
+            # after the end of the SRB trajectory, hold the final state
+            elif t > t_SRB[-1]:
+                p_com_ref[i] = p_com[-1]
+                v_com_ref[i] = v_com[-1]
+                a_com_ref[i] = a_com[-1]
+                quat_ref[i] = quat[-1]
+                omega_ref[i] = omega[-1]
+                alpha_ref[i] = alpha[-1]
+
+            # within the SRB trajectory, interpolate between the two nearest points
+            else: 
+                # find the two SRB time points that bracket the current sim time
+                idx_2 = np.searchsorted(t_SRB, t, side='right')
+                idx_2 = min(idx_2, len(t_SRB) - 1)  # clamp to last valid index
+                idx_1 = max(idx_2 - 1, 0)
+                t1, t2 = t_SRB[idx_1], t_SRB[idx_2]
+
+                # interpolation coeff
+                coeff = (t - t1) / (t2 - t1)
+                coeff = np.clip(coeff, 0.0, 1.0)  # ensure coeff is within [0, 1]
+
+                # interpolate the reference trajectory
+                p_com_ref[i]  = interp.lerp(p_com[idx_1],  p_com[idx_2],  coeff)
+                v_com_ref[i]  = interp.lerp(v_com[idx_1],  v_com[idx_2],  coeff)
+                a_com_ref[i]  = interp.lerp(a_com[idx_1],  a_com[idx_2],  coeff)
+                quat_ref[i]   = interp.slerp(quat[idx_1],  quat[idx_2],   coeff)
+                omega_ref[i]  = interp.lerp(omega[idx_1],  omega[idx_2],  coeff)
+                alpha_ref[i]  = interp.lerp(alpha[idx_1],  alpha[idx_2],  coeff)
+
+        self.p_com_ref = jnp.array(p_com_ref)  # (nodes_sim, 3)
+        self.v_com_ref = jnp.array(v_com_ref)  # (nodes_sim, 3)
+        self.a_com_ref = jnp.array(a_com_ref)  # (nodes_sim, 3)
+        self.quat_ref  = jnp.array(quat_ref)   # (nodes_sim, 4)
+        self.omega_ref = jnp.array(omega_ref)  # (nodes_sim, 3)
+        self.alpha_ref = jnp.array(alpha_ref)  # (nodes_sim, 3)
+
+        # extract nominal joint trajectories from standing position
+        B = self.sim_config.batch_size
+        q_joints_standing = qpos_standing[pos_joints]
+        v_joints_standing = qvel_standing[vel_joints]
+        self.q_joints_standing = jnp.broadcast_to(q_joints_standing, (B, q_joints_standing.shape[0]))
+        self.v_joints_standing = jnp.broadcast_to(v_joints_standing, (B, v_joints_standing.shape[0]))
+
+
     def cost(self, q, v, tau):
         """
         Cost function to evaluate the rollouts.
 
         Args:
-            q: jnp.array, shape (B, N+1, nq) - generalized positions trajectory.
-            v: jnp.array, shape (B, N+1, nv) - generalized velocities trajectory.
+            q: jnp.array,   shape (B, N+1, nq) - generalized positions trajectory.
+            v: jnp.array,   shape (B, N+1, nv) - generalized velocities trajectory.
             tau: jnp.array, shape (B, N, nu) - control inputs trajectory.
         Returns:
             costs: jnp.array, shape (B,) - cost for each rollout.
         """
 
-        T_ref = self.q_SRB_ref.shape[1] 
+        B = tau.shape[0]
+        N = tau.shape[1]
 
         # base state: full trajectory -> (B, N+1, *)
-        p_base =     q[:, :T_ref, pos_base_idx]
-        quat_base =  q[:, :T_ref, quat_base_idx]
-        v_base =     v[:, :T_ref, vel_base_idx]
-        omega_base = v[:, :T_ref, omega_base_idx]
-        q_joints =   q[:, :T_ref, pos_joints]
-        v_joints =   v[:, :T_ref, vel_joints]
-
-        B, T, _ = quat_base.shape
-
+        p_base =     q[:, :N+1, pos_base_idx]
+        quat_base =  q[:, :N+1, quat_base_idx]
+        v_base =     v[:, :N+1, vel_base_idx]
+        omega_base = v[:, :N+1, omega_base_idx]
+        q_joints =   q[:, :N+1, pos_joints]
+        v_joints =   v[:, :N+1, vel_joints]
+        
         # errors over full trajectory -> (B, N+1, *)
-        e_pos_base   = p_base    - self.q_SRB_ref                      # (B, N+1, 3)
+        e_pos_base   = p_base    - self.p_com_ref[:N+1]                # (B, N+1, 3)
         e_quat = self.sim.dyn._quat_log_diff(
-            self.quat_SRB_ref.reshape(B*T, 4),
-            quat_base.reshape(B*T, 4)
-        ).reshape(B, T, 3)                                             # (B, N+1, 3)
-        e_vel_base   = v_base    - self.v_SRB_ref                      # (B, N+1, 3)
-        e_omega_base = omega_base - self.omega_SRB_ref                 # (B, N+1, 3)
+            jnp.broadcast_to(self.quat_ref[:N+1], (B, N+1, 4)).reshape(B*(N+1), 4),
+            quat_base.reshape(B*(N+1), 4)
+        ).reshape(B, N+1, 3)                                           # (B, N+1, 3)
+        e_vel_base   = v_base    - self.v_com_ref[:N+1]                # (B, N+1, 3)
+        e_omega_base = omega_base - self.omega_ref[:N+1]               # (B, N+1, 3)
         e_q_joints   = q_joints  - self.q_joints_standing[:, None, :]  # (B, N+1, 21)
         e_v_joints   = v_joints  - self.v_joints_standing[:, None, :]  # (B, N+1, 21)
 
         # ========================== Running cost ==========================
 
-        # slice [0:N] -> (B, N, *), sum over dims then time -> (B,)
+        # compute squared errors, slice [:, :-1] to exclude the final time step for running cost
         se_pos_base   = jnp.sum(jnp.sum(e_pos_base  [:, :-1, :]**2, axis=-1), axis=-1)
         se_quat       = jnp.sum(jnp.sum(e_quat      [:, :-1, :]**2, axis=-1), axis=-1)
         se_vel_base   = jnp.sum(jnp.sum(e_vel_base  [:, :-1, :]**2, axis=-1), axis=-1)
         se_omega_base = jnp.sum(jnp.sum(e_omega_base[:, :-1, :]**2, axis=-1), axis=-1)
         se_q_joints   = jnp.sum(jnp.sum(e_q_joints  [:, :-1, :]**2, axis=-1), axis=-1)
         se_v_joints   = jnp.sum(jnp.sum(e_v_joints  [:, :-1, :]**2, axis=-1), axis=-1)
-        se_tau = jnp.sum(jnp.sum(tau[:, :T_ref-1, :]**2, axis=-1), axis=-1)
+        se_tau = jnp.sum(jnp.sum(tau**2, axis=-1), axis=-1)
 
         running_cost = (
             self.w_p_base     * se_pos_base   +
@@ -187,7 +243,7 @@ class G1_SRB_CEM(CrossEntropyMethod):
 
         # ========================== Terminal cost ==========================
 
-        # slice [-1] -> (B, *), sum over dims -> (B,)
+        # compute squared errors at the final time step [:, -1, :]
         se_pos_base_f   = jnp.sum(e_pos_base  [:, -1, :]**2, axis=-1)
         se_quat_f       = jnp.sum(e_quat      [:, -1, :]**2, axis=-1)
         se_vel_base_f   = jnp.sum(e_vel_base  [:, -1, :]**2, axis=-1)
@@ -206,7 +262,8 @@ class G1_SRB_CEM(CrossEntropyMethod):
 
         return running_cost + terminal_cost  # (B,)
     
-    # Custom CEM optimization for this particualr task
+
+    # Custom CEM optimization for this particular task
     def optimize(self, q0, v0):
         """
         Perform CEM optimization.
@@ -233,12 +290,22 @@ class G1_SRB_CEM(CrossEntropyMethod):
             y_val = self.spline.evaluate(self.t_sim[:-1])  # shape (B, N, nu)
 
             # get annealing factor for this iteration
-            # a = linear_annealing(itr, self.cem_config.iterations, alpha_max=1.0)
-            a = exponential_schedule(itr, self.cem_config.iterations, 
-                                     alpha_max=0.1, lam=20.0)
+            a = linear_schedule(itr, self.cem_config.iterations, alpha_max=1.0)
+            # a = exponential_schedule(itr, self.cem_config.iterations, 
+            #                          alpha_max=1.0, lam=20.0)
+
+            # pack SRB references for wrench injection -> (N, 7), (N, 6), (N, 6)
+            N = y_val.shape[1]
+            q_srb_ref = jnp.concatenate([self.p_com_ref[:N], self.quat_ref[:N]],  axis=-1)  # (N, 7)
+            v_srb_ref = jnp.concatenate([self.v_com_ref[:N], self.omega_ref[:N]], axis=-1)  # (N, 6)
+            a_srb_ref = jnp.concatenate([self.a_com_ref[:N], self.alpha_ref[:N]], axis=-1)  # (N, 6)
 
             # do forward rollout
-            q_log, v_log, tau_log = self.sim.rollout(q0, v0, y_val, a)
+            q_log, v_log, tau_log = self.sim.rollout(q0, v0, y_val,
+                                                     q_srb_ref=q_srb_ref,
+                                                     v_srb_ref=v_srb_ref,
+                                                     a_srb_ref=a_srb_ref,
+                                                     w_scale=a)
             q_log.block_until_ready()
 
             # compute costs
@@ -283,11 +350,11 @@ class G1_SRB_CEM(CrossEntropyMethod):
             # print iteration info
             itr_width = len(str(self.cem_config.iterations))  # e.g., 400 → width=3
             print(f"Iteration {itr+1:0{itr_width}d}/{self.cem_config.iterations} | "
-                  f"J_elite_avg: {J_elite_avg:.4f} | "
-                  f"J_elite_best: {J_elite_best:.4f} | "
-                  f"J_best: {J_opt:.4f} | "
+                  f"J_elite_avg: {J_elite_avg:.1f} | "
+                  f"J_elite_best: {J_elite_best:.1f} | "
+                  f"J_best: {J_opt:.1f} | "
                   f"‖Σ‖: {cov_norm:.4f} | "
-                  f"α: {a:.4f}")
+                  f"α: {a:.3f}")
             
         return q_opt, v_opt, tau_opt
 
@@ -325,11 +392,10 @@ if __name__ == "__main__":
     sim_config = ParallelSim_Config(
         batch_size = 4096,
         use_external_wrench=True,
-        srb_traj_dir=srb_dir
     )
 
     # number of knots for the trajecotry
-    T_SRB = times[-1]
+    T_SRB = t_SRB[-1]
     knots_per_sec= 5
     N_knots = int(T_SRB * knots_per_sec)
 
