@@ -92,7 +92,7 @@ class ParallelSim():
         # initialize the jit functions
         self._initialize_jit_functions()
 
-        print("Parallel sim initialized.")
+        print("Parallel simulation initialized.")
 
     ####################################### INITIALIZATION #######################################
 
@@ -400,6 +400,7 @@ class ParallelSim():
         return tau
 
 
+    # WARNING: / TODO: there seems to be singularity at pi/2, GIMBAL LOCK?
     def _compute_virtual_wrench_3D(self, data, q_ref_k, v_ref_k, a_ref_k, w_scale):
         """
         Compute the virtual wrench that tracks the SRB trajectory
@@ -700,9 +701,9 @@ if __name__ == "__main__":
     #     action_mode="pos"
     # )
     # q0 = jnp.array([
-    #     0.0, 0.0, 0.0,
+    #     0.0, 0.79, 0.0,
     #     0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-    #     0.0, 0.0, 0.0, 0.0
+    #     0.25, 1.0, 0.25, 1.0
     # ])
     # model_config = Model_Config(
     #     xml_path="./models/cube/scene.xml",
@@ -749,15 +750,41 @@ if __name__ == "__main__":
     parallel_sim = ParallelSim(model_config, sim_config)
 
     # integration steps
-    N = 300
+    N = 600
     dt = float(parallel_sim.mjx_model.opt.timestep)
+
+    #  =================== 3D SRB trajectory references ===================
+
+    # q_srb_ref = jnp.zeros((N, 3))
+    # v_srb_ref = jnp.zeros((N, 3))
+    # a_srb_ref = jnp.zeros((N, 3))
+    # sin_t = lambda t: jnp.sin(2 * jnp.pi * 0.5 * t)  # small oscillation at 0.5 Hz
+    # cos_t = lambda t: jnp.cos(2 * jnp.pi * 0.5 * t)
+    # q_srb_ref = q_srb_ref.at[:, 0].set(0.25 * sin_t(jnp.arange(N) * dt) * 0.0)  # x oscillation
+    # q_srb_ref = q_srb_ref.at[:, 1].set(0.25 * cos_t(jnp.arange(N) * dt) * 0.0 + 1.0)  # z oscillation
+    # q_srb_ref = q_srb_ref.at[:, 2].set(jnp.pi/2.0 * cos_t(jnp.arange(N) * dt))  # theta oscillation
     
-    # build dummy SRB reference (3D: q=7, v=6, a=6)
+    #  =================== 3D SRB trajectory references ===================
+
     q_srb_ref = jnp.zeros((N, 7))
-    q_srb_ref = q_srb_ref.at[:, 2].set(0.79)   # hold z height
-    q_srb_ref = q_srb_ref.at[:, 3].set(1.0)    # identity quat qw=1
     v_srb_ref = jnp.zeros((N, 6))
     a_srb_ref = jnp.zeros((N, 6))
+
+    sin_t = lambda t: jnp.sin(2 * jnp.pi * 0.5 * t)  # small oscillation at 0.5 Hz
+    cos_t = lambda t: jnp.cos(2 * jnp.pi * 0.5 * t)
+    # q_srb_ref = q_srb_ref.at[:, 0].set(0.25 * sin_t(jnp.arange(N) * dt))  # x oscillation
+    # q_srb_ref = q_srb_ref.at[:, 1].set(0.25 * cos_t(jnp.arange(N) * dt))  # y oscillation
+    q_srb_ref = q_srb_ref.at[:, 2].set(0.25 * cos_t(jnp.arange(N) * dt)*0.0 + 1.0)  # z oscillation
+
+    theta = (jnp.pi/3.0) * cos_t(jnp.arange(N) * dt)  # oscillation in pitch (N,)
+    cos_theta = jnp.cos(theta / 2.0)  # (N,)
+    sin_theta = jnp.sin(theta / 2.0)  # (N,)
+    cos_idx = 3  # w component of quaternion
+    sin_idx = 5  # x component of quaternion (small oscillation in orientation)
+    q_srb_ref = q_srb_ref.at[:, cos_idx].set(cos_theta)  # quaternion w
+    q_srb_ref = q_srb_ref.at[:, sin_idx].set(sin_theta)  # quaternion x (small oscillation in orientation)
+
+    #  ====================================================================
 
     # initial velocity conditions
     v0 = jnp.zeros((parallel_sim.nv,))
@@ -769,8 +796,8 @@ if __name__ == "__main__":
     key = jax.random.PRNGKey(int(time.time()))
     key, subkey = jax.random.split(key)
     # U_B = jax.random.uniform(subkey, shape=(B, nu), minval=-1.0, maxval=1.0)   # (B, nu)
-    # U_B = jnp.zeros((B, nu))  # zero controls
-    U_B = jnp.broadcast_to(q_joints, (B, nu))  # hold joints at initial position
+    U_B = jnp.zeros((B, nu))  # zero controls
+    # U_B = jnp.broadcast_to(q_joints, (B, nu))  # hold joints at initial position
     U = jnp.broadcast_to(U_B[:, None, :], (B, N, nu))
 
     # test 1: no wrench — fastest path
