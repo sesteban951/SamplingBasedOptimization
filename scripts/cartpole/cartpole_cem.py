@@ -172,9 +172,6 @@ if __name__ == "__main__":
         gpu_info = jax.devices("gpu")[0]
         print(f"GPU device: {gpu_info}")
 
-    # fix the random seed
-    np.random.seed(0)
-
     experiment_name = "cartpole/cartpole_cem/"
 
     # model config
@@ -195,6 +192,7 @@ if __name__ == "__main__":
 
     # cem config
     s = int(time.time())
+    # s = 42
     cem_rng = jax.random.PRNGKey(s)
     cem_config = CrossEntropyMethod_Config(
         rng=cem_rng,
