@@ -17,6 +17,7 @@ import jax.numpy as jnp
 from utils.algorithms.cem import *
 from utils.algorithms.schedule import *
 from utils.simulation.simulation import *
+from utils.simulation.dynamics import *
 from utils.spline import *
 from utils.interpolation import interp
 
@@ -42,7 +43,37 @@ t_SRB = np.loadtxt(srb_dir + "time.csv", delimiter=",")
 q_SRB = np.loadtxt(srb_dir + "q_opt.csv", delimiter=",")
 v_SRB = np.loadtxt(srb_dir + "v_opt.csv", delimiter=",")
 a_SRB = np.loadtxt(srb_dir + "a_opt.csv", delimiter=",")
-tau_SRB = np.loadtxt(srb_dir + "tau_opt.csv", delimiter=",")
+
+
+# dt_SRB = t_SRB[1] - t_SRB[0]
+# # Common zero velocity/acceleration vectors
+# v_SRB_zero = np.zeros_like(v_SRB[0])
+# a_SRB_zero = np.zeros_like(a_SRB[0])
+
+# # Prepend initial state (hold initial pose)
+# T_pre = 0.1
+# t_SRB_pre = np.arange(0.0, T_pre, dt_SRB)
+
+# q_SRB_pre = np.tile(q_SRB[0], (len(t_SRB_pre), 1))
+# v_SRB_pre = np.tile(v_SRB_zero, (len(t_SRB_pre), 1))
+# a_SRB_pre = np.tile(a_SRB_zero, (len(t_SRB_pre), 1))
+
+# # Shift main time array so it starts after the pre segment
+# t_SRB_main = t_SRB + t_SRB_pre[-1] + dt_SRB
+
+# # Append final state (hold final pose)
+# T_post = 0.1
+# t_SRB_post = np.arange(0.0, T_post, dt_SRB) + t_SRB_main[-1] + dt_SRB
+
+# q_SRB_post = np.tile(q_SRB[-1], (len(t_SRB_post), 1))
+# v_SRB_post = np.tile(v_SRB_zero, (len(t_SRB_post), 1))
+# a_SRB_post = np.tile(a_SRB_zero, (len(t_SRB_post), 1))
+
+# # Concatenate pre, main, and post segments
+# t_SRB = np.concatenate([t_SRB_pre, t_SRB_main, t_SRB_post], axis=0)
+# q_SRB = np.concatenate([q_SRB_pre, q_SRB, q_SRB_post], axis=0)
+# v_SRB = np.concatenate([v_SRB_pre, v_SRB, v_SRB_post], axis=0)
+# a_SRB = np.concatenate([a_SRB_pre, a_SRB, a_SRB_post], axis=0)
 
 
 #############################################################
@@ -68,10 +99,11 @@ class G1_Walk_Mirrored_CEM(CrossEntropyMethod):
 
     def __init__(self, model_config: Model_Config,
                        sim_config:   ParallelSim_Config,
-                       cem_config:   CrossEntropyMethod_Config):
+                       cem_config:   CrossEntropyMethod_Config,
+                       log_config:   Logger_Config = None):
         
         # initialize the parent class
-        super().__init__(model_config, sim_config, cem_config)
+        super().__init__(model_config, sim_config, cem_config, log_config)
 
         self.sim_config = sim_config
 
@@ -80,6 +112,10 @@ class G1_Walk_Mirrored_CEM(CrossEntropyMethod):
 
         # make the reference trajectory
         self._make_reference_trajectory()
+
+        # initialize a dynamics object
+        dyn_config = Dynamics_Config(model_config.xml_path, sim_config.batch_size)
+        self.dyn = Dynamics(dyn_config)
 
         # Running cost weights (per timestep)
         self.w_px      = 5.0     # horizontal position tracking
@@ -99,8 +135,8 @@ class G1_Walk_Mirrored_CEM(CrossEntropyMethod):
         self.w_v_hip   = 0.01     # hip joint velocity tracking
         self.w_v_knee  = 0.01     # knee joint velocity tracking
         self.w_v_ankle = 0.01     # ankle joint velocity tracking
-        self.w_v_shoulder = 0.01  # shoulder joint velocity tracking
-        self.w_v_elbow = 0.01     # elbow joint velocity tracking
+        self.w_v_shoulder = 1.0  # shoulder joint velocity tracking
+        self.w_v_elbow = 1.0     # elbow joint velocity tracking
         self.w_control = 1e-6  # control effort
         
         self.w_force_assist = 0.1    # external wrench penalty
@@ -324,12 +360,18 @@ class G1_Walk_Mirrored_CEM(CrossEntropyMethod):
 
             N = tau.shape[1]
 
+            # compute the center of mass state
+            p_com, v_com = self.dyn.com_state_in_world_trajectory(
+                q[:, :N+1, :], v[:, :N+1, :]
+            )  # (B, N+1, 3) [px_com, py_com, pz_com], (B, N+1, 3) [vx_com, vy_com, vz_com]
+
+            px = p_com[:, :, 0]  # (B, N+1)
+            pz = p_com[:, :, 2]  # (B, N+1) 
+            vx = v_com[:, :, 0]  # (B, N+1)
+            vz = v_com[:, :, 2]  # (B, N+1)
+
             # base state: full trajectory -> (B, N+1, *)
-            px       = q[:, :N+1, 0]   # (B, N+1)
-            pz       = q[:, :N+1, 1]   # (B, N+1)
             theta    = q[:, :N+1, 2]   # (B, N+1)
-            vx       = v[:, :N+1, 0]   # (B, N+1)
-            vz       = v[:, :N+1, 1]   # (B, N+1)
             thetadot = v[:, :N+1, 2]   # (B, N+1)
 
             p_hip      = q[:, :N+1, 3]   # (B, N+1)
@@ -510,6 +552,19 @@ class G1_Walk_Mirrored_CEM(CrossEntropyMethod):
                   f"‖Σ‖₂: {cov_norm:.4f} | "
                   f"α: {a:.3f}")
             
+            # tensorboard logging
+            if self.logger is not None:
+                # build metrics dict
+                metrics = {
+                    "J_elite_avg":  float(J_elite_avg),
+                    "J_elite_best": float(J_elite_best),
+                    "J_best":       float(J_opt),
+                    "cov_norm":     float(cov_norm),
+                }
+
+                # log
+                self.logger.log(metrics, step=itr)
+            
         return q_opt, v_opt, tau_opt
 
 #############################################################
@@ -527,6 +582,8 @@ if __name__ == "__main__":
     if jax.default_backend() == "gpu":
         gpu_info = jax.devices("gpu")[0]
         print(f"GPU device: {gpu_info}")
+
+    experiment_name = "g1/g1_planar_jump_mirror_cem/"
 
     # model config
     model_config = Model_Config(
@@ -554,28 +611,31 @@ if __name__ == "__main__":
         kd_ang=2,
     )
 
+    # logging config
+    log_config = Logger_Config(
+        experiment_name=experiment_name,
+        log_freq=2,
+    )
+
     # cem config
-    cem_rng = jax.random.PRNGKey(42)
+    # s = int(time.time())
+    s = 42
+    cem_rng = jax.random.PRNGKey(s)
     cem_config = CrossEntropyMethod_Config(
         rng=cem_rng,
         T=t_SRB[-1],  
-        iterations=30,
+        iterations=50,
         N_elite=512,
-        # N_knots = 20,
-        # spline_type="ZOH",
-        # N_knots=20,
-        # spline_type="Linear",
-        N_knots=6,
+        N_knots=10,
         spline_type="Bezier",
-        # N_knots=10,
-        # spline_type="Cubic",
     )
 
     # create the CEM optimizer
     cem_optimizer = G1_Walk_Mirrored_CEM(
         model_config=model_config,
         sim_config=sim_config,
-        cem_config=cem_config
+        cem_config=cem_config,
+        log_config=log_config
     )
 
     # optimize from an initial state
@@ -595,7 +655,7 @@ if __name__ == "__main__":
     tau_opt = np.array(tau_opt)
 
     # save as csv files in the results folder
-    save_dir = "./results/g1/g1_planar_jump_mirror_cem/"
+    save_dir = "./results/" + experiment_name
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
         print(f"Created directory: {save_dir}")
