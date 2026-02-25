@@ -17,5 +17,8 @@ dependencies:
       - "mujoco-mjx>=3.5.0"
       - "warp-lang>=1.11.1"
       - "cma"
+      - "setuptools<72"
+      - "tensorboard"
+      - "tensorboardX"
 variables:
   MPLBACKEND: TkAgg    # for matplotlib in a conda env
