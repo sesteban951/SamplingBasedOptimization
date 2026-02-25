@@ -145,6 +145,7 @@ class Dynamics:
         # dynamics quantities
         self.inertia_world = jax.jit(self._inertia_world)
         self.com_state_in_world = jax.jit(self._com_state_in_world)
+        self.com_state_in_world_trajectory = jax.jit(self._com_state_in_world_trajectory)
         self.centroidal_ang_mom_in_world = jax.jit(self._centroidal_ang_mom_in_world)
 
         # rotations / SO(3) maps (batched)
@@ -222,6 +223,25 @@ class Dynamics:
         p_com, v_com = jax.vmap(single)(data)
 
         return p_com, v_com
+    
+    def _com_state_in_world_trajectory(self, q_traj, v_traj):
+        """
+        Computes COM position and velocity over a full trajectory.
+
+        Args:
+            q_traj: (B, T, nq)
+            v_traj: (B, T, nv)
+        Returns:
+            p_com: (B, T, 3)
+            v_com: (B, T, 3)
+        """
+        # transpose to (T, B, nq) so we can vmap over time
+        q_t = jnp.swapaxes(q_traj, 0, 1)  # (T, B, nq)
+        v_t = jnp.swapaxes(v_traj, 0, 1)  # (T, B, nv)
+
+        p_com_t, v_com_t = jax.vmap(self._com_state_in_world)(q_t, v_t)  # (T, B, 3) each
+
+        return jnp.swapaxes(p_com_t, 0, 1), jnp.swapaxes(v_com_t, 0, 1)  # (B, T, 3)
     
 
     def _centroidal_ang_mom_in_world_single_env(self, model, data):
