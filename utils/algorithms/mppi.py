@@ -19,6 +19,7 @@ import jax.numpy as jnp
 from utils.simulation.simulation import *
 from utils.algorithms.schedule import *
 from utils.spline import zoh, linear, cubic, bezier, fourier
+from utils.logging.logger import Logger, Logger_Config
 
 
 #############################################################
@@ -56,10 +57,17 @@ class MPPI(ABC):
 
     def __init__(self, model_config: Model_Config,
                        sim_config: ParallelSim_Config,
-                       mppi_config: MPPI_Config):
+                       mppi_config: MPPI_Config,
+                       log_config: Logger_Config = None):
         
         # create the parallel sim object 
         self.sim = ParallelSim(model_config, sim_config)
+
+        # create the logger object
+        if log_config is not None:
+            self.logger = Logger(log_config)
+        else:
+            self.logger = None
         
         # store configs
         self.mppi_config = mppi_config
@@ -317,56 +325,77 @@ class MPPI(ABC):
         # for printing iterations
         itr_width = len(str(self.mppi_config.iterations))
 
-        # perform MPPI iterations
-        for itr in range(self.mppi_config.iterations):
+        try:
+            # perform MPPI iterations
+            for itr in range(self.mppi_config.iterations):
 
-            # set the iterations
-            self.itr = itr
+                # set the iterations
+                self.itr = itr
 
-            # evaluate the spline at simulation times
-            y_val = self.spline.evaluate(self.t_sim[:-1])  # shape (B, N, nu)
+                # evaluate the spline at simulation times
+                y_val = self.spline.evaluate(self.t_sim[:-1])  # shape (B, N, nu)
 
-            # do forward rollout
-            q_log, v_log, tau_log = self.sim.rollout(q0, v0, y_val)
-            q_log.block_until_ready()
+                # do forward rollout
+                q_log, v_log, tau_log = self.sim.rollout(q0, v0, y_val)
+                q_log.block_until_ready()
 
-            # compute costs
-            J = self.cost(q_log, v_log, tau_log)  # shape (B,)
-            J.block_until_ready()
+                # compute costs
+                J = self.cost(q_log, v_log, tau_log)  # shape (B,)
+                J.block_until_ready()
 
-            # update the distribution using softmax weights over all samples
-            weights_normalized = self._update_distribution(self.spline.Y, J)
+                # update the distribution using softmax weights over all samples
+                weights_normalized = self._update_distribution(self.spline.Y, J)
 
-            # sample new knot points from the updated distribution
-            Y_samples = self._sample_knot_points()  # shape (B, N_knots, nu)
-            self.spline.update_knots(Y_samples)
+                # sample new knot points from the updated distribution
+                Y_samples = self._sample_knot_points()  # shape (B, N_knots, nu)
+                self.spline.update_knots(Y_samples)
 
-            # compute the effective sample size (ESS) to monitor exploration vs exploitation
-            ESS = 1.0 / jnp.sum(weights_normalized ** 2)
-            ESS_percent = (ESS / self.sim.B) * 100.0
+                # compute the effective sample size (ESS) to monitor exploration vs exploitation
+                ESS = 1.0 / jnp.sum(weights_normalized ** 2)
+                ESS_percent = (ESS / self.sim.B) * 100.0
 
-            # compute entropy of the distribution (up to a constant) to monitor convergence
-            entropy = -jnp.sum(weights_normalized * jnp.log(weights_normalized + 1e-9))
+                # compute entropy of the distribution (up to a constant) to monitor convergence
+                entropy = -jnp.sum(weights_normalized * jnp.log(weights_normalized + 1e-9))
 
-            # record the best solution found so far
-            J_min = jnp.min(J)
-            J_min_val = float(J_min)
-            J_opt_val = float(J_opt)
-            if J_min_val < J_opt_val:
-                J_opt = J_min_val  # store as Python float for printing
-                idx_opt = int(jnp.argmin(J))
-                q_opt = q_log[idx_opt, :, :]
-                v_opt = v_log[idx_opt, :, :]
-                tau_opt = tau_log[idx_opt, :, :]
+                # record the best solution found so far
+                J_min = jnp.min(J)
+                J_min_val = float(J_min)
+                J_opt_val = float(J_opt)
+                if J_min_val < J_opt_val:
+                    J_opt = J_min_val  # store as Python float for printing
+                    idx_opt = int(jnp.argmin(J))
+                    q_opt = q_log[idx_opt, :, :]
+                    v_opt = v_log[idx_opt, :, :]
+                    tau_opt = tau_log[idx_opt, :, :]
 
-            # print iteration info
-            sigma_str = f" | σ: {self.sigma:.4f}" if self.mppi_config.use_cov_contraction else ""
-            print(f"Iteration {itr+1:0{itr_width}d}/{self.mppi_config.iterations} | "
-                f"J_mean: {jnp.mean(J):.2f} | "
-                f"J_best: {J_opt:.2f} | "
-                f"ESS: {ESS_percent:.1f}% | "
-                f"Entropy: {entropy:.2f}"
-                f"{sigma_str}"
-            )
+                # print iteration info
+                sigma_str = f" | σ: {self.sigma:.4f}" if self.mppi_config.use_cov_contraction else ""
+                print(f"Iteration {itr+1:0{itr_width}d}/{self.mppi_config.iterations} | "
+                    f"J_mean: {jnp.mean(J):.2f} | "
+                    f"J_best: {J_opt:.2f} | "
+                    f"ESS: {ESS_percent:.1f}% | "
+                    f"Entropy: {entropy:.2f}"
+                    f"{sigma_str}"
+                )
+
+                # tensorboard logging
+                if self.logger is not None:
+                    # build metrics dict
+                    metrics = {
+                        "J_mean":  float(jnp.mean(J)),
+                        "J_best":  float(J_opt),
+                        "ESS":     float(ESS_percent),
+                        "entropy": float(entropy),
+                    }
+                    if self.mppi_config.use_cov_contraction:
+                        metrics["sigma"] = float(self.sigma)
+                    
+                    # log
+                    self.logger.log(metrics, step=itr)
+
+        finally:
+            if self.logger is not None:
+                self.logger.close()
+
 
         return q_opt, v_opt, tau_opt

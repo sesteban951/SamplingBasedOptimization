@@ -27,9 +27,11 @@ class Cartpole_MPPI(MPPI):
 
     def __init__(self, model_config: Model_Config,
                        sim_config:   ParallelSim_Config,
-                       mppi_config:  MPPI_Config):
-        
-        super().__init__(model_config, sim_config, mppi_config)
+                       mppi_config:  MPPI_Config,
+                       log_config:   Logger_Config = None):
+
+        super().__init__(model_config, sim_config, mppi_config, log_config)
+
 
     def cost(self, q, v, tau):
         """
@@ -142,6 +144,8 @@ if __name__ == "__main__":
     # fix the random seed
     np.random.seed(0)
 
+    experiment_name = "cartpole/cartpole_mppi"
+
     # model config
     model_config = Model_Config(
         xml_path="./models/cartpole/cartpole.xml",
@@ -173,11 +177,18 @@ if __name__ == "__main__":
         sigma_min=0.005
     )
 
+    # logging config
+    log_config = Logger_Config(
+        experiment_name = experiment_name,
+        log_freq        = 2,
+    )
+
     # create the MPPI optimizer
     mppi_optimizer = Cartpole_MPPI(
         model_config=model_config,
         sim_config=sim_config,
-        mppi_config=mppi_config
+        mppi_config=mppi_config,
+        log_config=log_config
     )
 
     # optimize from an initial state
@@ -197,7 +208,7 @@ if __name__ == "__main__":
     tau_opt = np.array(tau_opt)
 
     # save as csv files in the results folder
-    save_dir = "./results/cartpole/cartpole_mppi/"
+    save_dir = "./results/" + experiment_name + "/"
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
         print(f"Created directory: {save_dir}")

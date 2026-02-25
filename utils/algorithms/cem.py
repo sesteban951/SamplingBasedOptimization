@@ -18,6 +18,7 @@ import jax.numpy as jnp
 # custom imports
 from utils.simulation.simulation import *
 from utils.spline import zoh, linear, cubic, bezier, fourier
+from utils.logging.logger import Logger, Logger_Config
 
 
 #############################################################
@@ -56,10 +57,17 @@ class CrossEntropyMethod(ABC):
 
     def __init__(self, model_config: Model_Config,
                        sim_config: ParallelSim_Config,
-                       cem_config: CrossEntropyMethod_Config):
+                       cem_config: CrossEntropyMethod_Config,
+                       log_config: Logger_Config = None):
         
         # create the parallel sim object 
         self.sim = ParallelSim(model_config, sim_config)
+
+        # create the logger object
+        if log_config is not None:
+            self.logger = Logger(log_config)
+        else:
+            self.logger = None
         
         # store configs
         self.cem_config = cem_config
@@ -324,64 +332,82 @@ class CrossEntropyMethod(ABC):
         # for printing iterations
         itr_width = len(str(self.cem_config.iterations))
 
-        # perform CEM iterations
-        for itr in range(self.cem_config.iterations):
+        try:
+            # perform CEM iterations
+            for itr in range(self.cem_config.iterations):
 
-            # set the iterations
-            self.itr = itr
+                # set the iterations
+                self.itr = itr
 
-            # evaluate the spline at simulation times
-            y_val = self.spline.evaluate(self.t_sim[:-1])  # shape (B, N, nu)
+                # evaluate the spline at simulation times
+                y_val = self.spline.evaluate(self.t_sim[:-1])  # shape (B, N, nu)
 
-            # do forward rollout
-            q_log, v_log, tau_log = self.sim.rollout(q0, v0, y_val)
-            q_log.block_until_ready()
+                # do forward rollout
+                q_log, v_log, tau_log = self.sim.rollout(q0, v0, y_val)
+                q_log.block_until_ready()
 
-            # compute costs
-            J = self.cost(q_log, v_log, tau_log)  # shape (B,)
-            J.block_until_ready()
+                # compute costs
+                J = self.cost(q_log, v_log, tau_log)  # shape (B,)
+                J.block_until_ready()
 
-            # select elite samples
-            J_elite_neg, elite_idx = jax.lax.top_k(-J, self.cem_config.N_elite)
-            J_elite = -J_elite_neg  # shape (N_elite,)
+                # select elite samples
+                J_elite_neg, elite_idx = jax.lax.top_k(-J, self.cem_config.N_elite)
+                J_elite = -J_elite_neg  # shape (N_elite,)
 
-            # select the elite splines
-            Y_elite = jnp.take(self.spline.Y, elite_idx, axis=0)  # shape (N_elite, N_knots, nu)
+                # select the elite splines
+                Y_elite = jnp.take(self.spline.Y, elite_idx, axis=0)  # shape (N_elite, N_knots, nu)
 
-            # update the distribution
-            self._update_distribution(Y_elite)
+                # update the distribution
+                self._update_distribution(Y_elite)
 
-            # sample new knot points from the updated distribution
-            Y_samples = self._sample_knot_points()  # shape (B, N_knots, nu)
-            self.spline.update_knots(Y_samples)
+                # sample new knot points from the updated distribution
+                Y_samples = self._sample_knot_points()  # shape (B, N_knots, nu)
+                self.spline.update_knots(Y_samples)
 
-            # largest singular value
-            cov_norm = jnp.linalg.norm(self.Sigma, ord=2)
+                # largest singular value
+                cov_norm = jnp.linalg.norm(self.Sigma, ord=2)
 
-            # record the best solution found so far
-            J_min = J_elite.min()
-            if J_min < J_opt:
+                # record the best solution found so far
+                J_min = J_elite.min()
+                if J_min < J_opt:
 
-                # set best
-                J_opt = J_min
-                idx_in_elite = jnp.argmin(J_elite)  # Find best within elites
-                idx_opt = elite_idx[idx_in_elite]   # Map to actual batch index
+                    # set best
+                    J_opt = J_min
+                    idx_in_elite = jnp.argmin(J_elite)  # Find best within elites
+                    idx_opt = elite_idx[idx_in_elite]   # Map to actual batch index
 
-                # set optimal
-                q_opt = q_log[idx_opt, :, :]
-                v_opt = v_log[idx_opt, :, :]
-                tau_opt = tau_log[idx_opt, :, :]
+                    # set optimal
+                    q_opt = q_log[idx_opt, :, :]
+                    v_opt = v_log[idx_opt, :, :]
+                    tau_opt = tau_log[idx_opt, :, :]
 
-            # compute the average elite cost for monitoring
-            J_elite_avg = jnp.mean(J_elite)
-            J_elite_best = J_elite.min()
+                # compute the average elite cost for monitoring
+                J_elite_avg = jnp.mean(J_elite)
+                J_elite_best = J_elite.min()
 
-            # print iteration info
-            print(f"Iteration {itr+1:0{itr_width}d}/{self.cem_config.iterations} | "
-                  f"J_elite_avg: {J_elite_avg:.2f} | "
-                  f"J_elite_best: {J_elite_best:.2f} | "
-                  f"J_best: {J_opt:.2f} | "
-                  f"‖Σ‖₂: {cov_norm:.4f}")
+                # print iteration info
+                print(f"Iteration {itr+1:0{itr_width}d}/{self.cem_config.iterations} | "
+                    f"J_elite_avg: {J_elite_avg:.2f} | "
+                    f"J_elite_best: {J_elite_best:.2f} | "
+                    f"J_best: {J_opt:.2f} | "
+                    f"‖Σ‖₂: {cov_norm:.4f}")
+
+                # tensorboard logging
+                if self.logger is not None:
+                    # build metrics dict
+                    metrics = {
+                        "J_elite_avg":  float(J_elite_avg),
+                        "J_elite_best": float(J_elite_best),
+                        "J_best":       float(J_opt),
+                        "cov_norm":     float(cov_norm),
+                    }
+
+                    # log
+                    self.logger.log(metrics, step=itr)
+
+        finally:
+            if self.logger is not None:
+                self.logger.close()
+
             
         return q_opt, v_opt, tau_opt
-    

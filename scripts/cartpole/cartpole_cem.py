@@ -28,10 +28,10 @@ class Cartpole_CEM(CrossEntropyMethod):
 
     def __init__(self, model_config: Model_Config,
                        sim_config:   ParallelSim_Config,
-                       cem_config:   CrossEntropyMethod_Config):
+                       cem_config:   CrossEntropyMethod_Config,
+                       log_config:   Logger_Config = None):
         
-        # initialize the parent class
-        super().__init__(model_config, sim_config, cem_config)
+        super().__init__(model_config, sim_config, cem_config, log_config)
 
 
     # cost function for the trajecotry optimization
@@ -175,6 +175,8 @@ if __name__ == "__main__":
     # fix the random seed
     np.random.seed(0)
 
+    experiment_name = "cartpole/cartpole_cem/"
+
     # model config
     model_config = Model_Config(
         xml_path="./models/cartpole/cartpole.xml",
@@ -209,11 +211,18 @@ if __name__ == "__main__":
         # spline_type="Bezier",
     )
 
+    # logging config
+    log_config = Logger_Config(
+        experiment_name = experiment_name,
+        log_freq        = 2,
+    )
+
     # create the CEM optimizer
     cem_optimizer = Cartpole_CEM(
         model_config=model_config,
         sim_config=sim_config,
-        cem_config=cem_config
+        cem_config=cem_config,
+        log_config=log_config
     )
 
     # optimize from an initial state
@@ -233,7 +242,7 @@ if __name__ == "__main__":
     tau_opt = np.array(tau_opt)
 
     # save as csv files in the results folder
-    save_dir = "./results/cartpole/cartpole_cem/"
+    save_dir = "./results/" + experiment_name
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
         print(f"Created directory: {save_dir}")

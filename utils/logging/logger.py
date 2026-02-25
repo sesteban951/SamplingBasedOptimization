@@ -45,12 +45,14 @@ class Logger:
         self.step = 0
 
         # build the full log path
-        log_path = self._initialize_log_directory(config.experiment_name)
+        self.log_path = self._initialize_log_directory(config.experiment_name)
 
         # tensorboard writer
-        self.writer = SummaryWriter(log_dir=log_path)
+        self.writer = SummaryWriter(log_dir=self.log_path)
 
-        print(f"Logger initialized. Logging to: [{log_path}]")
+        print(f"Logger initialized. Logging to: [{self.log_path}]")
+        print(f"View progress: [tensorboard --logdir=./logs]")
+
 
     ################################ CORE ################################
 
@@ -75,6 +77,8 @@ class Logger:
         self.writer.flush()
         self.writer.close()
         print("Logger closed.")
+        print(f"View progress: [tensorboard --logdir=./logs]")
+
 
     ################################ HELPERS ################################
 
@@ -104,7 +108,7 @@ if __name__ == "__main__":
 
     # config
     log_config = Logger_Config(
-        experiment_name = "g1/g1_jump_cem",
+        experiment_name = "g1/g1_jump_cem/",
         log_freq        = 2,
     )
 
