@@ -516,6 +516,15 @@ print(f"  v_com = {X_sol[N, 7:10]}")
 # ----------------------------------------------------------
 time = np.linspace(0, T, N+1)
 
+# feet trajectory for each control step k:
+# columns = [pL_x, pL_y, pR_x, pR_y]
+# stance: fixed at p0_L/p0_R, flight: undefined (NaN), landing: fixed at optimized landing feet
+feet = np.full((N, 4), np.nan)
+feet[:stance_end, 0:2] = np.array([float(p0_L[0]), float(p0_L[1])])
+feet[:stance_end, 2:4] = np.array([float(p0_R[0]), float(p0_R[1])])
+feet[flight_end:, 0:2] = np.array([float(pL_land[0]), float(pL_land[1])])
+feet[flight_end:, 2:4] = np.array([float(pR_land[0]), float(pR_land[1])])
+
 save_dir = "./results/srb/srb_jump/"
 os.makedirs(save_dir, exist_ok=True)
 
@@ -524,5 +533,6 @@ np.savetxt(save_dir + "q_opt.csv",   q_opt, delimiter=",")
 np.savetxt(save_dir + "v_opt.csv",   v_opt, delimiter=",")
 np.savetxt(save_dir + "a_opt.csv",   a_opt, delimiter=",")
 np.savetxt(save_dir + "tau_opt.csv", U,     delimiter=",")
+np.savetxt(save_dir + "feet.csv",    feet,  delimiter=",")
 
 print(f"\nSaved results to {save_dir}")

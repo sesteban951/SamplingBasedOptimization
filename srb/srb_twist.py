@@ -184,8 +184,8 @@ p0_L = ca.DM(p0_L)
 p0_R = ca.DM(p0_R)
 
 # desired goal state - jump forward, land upright with 180 deg CCW yaw twist
-px_goal = 1.0
-yaw_goal = np.pi
+px_goal = 0.1
+yaw_goal = 1.2*np.pi
 quat_goal = np.array([
     np.cos(yaw_goal / 2),  # qw
     0.0,                   # qx
@@ -272,7 +272,7 @@ for k in range(N):
 
 # add z_com constraints
 pz_min = 0.40
-pz_max = 1.0
+pz_max = 2.0
 for k in range(N+1):
     opti.subject_to(X[2, k] >= pz_min)  # enforce constant height
     opti.subject_to(X[2, k] <= pz_max)  # enforce constant height
@@ -283,9 +283,9 @@ for k in range(N+1):
 
 # Contact parameters
 mu = 1.0              # friction coefficient
-M_ankle_x_max = 50.0  # [N*m]
-M_ankle_y_max = 50.0  # [N*m]
-M_ankle_z_max = 10.0  # [N*m]
+M_ankle_x_max = 100.0  # [N*m]
+M_ankle_y_max = 100.0  # [N*m]
+M_ankle_z_max = 100.0  # [N*m]
 F_leg_max = 500.0     # [N] max force per leg
 
 # Get friction cone constraint matrices
@@ -405,8 +405,17 @@ for k in range(N + 1):
     p_com_guess = (1 - alpha) * x0[:3] + alpha * x_goal[:3]
     opti.set_initial(X[0:3, k], p_com_guess)
 
-    # quaternion, TODO: SLERP for better guess when orientations differ significantly
-    opti.set_initial(X[3:7, k], [1, 0, 0, 0])
+    # quaternion initial guess aligned with phase-aware yaw objective
+    if k < stance_end:
+        yaw_k = 0.0
+    elif k < flight_end:
+        alpha_f = (k - stance_end + 1) / N_flight
+        yaw_k = alpha_f * yaw_goal
+    else:
+        yaw_k = yaw_goal
+
+    quat_guess = [np.cos(yaw_k / 2), 0.0, 0.0, np.sin(yaw_k / 2)]
+    opti.set_initial(X[3:7, k], quat_guess)
 
 # # landing foot positions
 opti.set_initial(p_L_land, p_L_goal)
@@ -520,7 +529,16 @@ print(f"  v_com = {X_sol[N, 7:10]}")
 # ----------------------------------------------------------
 time = np.linspace(0, T, N+1)
 
-save_dir = "./results/srb_twist/"
+# feet trajectory for each control step k:
+# columns = [pL_x, pL_y, pR_x, pR_y]
+# stance: fixed at p0_L/p0_R, flight: undefined (NaN), landing: fixed at optimized landing feet
+feet = np.full((N, 4), np.nan)
+feet[:stance_end, 0:2] = np.array([float(p0_L[0]), float(p0_L[1])])
+feet[:stance_end, 2:4] = np.array([float(p0_R[0]), float(p0_R[1])])
+feet[flight_end:, 0:2] = np.array([float(pL_land[0]), float(pL_land[1])])
+feet[flight_end:, 2:4] = np.array([float(pR_land[0]), float(pR_land[1])])
+
+save_dir = "./results/srb/srb_twist/"
 os.makedirs(save_dir, exist_ok=True)
 
 np.savetxt(save_dir + "time.csv",    time,  delimiter=",")
@@ -528,5 +546,6 @@ np.savetxt(save_dir + "q_opt.csv",   q_opt, delimiter=",")
 np.savetxt(save_dir + "v_opt.csv",   v_opt, delimiter=",")
 np.savetxt(save_dir + "a_opt.csv",   a_opt, delimiter=",")
 np.savetxt(save_dir + "tau_opt.csv", U,     delimiter=",")
+np.savetxt(save_dir + "feet.csv",    feet,  delimiter=",")
 
 print(f"\nSaved results to {save_dir}")
