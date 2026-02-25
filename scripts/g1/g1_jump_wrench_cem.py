@@ -95,14 +95,19 @@ class G1_SRB_CEM(CrossEntropyMethod):
         self.w_omega_base = 0.1
         self.w_q_joints = 1.0
         self.w_v_joints = 0.1
-        self.w_tau = 0.0001
+        self.w_tau = 1e-6
+        
+        self.w_force_assist = 0.1    # external wrench penalty
+        self.w_moment_assist = 0.1   # external moment penalty
 
-        self.wf_p_base = 20.0 * self.w_p_base
-        self.wf_quat = 20.0 * self.w_quat
-        self.wf_v_base = 20.0 * self.w_v_base
-        self.wf_omega_base = 20.0 * self.w_omega_base
-        self.wf_q_joints = 20.0 * self.w_q_joints
-        self.wf_v_joints = 20.0 * self.w_v_joints
+        terminal_scale = 20.0
+
+        self.wf_p_base = terminal_scale * self.w_p_base
+        self.wf_quat = terminal_scale * self.w_quat
+        self.wf_v_base = terminal_scale * self.w_v_base
+        self.wf_omega_base = terminal_scale * self.w_omega_base
+        self.wf_q_joints = terminal_scale * self.w_q_joints
+        self.wf_v_joints = terminal_scale * self.w_v_joints
 
 
     def _make_reference_trajectory(self):
@@ -186,7 +191,7 @@ class G1_SRB_CEM(CrossEntropyMethod):
         self.v_joints_standing = jnp.broadcast_to(v_joints_standing, (B, v_joints_standing.shape[0]))
 
 
-    def cost(self, q, v, tau):
+    def cost(self, q, v, tau, w):
         """
         Cost function to evaluate the rollouts.
 
@@ -194,6 +199,7 @@ class G1_SRB_CEM(CrossEntropyMethod):
             q: jnp.array,   shape (B, N+1, nq) - generalized positions trajectory.
             v: jnp.array,   shape (B, N+1, nv) - generalized velocities trajectory.
             tau: jnp.array, shape (B, N, nu) - control inputs trajectory.
+            w: jnp.array,   shape (B, N, 6) - external wrench trajectory.
         Returns:
             costs: jnp.array, shape (B,) - cost for each rollout.
         """
@@ -230,6 +236,8 @@ class G1_SRB_CEM(CrossEntropyMethod):
         se_q_joints   = jnp.sum(jnp.sum(e_q_joints  [:, :-1, :]**2, axis=-1), axis=-1)
         se_v_joints   = jnp.sum(jnp.sum(e_v_joints  [:, :-1, :]**2, axis=-1), axis=-1)
         se_tau = jnp.sum(jnp.sum(tau**2, axis=-1), axis=-1)
+        se_force_assist  = jnp.sum(jnp.sum(w[:, :, :3]**2, axis=-1), axis=-1)  # (B,)
+        se_moment_assist = jnp.sum(jnp.sum(w[:, :, 3:]**2, axis=-1), axis=-1)  # (B,)
 
         running_cost = (
             self.w_p_base     * se_pos_base   +
@@ -238,7 +246,9 @@ class G1_SRB_CEM(CrossEntropyMethod):
             self.w_omega_base * se_omega_base +
             self.w_q_joints   * se_q_joints   +
             self.w_v_joints   * se_v_joints   +
-            self.w_tau        * se_tau
+            self.w_tau        * se_tau        +
+            self.w_force_assist  * se_force_assist  +
+            self.w_moment_assist * se_moment_assist
         ) * self.sim.dt   # (B,)
 
         # ========================== Terminal cost ==========================
@@ -289,27 +299,22 @@ class G1_SRB_CEM(CrossEntropyMethod):
             # evaluate the spline at simulation times
             y_val = self.spline.evaluate(self.t_sim[:-1])  # shape (B, N, nu)
 
-            # get annealing factor for this iteration
-            a = linear_schedule(itr, self.cem_config.iterations, alpha_max=1.0)
-            # a = exponential_schedule(itr, self.cem_config.iterations, 
-            #                          alpha_max=1.0, lam=20.0)
-
             # pack SRB references for wrench injection -> (N, 7), (N, 6), (N, 6)
             N = y_val.shape[1]
             q_srb_ref = jnp.concatenate([self.p_com_ref[:N], self.quat_ref[:N]],  axis=-1)  # (N, 7)
             v_srb_ref = jnp.concatenate([self.v_com_ref[:N], self.omega_ref[:N]], axis=-1)  # (N, 6)
             a_srb_ref = jnp.concatenate([self.a_com_ref[:N], self.alpha_ref[:N]], axis=-1)  # (N, 6)
-
-            # do forward rollout
-            q_log, v_log, tau_log = self.sim.rollout(q0, v0, y_val,
-                                                     q_srb_ref=q_srb_ref,
-                                                     v_srb_ref=v_srb_ref,
-                                                     a_srb_ref=a_srb_ref,
-                                                     w_scale=a)
+            # a = linear_schedule(itr, self.cem_config.iterations, alpha_max=1.0)
+            a = exponential_schedule(itr, self.cem_config.iterations, alpha_max=1.0, lam=20.0)
+            q_log, v_log, tau_log, w_log = self.sim.rollout(q0, v0, y_val,
+                                                            q_srb_ref=q_srb_ref,
+                                                            v_srb_ref=v_srb_ref,
+                                                            a_srb_ref=a_srb_ref,
+                                                            w_scale=a)
             q_log.block_until_ready()
 
             # compute costs
-            J = self.cost(q_log, v_log, tau_log)  # shape (B,)
+            J = self.cost(q_log, v_log, tau_log, w_log)  # shape (B,)
             J.block_until_ready()
 
             # select elite samples

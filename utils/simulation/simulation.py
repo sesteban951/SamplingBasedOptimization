@@ -313,11 +313,11 @@ class ParallelSim():
             v_srb_ref: jnp.array, shape (N, 3) or (N, 6) SRB velocity reference
             a_srb_ref: jnp.array, shape (N, 3) or (N, 6) SRB acceleration reference
             w_scale:   jnp.float32, wrench scale in [0, 1]
-    
         Returns:
             q_log:   jnp.array, logged positions,  shape (B, N+1, nq)
             v_log:   jnp.array, logged velocities, shape (B, N+1, nv)
             tau_log: jnp.array, logged torques,    shape (B, N, nu)
+            w_log:   jnp.array, logged wrenches,   shape (B, N, nw) where nw = 6 for 3D base, 3 for planar base
         """
         B, N, _ = U.shape
 
@@ -362,22 +362,31 @@ class ParallelSim():
             # step the simulation forward
             data = self.step_fn_batched(data)
 
-            return data, (data.qpos, data.qvel, data.actuator_force) # NOTE: takes torque limits into account
+            # pack wrench into a single vector per step
+            if self.base_type == "free":
+                w_k = jnp.concatenate([F_W, M_B], axis=-1)          # (B, 6)
+            else:  # planar
+                w_k = jnp.concatenate([F_W, M_B[:, None]], axis=-1)  # (B, 3)
+
+            return data, (data.qpos, data.qvel, data.actuator_force, w_k) # NOTE: takes torque limits into account
 
         # forward propagate
-        _, (q_hist, v_hist, tau_hist) = lax.scan(integration_step, data0, scan_inputs, length=N)
+        _, (q_hist, v_hist, tau_hist, w_hist) = lax.scan(integration_step, data0, scan_inputs, length=N)
 
-        # q_hist, v_hist: (N, B, nq/nv) -> (B, N, nq/nv)
-        q_hist = jnp.swapaxes(q_hist, 0, 1)
-        v_hist = jnp.swapaxes(v_hist, 0, 1)
+        # swap axes for easier indexing (N, B, ...) -> (B, N, ...)
+        q_hist   = jnp.swapaxes(q_hist,   0, 1)  # (B, N, nq)
+        v_hist   = jnp.swapaxes(v_hist,   0, 1)  # (B, N, nv)
+        tau_hist = jnp.swapaxes(tau_hist, 0, 1)  # (B, N, nu)
+        w_hist   = jnp.swapaxes(w_hist,   0, 1)  # (B, N, 6) or (B, N, 3)
 
         # prepend initial state so logs are N+1
         q_log   = jnp.concatenate([q0_batch[:, None, :], q_hist], axis=1)
         v_log   = jnp.concatenate([v0_batch[:, None, :], v_hist], axis=1)
-        tau_log = jnp.swapaxes(tau_hist, 0, 1)
+        tau_log = tau_hist
+        w_log   = w_hist
 
-        return q_log, v_log, tau_log
-    
+        return q_log, v_log, tau_log, w_log
+
 
     ####################################### AUXILLARY #######################################
     

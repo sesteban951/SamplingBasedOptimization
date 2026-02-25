@@ -102,6 +102,9 @@ class G1_Walk_Mirrored_CEM(CrossEntropyMethod):
         self.w_v_shoulder = 0.01  # shoulder joint velocity tracking
         self.w_v_elbow = 0.01     # elbow joint velocity tracking
         self.w_control = 1e-6  # control effort
+        
+        self.w_force_assist = 0.1    # external wrench penalty
+        self.w_moment_assist = 0.1   # external moment penalty
 
         terminal_scale = 20.0
 
@@ -306,7 +309,7 @@ class G1_Walk_Mirrored_CEM(CrossEntropyMethod):
         self._update_distribution(Y0)
 
 
-    def cost(self, q, v, tau):
+    def cost(self, q, v, tau, w):
             """
             Cost function to evaluate the rollouts.
 
@@ -314,6 +317,7 @@ class G1_Walk_Mirrored_CEM(CrossEntropyMethod):
                 q: jnp.array,   shape (B, N+1, nq) - generalized positions trajectory.
                 v: jnp.array,   shape (B, N+1, nv) - generalized velocities trajectory.
                 tau: jnp.array, shape (B, N, nu) - control inputs trajectory.
+                w: jnp.array,   shape (B, N, 3) - external wrench trajectory.
             Returns:
                 costs: jnp.array, shape (B,) - cost for each rollout.
             """
@@ -383,7 +387,9 @@ class G1_Walk_Mirrored_CEM(CrossEntropyMethod):
                 self.w_v_ankle   * se(e_v_ankle)  +
                 self.w_v_shoulder* se(e_v_shoulder)+
                 self.w_v_elbow   * se(e_v_elbow)  +
-                self.w_control   * jnp.sum(jnp.sum(tau**2, axis=-1), axis=-1)
+                self.w_control   * jnp.sum(jnp.sum(tau**2, axis=-1), axis=-1) +
+                self.w_force_assist   * jnp.sum(jnp.sum(w[:, :, :2]**2, axis=-1), axis=-1) +
+                self.w_moment_assist  * jnp.sum(w[:, :, 2]**2, axis=-1)
             ) * self.sim.dt  # (B,)
 
             # ========================== Terminal cost ==========================
@@ -449,15 +455,15 @@ class G1_Walk_Mirrored_CEM(CrossEntropyMethod):
             a_srb_ref = jnp.concatenate([self.a_com_ref[:N], self.alpha_ref[:N, None]],      axis=-1)  # (N, 3)
             # a = linear_schedule(itr, self.cem_config.iterations, alpha_max=1.0)
             a = exponential_schedule(itr, self.cem_config.iterations, alpha_max=1.0, lam=20.0)
-            q_log, v_log, tau_log = self.sim.rollout(q0, v0, y_val_full,
-                                                    q_srb_ref=q_srb_ref,
-                                                    v_srb_ref=v_srb_ref,
-                                                    a_srb_ref=a_srb_ref,
-                                                    w_scale=a)
+            q_log, v_log, tau_log, w_log = self.sim.rollout(q0, v0, y_val_full,
+                                                            q_srb_ref=q_srb_ref,
+                                                            v_srb_ref=v_srb_ref,
+                                                            a_srb_ref=a_srb_ref,
+                                                            w_scale=a)
             q_log.block_until_ready()
 
             # compute costs
-            J = self.cost(q_log, v_log, tau_log)  # shape (B,)
+            J = self.cost(q_log, v_log, tau_log, w_log)  # shape (B,)
             J.block_until_ready()
 
             # select elite samples
