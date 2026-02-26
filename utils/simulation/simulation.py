@@ -475,7 +475,7 @@ class ParallelSim():
         M_ff = Iv(alpha_ref_batch)  # (B, 3)
 
         # the coriolis term
-        C = dynamics.Dynamics._omega_cross_Iomega(omega, I_B)      # (B, 3)
+        C = self.dyn.omega_cross_Iomega(omega, I_B)
 
         # orientation moment
         orient_err = self.dyn.quat_log_diff(quat, quat_ref_batch)  # (B, 3)
@@ -817,19 +817,19 @@ if __name__ == "__main__":
 
     # test 2: first wrench call (triggers JIT compilation — slow)
     t0 = time.time()
-    q_log, v_log, tau_log = parallel_sim.rollout(q0, v0, U, q_srb_ref, v_srb_ref, a_srb_ref, w_scale=0.5)
+    q_log, v_log, tau_log, w_log = parallel_sim.rollout(q0, v0, U, q_srb_ref, v_srb_ref, a_srb_ref, w_scale=0.5)
     q_log.block_until_ready()
     print(f"Wrench (JIT compile): {time.time() - t0:.4f}s")
 
     # test 3: second wrench call — reuses compiled graph, should be fast
     t0 = time.time()
-    q_log, v_log, tau_log = parallel_sim.rollout(q0, v0, U, q_srb_ref, v_srb_ref, a_srb_ref, w_scale=0.5)
+    q_log, v_log, tau_log, w_log = parallel_sim.rollout(q0, v0, U, q_srb_ref, v_srb_ref, a_srb_ref, w_scale=0.5)
     q_log.block_until_ready()
     print(f"Wrench (cached): {time.time() - t0:.4f}s")
 
     # test 4: different w_scale — reuses same compiled graph
     t0 = time.time()
-    q_log, v_log, tau_log = parallel_sim.rollout(q0, v0, U, q_srb_ref, v_srb_ref, a_srb_ref, w_scale=1.0)
+    q_log, v_log, tau_log, w_log = parallel_sim.rollout(q0, v0, U, q_srb_ref, v_srb_ref, a_srb_ref, w_scale=1.0)
     q_log.block_until_ready()
     print(f"Wrench w_scale=1.0 (cached): {time.time() - t0:.4f}s")
 

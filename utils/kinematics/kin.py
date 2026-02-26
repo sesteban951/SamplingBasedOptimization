@@ -216,26 +216,62 @@ def quat_to_euler_ZYX(q):
     return euler
     
 
+def quat_rotate(q, v):
+    """
+    Rotate a 3D vector by a quaternion using:
+        v' = q ⊗ v ⊗ q*, with v treated as [0, v].
+    Assumes q describes the orientation of the body frame relative to the world frame.
+
+    Args:
+        q: (np.array) Quaternion [qw, qx, qy, qz].
+        v: (np.array) 3D vector.
+
+    Returns:
+        v_rot: (np.array) Rotated 3D vector.
+    """
+    v = np.asarray(v, dtype=float).reshape(3,)
+    q = np.asarray(q, dtype=float)
+    q = q / np.linalg.norm(q)  # safety / normalization
+
+    # Lift v to a pure quaternion
+    v_quat = np.concatenate(([0.0], v))  # [0, vx, vy, vz]
+
+    # q ⊗ v ⊗ q*
+    q_conj = quat_conj(q)
+    tmp = quat_mult(q, v_quat)
+    res = quat_mult(tmp, q_conj)
+
+    # return only the vector part
+    v_rot = res[1:]
+
+    return v_rot
+
+def quat_rotate_ca(q, v, eps=1e-12):
+    q = quat_normalize_ca(q, eps)
+    v_quat = ca.vertcat(0, v)   # (4,)
+    q_conj = quat_conj_ca(q)
+    tmp = quat_mult_ca(q, v_quat)
+    res = quat_mult_ca(tmp, q_conj)
+    v_rot = res[1:4]
+    return v_rot
+
+
 def body_to_world(v_B, q):
     """
     Transform a vector from the body frame to the world frame using a quaternion.
-    Assumes q is describing the orientation of the body frame relative to the
-    world frame, so that R transforms vectors from body frame to world frame.
+    Assumes q describes the orientation of the body frame relative to the
+    world frame, so that the corresponding rotation takes body → world.
 
     Args:
-        v_B: (np.array) Some vector in the body frame.
-        q:   (np.array) Quaternion representing the orientation of the body frame in the world frame.
+        v_B: (np.array) Vector in the body frame, shape (3,) or broadcastable to that.
+        q:   (np.array) Quaternion [qw, qx, qy, qz] representing orientation of body in world.
     Returns:
-        v_W: (np.array) The same vector transformed to the world frame.
+        v_W: (np.array) The same vector expressed in the world frame, shape (3,).
     """
-    v_B = np.asarray(v_B, dtype=float).reshape(3,)
-    q = np.asarray(q, dtype=float)
-    q = q / np.linalg.norm(q)  # safety
+    return quat_rotate(q, v_B)
 
-    R = quat_to_rot_matrix(q)
-    v_W = R @ v_B
-
-    return v_W
+def body_to_world_ca(v_B, q, eps=1e-12):
+    return quat_rotate_ca(q, v_B, eps)
 
 
 def world_to_body(v_W, q):
@@ -243,26 +279,24 @@ def world_to_body(v_W, q):
     Transform a vector from the world frame to the body frame using a quaternion.
 
     Assumes q describes the orientation of the body frame relative to the world frame,
-    so that R transforms vectors from body to world:
-        v_W = R @ v_B
+    i.e. the corresponding rotation takes body → world.
 
-    Therefore:
-        v_B = R.T @ v_W
+    Then world → body is given by q*:
+        v_B = q* ⊗ v_W ⊗ q
 
     Args:
-        v_W: (np.array) Vector in the world frame, shape (3,)
-        q:   (np.array) Quaternion [qw, qx, qy, qz]
+        v_W: (np.array) Vector in the world frame, shape (3,) or broadcastable to that.
+        q:   (np.array) Quaternion [qw, qx, qy, qz] representing orientation of body in world.
     Returns:
-        v_B: (np.array) Vector in the body frame, shape (3,)
+        v_B: (np.array) The same vector expressed in the body frame, shape (3,).
     """
-    v_W = np.asarray(v_W, dtype=float).reshape(3,)
     q = np.asarray(q, dtype=float)
-    q = q / np.linalg.norm(q)  # safety
+    q_conj = quat_conj(q)  # world → body
+    return quat_rotate(q_conj, v_W)
 
-    R = quat_to_rot_matrix(q)  
-    v_B = R.T @ v_W            
-
-    return v_B
+def world_to_body_ca(v_W, q, eps=1e-12):
+    q_conj = quat_conj_ca(q)  # world → body
+    return quat_rotate_ca(q_conj, v_W, eps)
 
 
 #############################################################

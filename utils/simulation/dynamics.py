@@ -175,12 +175,17 @@ class Dynamics:
         self.com_state_in_world_trajectory = jax.jit(self._com_state_in_world_trajectory)
         self.centroidal_ang_mom_in_world = jax.jit(self._centroidal_ang_mom_in_world)
         self.centroidal_ang_mom_in_world_trajectory = jax.jit(self._centroidal_ang_mom_in_world_trajectory)
+        self.omega_cross_Iomega = jax.jit(self._omega_cross_Iomega)
+        self.omega_cross_Iomega_via_skew = jax.jit(self._omega_cross_Iomega_via_skew)
 
         # rotations / SO(3) maps (batched)
         self.quat_to_rot_matrix = jax.jit(self._quat_to_rot_matrix)
         self.quat_log_diff = jax.jit(self._quat_log_diff)
+        self.quat_rotate = jax.jit(self._quat_rotate)
         self.vec_body_to_world = jax.jit(self._vec_body_to_world)
         self.vec_world_to_body = jax.jit(self._vec_world_to_body)
+        self.vec_body_to_world_trajectory = jax.jit(self._vec_body_to_world_trajectory)
+        self.vec_world_to_body_trajectory = jax.jit(self._vec_world_to_body_trajectory)
 
         # sensor readings
         if self.pos_sensor_addr is not None:
@@ -693,41 +698,112 @@ class Dynamics:
         return R
 
 
+    def _quat_rotate_single_env(self, q, v):
+        """
+        Rotate a single 3D vector by a single quaternion using
+        v' = q ⊗ v ⊗ q*, with v as a pure quaternion [0, v].
+
+        Args:
+            q: (4,) quaternion [qw,qx,qy,qz], rotation from frame A → frame B
+            v: (3,) vector expressed in frame A
+
+        Returns:
+            v_rot: (3,) vector expressed in frame B
+        """
+        # Normalize for safety
+        q = self._quat_normalize_single_env(q)  # (4,)
+
+        # Lift v to a pure quaternion
+        v_quat = jnp.concatenate(
+            [jnp.array([0.0], dtype=v.dtype), v], axis=0
+        )  # (4,)
+
+        # q ⊗ v ⊗ q*
+        q_conj = self._quat_conj_single_env(q)         # (4,)
+        tmp = self._quat_mult_single_env(q, v_quat)    # (4,)
+        res = self._quat_mult_single_env(tmp, q_conj)  # (4,)
+
+        # return only the vector part
+        v_rot = res[1:]  # (3,)
+
+        return v_rot
+    
+    def _quat_rotate(self, quat, vec):
+        """
+        Batched vector rotation by quaternions.
+        Args:
+            quat: (B,4) [qw,qx,qy,qz], rotation from frame A → frame B
+            vec : (B,3) vectors expressed in frame A
+        Returns:
+            vec_rot: (B,3) vectors expressed in frame B
+        """
+        return jax.vmap(self._quat_rotate_single_env)(quat, vec)
+
+
     def _vec_body_to_world(self, vec_B, quat):
         """
         Convert vectors from body frame to world frame (batched).
-        vec_W = R_wb(quat) @ vec_B
+        vec_W = R_wb(quat) @ vec_B = q ⊗ v_B ⊗ q*
 
         Args:
             vec_B: (B,3) vectors expressed in body frame
-            quat : (B,4) quaternions [qw,qx,qy,qz] describing body orientation in world,
+            quat : (B,4) quaternions [qw,qx,qy,qz] describing body orientation in world.
         Returns:
             vec_W: (B,3) vectors expressed in world frame
         """
-        # TODO: consider using the quaternion directly to rotate the vector
-        #       v_W = q ⊗ v_B ⊗ q*
-        quat = self._quat_normalize(quat)          # (B,4)
-        R_wb = self._quat_to_rot_matrix(quat)      # (B,3,3)
-        vec_W = jnp.einsum('bij,bj->bi', R_wb, vec_B)
+        vec_W = self._quat_rotate(quat, vec_B)
         return vec_W
     
     def _vec_world_to_body(self, vec_W, quat):
         """
         Convert vectors from world frame to body frame (batched).
-        vec_B = R_wb(quat)^T @ vec_W
+        vec_B = R_wb(quat)^T @ vec_W = q* ⊗ v_W ⊗ q
 
         Args:
             vec_W: (B,3) vectors expressed in world frame
-            quat : (B,4) quaternions [qw,qx,qy,qz] describing body orientation in world
+            quat : (B,4) quaternions [qw,qx,qy,qz] describing body orientation in world.
         Returns:
             vec_B: (B,3) vectors expressed in body frame
         """
-        # TODO: consider using the quaternion directly to rotate the vector
-        #       v_B = q* ⊗ v_W ⊗ q
-        quat  = self._quat_normalize(quat)              # (B,4)
-        R_wb  = self._quat_to_rot_matrix(quat)          # (B,3,3)
-        vec_B = jnp.einsum('bji,bj->bi', R_wb, vec_W)  # R^T @ vec_W
+        quat_conj = self._quat_conj(quat) 
+        vec_B = self._quat_rotate(quat_conj, vec_W)
         return vec_B
+    
+
+    def _vec_body_to_world_trajectory(self, vec_B_traj, quat_traj):
+        """
+        Convert vectors from body frame to world frame over a full trajectory.
+
+        Args:
+            vec_B_traj : (B, T, 3) vectors expressed in body frame
+            quat_traj  : (B, T, 4) quaternions [qw,qx,qy,qz] describing body orientation in world
+        Returns:
+            vec_W_traj : (B, T, 3) vectors expressed in world frame
+        """
+        vec_B_t = jnp.swapaxes(vec_B_traj, 0, 1)  # (T, B, 3)
+        quat_t  = jnp.swapaxes(quat_traj,  0, 1)  # (T, B, 4)
+
+        vec_W_t = jax.vmap(self._vec_body_to_world)(vec_B_t, quat_t)  # (T, B, 3)
+
+        return jnp.swapaxes(vec_W_t, 0, 1)  # (B, T, 3)
+
+
+    def _vec_world_to_body_trajectory(self, vec_W_traj, quat_traj):
+        """
+        Convert vectors from world frame to body frame over a full trajectory.
+
+        Args:
+            vec_W_traj : (B, T, 3) vectors expressed in world frame
+            quat_traj  : (B, T, 4) quaternions [qw,qx,qy,qz] describing body orientation in world
+        Returns:
+            vec_B_traj : (B, T, 3) vectors expressed in body frame
+        """
+        vec_W_t = jnp.swapaxes(vec_W_traj, 0, 1)  # (T, B, 3)
+        quat_t  = jnp.swapaxes(quat_traj,  0, 1)  # (T, B, 4)
+
+        vec_B_t = jax.vmap(self._vec_world_to_body)(vec_W_t, quat_t)  # (T, B, 3)
+
+        return jnp.swapaxes(vec_B_t, 0, 1)  # (B, T, 3)
 
 
 #############################################################
@@ -1175,3 +1251,61 @@ if __name__ == "__main__":
     assert L_traj_err < 1e-5, f"L trajectory inconsistent with single-step: {L_traj_err}"
 
     print("\n✅ All sensor + trajectory tests passed.\n")
+
+
+    print("\n================ VEC TRAJECTORY TESTS ================\n")
+
+    T = 10
+    key = jax.random.PRNGKey(456)
+
+    # constant trajectory: tile a single (B, nq) state across T timesteps
+    q_same = jnp.zeros((dyn.B, dyn.nq)).at[:, 3].set(1.0)
+    quat_same = random_unit_quat(key, dyn.B)  # (B, 4)
+    vec_B_same = jax.random.normal(key, (dyn.B, 3))  # (B, 3)
+
+    quat_traj = jnp.tile(quat_same[:, None, :], (1, T, 1))  # (B, T, 4)
+    vec_B_traj = jnp.tile(vec_B_same[:, None, :], (1, T, 1))  # (B, T, 3)
+
+    # (a) output shape — body to world
+    vec_W_traj = dyn.vec_body_to_world_trajectory(vec_B_traj, quat_traj)
+    assert vec_W_traj.shape == (dyn.B, T, 3), \
+        f"Expected ({dyn.B}, {T}, 3), got {vec_W_traj.shape}"
+    print(f"vec_body_to_world_trajectory shape: {vec_W_traj.shape}  ✅")
+
+    # (b) trajectory matches single-step for each timestep
+    vec_W_single = dyn.vec_body_to_world(vec_B_same, quat_same)  # (B, 3)
+    traj_err = jnp.max(jnp.abs(vec_W_traj - vec_W_single[:, None, :]))
+    print(f"vec_body_to_world_traj vs single-step max err (expect ~0): {float(traj_err):.3e}")
+    assert traj_err < 1e-6, f"vec_body_to_world trajectory inconsistent with single-step: {traj_err}"
+
+    # (c) output shape — world to body
+    vec_W_same = jax.random.normal(key, (dyn.B, 3))  # (B, 3)
+    vec_W_traj2 = jnp.tile(vec_W_same[:, None, :], (1, T, 1))  # (B, T, 3)
+
+    vec_B_traj_out = dyn.vec_world_to_body_trajectory(vec_W_traj2, quat_traj)
+    assert vec_B_traj_out.shape == (dyn.B, T, 3), \
+        f"Expected ({dyn.B}, {T}, 3), got {vec_B_traj_out.shape}"
+    print(f"vec_world_to_body_trajectory shape: {vec_B_traj_out.shape}  ✅")
+
+    # (d) trajectory matches single-step for each timestep
+    vec_B_single = dyn.vec_world_to_body(vec_W_same, quat_same)  # (B, 3)
+    traj_err2 = jnp.max(jnp.abs(vec_B_traj_out - vec_B_single[:, None, :]))
+    print(f"vec_world_to_body_traj vs single-step max err (expect ~0): {float(traj_err2):.3e}")
+    assert traj_err2 < 1e-6, f"vec_world_to_body trajectory inconsistent with single-step: {traj_err2}"
+
+    # (e) round-trip: body->world->body should recover original
+    vec_W_rt = dyn.vec_body_to_world_trajectory(vec_B_traj, quat_traj)   # (B, T, 3)
+    vec_B_rt = dyn.vec_world_to_body_trajectory(vec_W_rt, quat_traj)      # (B, T, 3)
+    rt_err = jnp.max(jnp.abs(vec_B_rt - vec_B_traj))
+    print(f"round-trip body->world->body max err (expect ~0): {float(rt_err):.3e}")
+    assert rt_err < 2e-6, f"Round-trip trajectory failed: {rt_err}"
+
+    # (f) identity quaternion trajectory leaves vectors unchanged
+    qI_traj = jnp.tile(
+        jnp.array([1., 0., 0., 0.], dtype=quat_traj.dtype)[None, None, :],
+        (dyn.B, T, 1)
+    )  # (B, T, 4)
+    vec_W_id = dyn.vec_body_to_world_trajectory(vec_B_traj, qI_traj)
+    assert_close("vec_body_to_world_traj identity quat", vec_W_id, vec_B_traj, atol=1e-6, rtol=1e-6)
+
+    print("\n✅ All vec trajectory tests passed.\n")
