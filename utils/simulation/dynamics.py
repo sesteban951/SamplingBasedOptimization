@@ -33,6 +33,10 @@ class Dynamics_Config:
     # number of parallerl environments
     num_envs: int
 
+    # optional list of site names to track
+    pos_sensor_names: list[str] = None
+    ori_sensor_names: list[str] = None
+
 
 class Dynamics:
     """
@@ -100,13 +104,36 @@ class Dynamics:
         for i in range(mj_model.nbody):
             self.mass += mj_model.body_mass[i]
 
-        # body name is the first body in the model XML, which is usually the pelvis or torso; we will express inertia about this body frame
+        # body name is the first body in the model XML, which is usually the pelvis or torso; 
+        # we will express inertia about this body frame
         base_body_name = mujoco.mj_id2name(mj_model, mujoco.mjtObj.mjOBJ_BODY, 1)
         base_id = mj_model.body(base_body_name).id
 
         p_base_w = mj_data.xpos[base_id].copy()
         R_wb = mj_data.xmat[base_id].reshape(3, 3)  # base->world
         R_bw = R_wb.T
+
+        # position sensor addresses
+        self.pos_sensor_addr = None
+        self.ns_pos = 0
+        if dynamics_config.pos_sensor_names is not None:
+            self.pos_sensor_addr = self._get_sensor_addresses(
+                mj_model, 
+                dynamics_config.pos_sensor_names)
+            self.ns_pos = len(self.pos_sensor_addr)
+            print(f"Initialized position sensors: {dynamics_config.pos_sensor_names}, "
+                  f"total {self.ns_pos} sensors.")
+
+        # orientation sensor addresses
+        self.ori_sensor_addr = None
+        self.ns_ori = 0
+        if dynamics_config.ori_sensor_names is not None:
+            self.ori_sensor_addr = self._get_sensor_addresses(
+                mj_model, 
+                dynamics_config.ori_sensor_names)
+            self.ns_ori = len(self.ori_sensor_addr)
+            print(f"Initialized orientation sensors: {dynamics_config.ori_sensor_names}, " 
+                  f"total {self.ns_ori} sensors.")
 
         # compute the nominal inertia about the base body frame
         I_w = np.zeros((3, 3))
@@ -274,9 +301,72 @@ class Dynamics:
         L = jax.vmap(single)(data)
 
         return L
+    
+
+    def _sensor_pos_in_world_single_env(self, model, data):
+        """
+        Reads position sensor values for a single environment.
+        """
+        data = mjx.kinematics(model, data)
+        data = mjx.sensor(model, data)
+
+        # stack all positions into (N, 3)
+        positions = jnp.stack([
+            data.sensordata[addr:addr+3] 
+            for addr in self.pos_sensor_addr.values()
+        ])  # (N, 3)
+
+        return positions
+    
+    def _sensor_pos_in_world(self, q, v):
+        """
+        Computes positions from framepos sensors in the world frame
+        for all parallel environments.
+
+        Args:
+            q (jnp.ndarray): (B, nq) array of generalized positions
+            v (jnp.ndarray): (B, nv) array of generalized velocities
+        Returns:
+            positions (dict): maps sensor name -> (B, 3) array of positions
+        """
+        data = self.data0.replace(qpos=q, qvel=v)
+
+        single = lambda d: self._sensor_pos_in_world_single_env(self.mjx_model, d)
+        positions = jax.vmap(single)(data)  # (B, N, 3)
+
+        # reconstruct dict mapping name -> (B, 3)
+        return {
+            name: positions[:, i, :]
+            for i, name in enumerate(self.pos_sensor_addr.keys())
+        }
 
 
     ################################## HELPERS ##################################
+
+    @staticmethod
+    def _get_sensor_addresses(mj_model, sensor_names):
+        """
+        Get the address of a sensor by name.
+
+        Args:
+            mj_model: The MuJoCo model.
+            sensor_names: A list of sensor names to get addresses for.
+
+        Returns:
+            sensor_addr: A dictionary mapping sensor names to their addresses.
+        """
+        sensor_addr = {}
+        for name in sensor_names:
+            # get the sensor ID and address
+            id = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_SENSOR, name)
+            if id == -1:
+                raise ValueError(f"Sensor '{name}' not found in model.")
+            addr = mj_model.sensor_adr[id]
+
+            # new entry into the dictionary
+            sensor_addr[name] = addr
+
+        return sensor_addr
 
     @staticmethod
     def _skew_single_env(w: jnp.ndarray) -> jnp.ndarray:
@@ -568,7 +658,11 @@ if __name__ == "__main__":
         # xml_path="./models/g1/g1_29dof_rev_1_0.xml",  
         xml_path="./models/g1/g1_21dof.xml",  
         # xml_path="./models/biped/biped.xml",  
-        num_envs=4
+        num_envs=4,
+        pos_sensor_names=["left_foot_position", 
+                          "right_foot_position"],
+        ori_sensor_names=["left_foot_orientation", 
+                          "right_foot_orientation"]
     )
 
     # initialize
