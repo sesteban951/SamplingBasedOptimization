@@ -174,12 +174,21 @@ class Dynamics:
         self.com_state_in_world = jax.jit(self._com_state_in_world)
         self.com_state_in_world_trajectory = jax.jit(self._com_state_in_world_trajectory)
         self.centroidal_ang_mom_in_world = jax.jit(self._centroidal_ang_mom_in_world)
+        self.centroidal_ang_mom_in_world_trajectory = jax.jit(self._centroidal_ang_mom_in_world_trajectory)
 
         # rotations / SO(3) maps (batched)
         self.quat_to_rot_matrix = jax.jit(self._quat_to_rot_matrix)
         self.quat_log_diff = jax.jit(self._quat_log_diff)
         self.vec_body_to_world = jax.jit(self._vec_body_to_world)
         self.vec_world_to_body = jax.jit(self._vec_world_to_body)
+
+        # sensor readings
+        if self.pos_sensor_addr is not None:
+            self.sensor_pos_in_world = jax.jit(self._sensor_pos_in_world)
+            self.sensor_pos_in_world_trajectory = jax.jit(self._sensor_pos_in_world_trajectory)
+        if self.ori_sensor_addr is not None:
+            self.sensor_ori_in_world = jax.jit(self._sensor_ori_in_world)
+            self.sensor_ori_in_world_trajectory = jax.jit(self._sensor_ori_in_world_trajectory)
 
         # helpful vector operations
         self.skew = jax.jit(self._skew)
@@ -302,19 +311,35 @@ class Dynamics:
 
         return L
     
+    def _centroidal_ang_mom_in_world_trajectory(self, q_traj, v_traj):
+        """
+        Computes centroidal angular momentum over a full trajectory.
+
+        Args:
+            q_traj: (B, T, nq)
+            v_traj: (B, T, nv)
+        Returns:
+            L: (B, T, 3)
+        """
+        q_t = jnp.swapaxes(q_traj, 0, 1)  # (T, B, nq)
+        v_t = jnp.swapaxes(v_traj, 0, 1)  # (T, B, nv)
+
+        L_t = jax.vmap(self._centroidal_ang_mom_in_world)(q_t, v_t)  # (T, B, 3)
+
+        return jnp.swapaxes(L_t, 0, 1)  # (B, T, 3)
+    
 
     def _sensor_pos_in_world_single_env(self, model, data):
         """
         Reads position sensor values for a single environment.
         """
-        data = mjx.kinematics(model, data)
-        data = mjx.sensor(model, data)
+        data = mjx.forward(model, data)
 
-        # stack all positions into (N, 3)
+        # stack all positions into (ns_pos, 3)
         positions = jnp.stack([
             data.sensordata[addr:addr+3] 
             for addr in self.pos_sensor_addr.values()
-        ])  # (N, 3)
+        ])  # (ns_pos, 3)
 
         return positions
     
@@ -327,18 +352,81 @@ class Dynamics:
             q (jnp.ndarray): (B, nq) array of generalized positions
             v (jnp.ndarray): (B, nv) array of generalized velocities
         Returns:
-            positions (dict): maps sensor name -> (B, 3) array of positions
+            positions (jnp.ndarray): (B, ns_pos, 3) array of sensor positions
         """
         data = self.data0.replace(qpos=q, qvel=v)
 
         single = lambda d: self._sensor_pos_in_world_single_env(self.mjx_model, d)
-        positions = jax.vmap(single)(data)  # (B, N, 3)
+        positions = jax.vmap(single)(data)  # (B, ns_pos, 3)
 
-        # reconstruct dict mapping name -> (B, 3)
-        return {
-            name: positions[:, i, :]
-            for i, name in enumerate(self.pos_sensor_addr.keys())
-        }
+        return positions
+    
+    def _sensor_pos_in_world_trajectory(self, q_traj, v_traj):
+        """
+        Computes sensor positions over a full trajectory.
+
+        Args:
+            q_traj: (B, T, nq)
+            v_traj: (B, T, nv)
+        Returns:
+            positions: (B, T, ns_pos, 3)
+        """
+        q_t = jnp.swapaxes(q_traj, 0, 1)  # (T, B, nq)
+        v_t = jnp.swapaxes(v_traj, 0, 1)  # (T, B, nv)
+
+        positions_t = jax.vmap(self._sensor_pos_in_world)(q_t, v_t)  # (T, B, ns_pos, 3)
+
+        return jnp.swapaxes(positions_t, 0, 1)  # (B, T, ns_pos, 3)
+
+    
+    def _sensor_ori_in_world_single_env(self, model, data):
+        """
+        Reads orientation sensor values for a single environment.
+        """
+        data = mjx.forward(model, data)
+
+        # stack all quaternions into (ns_ori, 4)
+        orientations = jnp.stack([
+            data.sensordata[addr:addr+4]
+            for addr in self.ori_sensor_addr.values()
+        ])  # (ns_ori, 4)
+
+        return orientations
+
+    def _sensor_ori_in_world(self, q, v):
+        """
+        Computes orientations from frameori sensors in the world frame
+        for all parallel environments.
+
+        Args:
+            q (jnp.ndarray): (B, nq) array of generalized positions
+            v (jnp.ndarray): (B, nv) array of generalized velocities
+        Returns:
+            orientations (jnp.ndarray): (B, ns_ori, 4) array of quaternions [qw, qx, qy, qz]
+        """
+        data = self.data0.replace(qpos=q, qvel=v)
+
+        single = lambda d: self._sensor_ori_in_world_single_env(self.mjx_model, d)
+        orientations = jax.vmap(single)(data)  # (B, ns_ori, 4)
+
+        return orientations
+    
+    def _sensor_ori_in_world_trajectory(self, q_traj, v_traj):
+        """
+        Computes sensor orientations over a full trajectory.
+
+        Args:
+            q_traj: (B, T, nq)
+            v_traj: (B, T, nv)
+        Returns:
+            orientations: (B, T, ns_ori, 4)
+        """
+        q_t = jnp.swapaxes(q_traj, 0, 1)  # (T, B, nq)
+        v_t = jnp.swapaxes(v_traj, 0, 1)  # (T, B, nv)
+
+        orientations_t = jax.vmap(self._sensor_ori_in_world)(q_t, v_t)  # (T, B, ns_ori, 4)
+
+        return jnp.swapaxes(orientations_t, 0, 1)  # (B, T, ns_ori, 4)
 
 
     ################################## HELPERS ##################################
@@ -358,13 +446,10 @@ class Dynamics:
         sensor_addr = {}
         for name in sensor_names:
             # get the sensor ID and address
-            id = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_SENSOR, name)
-            if id == -1:
+            sensor_id = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_SENSOR, name)
+            if sensor_id == -1:
                 raise ValueError(f"Sensor '{name}' not found in model.")
-            addr = mj_model.sensor_adr[id]
-
-            # new entry into the dictionary
-            sensor_addr[name] = addr
+            sensor_addr[name] = mj_model.sensor_adr[sensor_id]
 
         return sensor_addr
 
@@ -989,3 +1074,104 @@ if __name__ == "__main__":
     )
 
     print("\n✅ Vec + inertia tests passed.\n")
+
+
+    print("\n================ SENSOR + TRAJECTORY TESTS ================\n")
+
+    # reset q and v to match dyn.B
+    q = jnp.zeros((dyn.B, dyn.nq)).at[:, 3].set(1.0)
+    v = jnp.zeros((dyn.B, dyn.nv))
+
+    # (a) output shape
+    pos = dyn.sensor_pos_in_world(q, v)
+    assert pos.shape == (dyn.B, dyn.ns_pos, 3), f"Expected ({dyn.B}, {dyn.ns_pos}, 3), got {pos.shape}"
+    print(f"sensor_pos_in_world shape: {pos.shape}  ✅")
+
+    # (b) identical states -> identical sensor readings across envs
+    q_same = jnp.zeros((dyn.B, dyn.nq)).at[:, 3].set(1.0)
+    v_same = jnp.zeros((dyn.B, dyn.nv))
+    pos_same = dyn.sensor_pos_in_world(q_same, v_same)
+    spread = jnp.max(jnp.abs(pos_same - pos_same[0]))
+    print(f"sensor_pos identical envs max spread (expect ~0): {float(spread):.3e}")
+    assert spread < 1e-6, f"Sensor positions differ across identical envs: {spread}"
+
+    # (c) different base positions -> sensor readings should differ
+    q_shifted = q_same.at[0, 0].set(1.0)  # shift env 0 by 1m in x
+    pos_shifted = dyn.sensor_pos_in_world(q_shifted, v_same)
+    diff_x = pos_shifted[0, :, 0] - pos_shifted[1, :, 0]  # x-component difference
+    print(f"sensor_pos x-shift diff (expect ~1.0): {diff_x}")
+    assert jnp.all(jnp.abs(diff_x - 1.0) < 1e-4), f"Sensor x-shift not reflected correctly: {diff_x}"
+
+    # ---- sensor orientation tests ----
+
+    # (d) output shape
+    ori = dyn.sensor_ori_in_world(q, v)
+    assert ori.shape == (dyn.B, dyn.ns_ori, 4), f"Expected ({dyn.B}, {dyn.ns_ori}, 4), got {ori.shape}"
+    print(f"sensor_ori_in_world shape: {ori.shape}  ✅")
+
+    # (e) output quaternions should be unit norm
+    ori_norms = jnp.linalg.norm(ori, axis=-1)  # (B, ns_ori)
+    norm_err = jnp.max(jnp.abs(ori_norms - 1.0))
+    print(f"sensor_ori quaternion norm error (expect ~0): {float(norm_err):.3e}")
+    assert norm_err < 1e-5, f"Sensor orientations not unit quaternions: {norm_err}"
+
+    # (f) identical states -> identical orientations across envs
+    ori_same = dyn.sensor_ori_in_world(q_same, v_same)
+    ori_spread = jnp.max(jnp.abs(ori_same - ori_same[0]))
+    print(f"sensor_ori identical envs max spread (expect ~0): {float(ori_spread):.3e}")
+    assert ori_spread < 1e-6, f"Sensor orientations differ across identical envs: {ori_spread}"
+
+    # ---- trajectory tests ----
+
+    T = 10
+    q_traj = jnp.tile(q_same[:, None, :], (1, T, 1))  # (B, T, nq) constant trajectory
+    v_traj = jnp.zeros((dyn.B, T, dyn.nv))
+
+    # (g) com trajectory shape
+    p_com_traj, v_com_traj = dyn.com_state_in_world_trajectory(q_traj, v_traj)
+    assert p_com_traj.shape == (dyn.B, T, 3), f"Expected ({dyn.B}, {T}, 3), got {p_com_traj.shape}"
+    assert v_com_traj.shape == (dyn.B, T, 3), f"Expected ({dyn.B}, {T}, 3), got {v_com_traj.shape}"
+    print(f"com_state_in_world_trajectory shapes: {p_com_traj.shape}, {v_com_traj.shape}  ✅")
+
+    # (h) trajectory matches single-step for each timestep
+    p_com_single, _ = dyn.com_state_in_world(q_same, v_same)
+    traj_err = jnp.max(jnp.abs(p_com_traj - p_com_single[:, None, :]))
+    print(f"com_traj vs single-step max err (expect ~0): {float(traj_err):.3e}")
+    assert traj_err < 1e-5, f"COM trajectory inconsistent with single-step: {traj_err}"
+
+    # (i) sensor pos trajectory shape
+    pos_traj = dyn.sensor_pos_in_world_trajectory(q_traj, v_traj)
+    assert pos_traj.shape == (dyn.B, T, dyn.ns_pos, 3), \
+        f"Expected ({dyn.B}, {T}, {dyn.ns_pos}, 3), got {pos_traj.shape}"
+    print(f"sensor_pos_in_world_trajectory shape: {pos_traj.shape}  ✅")
+
+    # (j) sensor pos trajectory matches single-step
+    pos_single = dyn.sensor_pos_in_world(q_same, v_same)  # (B, ns_pos, 3)
+    pos_traj_err = jnp.max(jnp.abs(pos_traj - pos_single[:, None, :, :]))
+    print(f"sensor_pos_traj vs single-step max err (expect ~0): {float(pos_traj_err):.3e}")
+    assert pos_traj_err < 1e-5, f"Sensor pos trajectory inconsistent with single-step: {pos_traj_err}"
+
+    # (k) sensor ori trajectory shape
+    ori_traj = dyn.sensor_ori_in_world_trajectory(q_traj, v_traj)
+    assert ori_traj.shape == (dyn.B, T, dyn.ns_ori, 4), \
+        f"Expected ({dyn.B}, {T}, {dyn.ns_ori}, 4), got {ori_traj.shape}"
+    print(f"sensor_ori_in_world_trajectory shape: {ori_traj.shape}  ✅")
+
+    # (l) sensor ori trajectory matches single-step
+    ori_single = dyn.sensor_ori_in_world(q_same, v_same)  # (B, ns_ori, 4)
+    ori_traj_err = jnp.max(jnp.abs(ori_traj - ori_single[:, None, :, :]))
+    print(f"sensor_ori_traj vs single-step max err (expect ~0): {float(ori_traj_err):.3e}")
+    assert ori_traj_err < 1e-5, f"Sensor ori trajectory inconsistent with single-step: {ori_traj_err}"
+
+    # (m) centroidal angular momentum trajectory shape
+    L_traj = dyn.centroidal_ang_mom_in_world_trajectory(q_traj, v_traj)
+    assert L_traj.shape == (dyn.B, T, 3), f"Expected ({dyn.B}, {T}, 3), got {L_traj.shape}"
+    print(f"centroidal_ang_mom_in_world_trajectory shape: {L_traj.shape}  ✅")
+
+    # (n) centroidal trajectory matches single-step
+    L_single = dyn.centroidal_ang_mom_in_world(q_same, v_same)  # (B, 3)
+    L_traj_err = jnp.max(jnp.abs(L_traj - L_single[:, None, :]))
+    print(f"L_traj vs single-step max err (expect ~0): {float(L_traj_err):.3e}")
+    assert L_traj_err < 1e-5, f"L trajectory inconsistent with single-step: {L_traj_err}"
+
+    print("\n✅ All sensor + trajectory tests passed.\n")
