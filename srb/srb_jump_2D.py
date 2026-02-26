@@ -504,6 +504,15 @@ print(f"  w     = {X_sol[N, 5]:.4f} rad/s")
 
 time = np.linspace(0, T, N + 1)
 
+# feet trajectory for each control step k:
+# columns = [pL_x, pL_y, pR_x, pR_y]
+# stance: fixed at p0_L/p0_R, flight: undefined (NaN), landing: fixed at optimized landing feet
+feet = np.full((N, 4), np.nan)
+feet[:stance_end, 0:2] = np.array([float(p0_L[0]), 0.0])
+feet[:stance_end, 2:4] = np.array([float(p0_R[0]), 0.0])
+feet[flight_end:, 0:2] = np.array([float(pL_land), 0.0])
+feet[flight_end:, 2:4] = np.array([float(pR_land), 0.0])
+
 save_dir = "./results/srb/srb_jump_2d/"
 os.makedirs(save_dir, exist_ok=True)
 
@@ -514,5 +523,6 @@ np.savetxt(save_dir + "a_opt.csv",   a_opt,   delimiter=",")
 np.savetxt(save_dir + "tau_opt.csv", U,       delimiter=",")
 np.savetxt(save_dir + "contact_schedule.csv", contact_schedule, delimiter=",")
 np.savetxt(save_dir + "foot_positions.csv", foot_positions, delimiter=",")
+np.savetxt(save_dir + "feet.csv",    feet,  delimiter=",")
 
 print(f"\nSaved results to {save_dir}")

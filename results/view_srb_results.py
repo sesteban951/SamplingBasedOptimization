@@ -161,8 +161,9 @@ try:
         if viewer.user_scn is not None:
             viewer.user_scn.ngeom = 0
 
-            if feet_opt is not None and i < feet_opt.shape[0]:
-                feet_k = feet_opt[i, :]
+            if feet_opt is not None and feet_opt.shape[0] > 0:
+                feet_idx = min(i, feet_opt.shape[0] - 1)
+                feet_k = feet_opt[feet_idx, :]
                 if np.all(np.isfinite(feet_k)):
                     p_com = q_replay[i, 0:3]
                     p_L = np.array([feet_k[0], feet_k[1], 0.0], dtype=np.float64)

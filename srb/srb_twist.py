@@ -132,8 +132,8 @@ nu = srb.nu
 
 # fix timings
 dt = 0.02        # time step
-T_stance = 0.5   # stance duration
-T_flight = 0.5   # flight duration
+T_stance = 0.7   # stance duration
+T_flight = 0.6   # flight duration
 T_land = 0.5     # landing duration
 T = T_stance + T_flight + T_land  # total trajectory duration
 
@@ -185,7 +185,7 @@ p0_R = ca.DM(p0_R)
 
 # desired goal state - jump forward, land upright with 180 deg CCW yaw twist
 px_goal = 0.5
-yaw_goal = 1.5*np.pi
+yaw_goal = 2*np.pi
 quat_goal = np.array([
     np.cos(yaw_goal / 2),  # qw
     0.0,                   # qx
@@ -245,7 +245,7 @@ for k in range(N):
             + M_L[:, k] + M_R[:, k]
         )
 
-        # constrain the leg length 
+        # constrain the leg length
         opti.subject_to(ca.sumsqr(r_L) <= L_max**2)
         opti.subject_to(ca.sumsqr(r_R) <= L_max**2)
         opti.subject_to(ca.sumsqr(r_L) >= L_min**2)
@@ -277,7 +277,7 @@ for k in range(N):
             + M_L[:, k] + M_R[:, k]
         )
 
-        # constrain the leg length 
+        # constrain the leg length
         opti.subject_to(ca.sumsqr(r_L) <= L_max**2)
         opti.subject_to(ca.sumsqr(r_R) <= L_max**2)
         opti.subject_to(ca.sumsqr(r_L) >= L_min**2)
@@ -291,7 +291,7 @@ for k in range(N):
     opti.subject_to(X[:, k + 1] == x_next)
 
 # add z_com constraints
-pz_min = 0.40
+pz_min = 0.20
 pz_max = 2.0
 for k in range(N+1):
     opti.subject_to(X[2, k] >= pz_min)  # enforce constant height
@@ -303,9 +303,9 @@ for k in range(N+1):
 
 # Contact parameters
 mu = 1.0              # friction coefficient
-M_ankle_x_max = 100.0  # [N*m]
-M_ankle_y_max = 100.0  # [N*m]
-M_ankle_z_max = 100.0  # [N*m]
+M_ankle_x_max = 50.0  # [N*m]
+M_ankle_y_max = 50.0  # [N*m]
+M_ankle_z_max = 10.0  # [N*m]
 F_leg_max = 500.0     # [N] max force per leg
 
 # Get friction cone constraint matrices
