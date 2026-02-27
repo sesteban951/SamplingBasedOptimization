@@ -368,15 +368,27 @@ opti.subject_to(ca.sumsqr(p_R_land - p_R_goal) <= landing_tol**2)
 # Objective Function
 # ----------------------------------------------------------
 
+# stance yaw-overrun penalty settings (encourage twist to happen in flight)
+W_stance_yaw = 200.0
+yaw_allow = 0.15  # [rad]
+
 # total cost
 J = 0
 for k in range(N):
 
     # phase-aware state objective:
-    # keep initial orientation in stance, twist in flight, track final state in landing
+    # no state tracking in stance; twist in flight; track final state in landing
     if k < stance_end:
-        x_ref_k = x0.copy()
-        x_ref_k[7:13] = 0.0
+        # Penalize only excess yaw progress toward the desired twist direction.
+        qk = X[3:7, k]  # [qw, qx, qy, qz]
+        yaw_k = ca.atan2(
+            2.0 * (qk[0] * qk[3] + qk[1] * qk[2]),
+            1.0 - 2.0 * (qk[2] * qk[2] + qk[3] * qk[3])
+        )
+        yaw_progress = ca.sign(yaw_goal) * yaw_k
+        yaw_excess = ca.fmax(0.0, yaw_progress - yaw_allow)
+        J += 0.5 * W_stance_yaw * yaw_excess**2
+        x_ref_k = None
     elif k < flight_end:
         alpha = (k - stance_end + 1) / N_flight
         yaw_k = alpha * yaw_goal
@@ -395,8 +407,9 @@ for k in range(N):
     else:
         x_ref_k = x_goal
 
-    # state cost
-    J += srb.state_cost(X[:, k], ca.DM(x_ref_k))
+    # state cost only during flight + landing
+    if x_ref_k is not None:
+        J += srb.state_cost(X[:, k], ca.DM(x_ref_k))
 
     # contact cost
     if k < stance_end or k >= flight_end:

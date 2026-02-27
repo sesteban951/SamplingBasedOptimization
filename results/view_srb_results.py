@@ -42,6 +42,8 @@ q_opt = np.loadtxt(q_file, delimiter=",")
 v_opt = np.loadtxt(v_file, delimiter=",")
 a_opt = np.loadtxt(a_file, delimiter=",")
 tau_opt = np.loadtxt(tau_file, delimiter=",")
+if tau_opt.ndim == 1:
+    tau_opt = tau_opt.reshape(1, -1)
 
 # optional feet trajectory: columns [pL_x, pL_y, pR_x, pR_y], shape (N, 4)
 feet_opt = None
@@ -67,6 +69,13 @@ else:
 #################################################################
 # VISUALIZATION
 #################################################################
+
+# Toggle COM wrench visualization from tau_opt (straight vectors for force and moment)
+SHOW_WRENCH_VIZ = True
+
+# Wrench visual scale factors (tune for readability)
+FORCE_VIZ_SCALE = 0.001   # meters per Newton
+MOMENT_VIZ_SCALE = 0.015   # meters per N*m
 
 def srb_2D_to_3D(q_2d_traj):
     """
@@ -135,11 +144,53 @@ def _add_connector_geom(scene, p_from, p_to, radius, rgba):
     geom.category = int(mujoco.mjtCatBit.mjCAT_DECOR)
     scene.ngeom += 1
 
+def _add_segment_geom(scene, p_from, p_to, radius, rgba):
+    """Draw a straight segment as a capsule using mjv_initGeom."""
+    if scene.ngeom >= scene.maxgeom:
+        return
+
+    p_from = np.array(p_from, dtype=np.float64)
+    p_to = np.array(p_to, dtype=np.float64)
+    d = p_to - p_from
+    length = np.linalg.norm(d)
+    if length < 1e-9:
+        return
+
+    z_axis = d / length
+
+    # Build an orthonormal frame with local z aligned to segment direction.
+    ref = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+    if abs(np.dot(ref, z_axis)) > 0.9:
+        ref = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+    x_axis = np.cross(ref, z_axis)
+    x_axis /= np.linalg.norm(x_axis)
+    y_axis = np.cross(z_axis, x_axis)
+    R = np.column_stack((x_axis, y_axis, z_axis))
+
+    center = 0.5 * (p_from + p_to)
+    half_length = 0.5 * length
+
+    geom = scene.geoms[scene.ngeom]
+    mujoco.mjv_initGeom(
+        geom,
+        mujoco.mjtGeom.mjGEOM_CAPSULE,
+        np.array([radius, half_length, 0.0], dtype=np.float64),
+        center,
+        R.reshape(9),
+        np.array(rgba, dtype=np.float64),
+    )
+    geom.category = int(mujoco.mjtCatBit.mjCAT_DECOR)
+    scene.ngeom += 1
+
 # decide if 2D or 3D trajectory
 if "2d" in experiment.lower():
     q_replay = srb_2D_to_3D(q_opt)
 else:
     q_replay = q_opt
+
+can_draw_wrench = SHOW_WRENCH_VIZ and (tau_opt.ndim == 2) and (tau_opt.shape[1] >= 6)
+if SHOW_WRENCH_VIZ and not can_draw_wrench:
+    print("Warning: tau_opt does not have 6 columns; disabling wrench visualization.")
 
 # run the visualization
 try:
@@ -198,6 +249,37 @@ try:
                         radius=0.01,
                         rgba=[0.85, 0.85, 0.85, 0.8],
                     )
+
+            # optional COM wrench overlays from tau_opt:
+            # force = tau_opt[:, 0:3], moment = tau_opt[:, 3:6]
+            if can_draw_wrench and tau_opt.shape[0] > 0:
+                tau_idx = min(i, tau_opt.shape[0] - 1)  # keep visible on last replay frame
+                tau_k = tau_opt[tau_idx, :]
+                p_com = q_replay[i, 0:3]
+
+                F_k = tau_k[0:3]
+                M_k = tau_k[3:6]
+
+                p_force_tip = p_com + FORCE_VIZ_SCALE * F_k
+                p_moment_tip = p_com + MOMENT_VIZ_SCALE * M_k
+
+                # Force vector (cyan)
+                _add_segment_geom(
+                    viewer.user_scn,
+                    p_com,
+                    p_force_tip,
+                    radius=0.015,
+                    rgba=[0.0, 1.0, 1.0, 1.0],
+                )
+
+                # Moment vector (magenta)
+                _add_segment_geom(
+                    viewer.user_scn,
+                    p_com,
+                    p_moment_tip,
+                    radius=0.015,
+                    rgba=[1.0, 0.0, 1.0, 1.0],
+                )
 
         viewer.sync()
 

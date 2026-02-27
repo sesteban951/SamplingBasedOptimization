@@ -20,7 +20,8 @@ from mujoco.viewer import launch
 # xml_file = "./models/cartpole/cartpole.xml"
 # xml_file = "./models/cartpole/cartpole_walls.xml"
 
-# xml_file = "./models/hopper/hopper.xml"
+xml_file = "./models/hopper/hopper.xml"
+# xml_file = "./models/hopper/hopper_stairs.xml"
 
 # xml_file = "./models/biped/biped.xml"
 
@@ -28,7 +29,7 @@ from mujoco.viewer import launch
 
 # xml_file = "./models/g1/g1_21dof.xml"
 # xml_file = "./models/g1/g1_29dof_rev_1_0.xml"
-xml_file = "./models/g1/g1_planar.xml"
+# xml_file = "./models/g1/g1_planar.xml"
 
 # xml_file = "./models/srb/srb.xml"
 
