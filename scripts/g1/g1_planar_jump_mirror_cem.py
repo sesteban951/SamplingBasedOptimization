@@ -113,31 +113,39 @@ class G1_Walk_Mirrored_CEM(CrossEntropyMethod):
         # make the reference trajectory
         self._make_reference_trajectory()
 
-        # initialize a dynamics object
-        dyn_config = Dynamics_Config(model_config.xml_path, sim_config.batch_size)
+        # initialize a dynamics object (left foot sensors for cost)
+        dyn_config = Dynamics_Config(
+            model_config.xml_path,
+            sim_config.batch_size,
+            pos_sensor_names=["left_foot_position"],
+            ori_sensor_names=["left_foot_orientation"],
+        )
         self.dyn = Dynamics(dyn_config)
 
         # Running cost weights (per timestep)
         self.w_px      = 5.0     # horizontal position tracking
-        self.w_pz      = 20.0    # vertical position tracking (keep at default height)
+        self.w_pz      = 50.0    # vertical position tracking (keep at default height)
         self.w_theta   = 5.0    # pitch angle (stay upright)
         
         self.w_vx      = 1.0     # forward velocity tracking
         self.w_vz      = 1.0     # vertical velocity tracking
         self.w_omega   = 0.1     # pitch velocity tracking
 
-        self.w_p_hip   = 0.5     # hip joint tracking
-        self.w_p_knee  = 1.0     # knee joint tracking
-        self.w_p_ankle = 1.0     # ankle joint tracking
-        self.w_p_shoulder = 0.05  # shoulder joint tracking
+        # left foot (from sensors): keep orientation ~0 and x ~0
+        self.w_foot_x     = 5.0   # left foot x position (stay near 0)
+        self.w_foot_theta = 5.0   # left foot pitch (theta about y, stay near 0)
+        # self.w_p_hip   = 0.5     # hip joint tracking
+        # self.w_p_knee  = 1.0     # knee joint tracking
+        # self.w_p_ankle = 1.0     # ankle joint tracking
+        self.w_p_shoulder = 0.1  # shoulder joint tracking
         self.w_p_elbow = 0.05     # elbow joint tracking
         
-        self.w_v_hip   = 0.01     # hip joint velocity tracking
-        self.w_v_knee  = 0.01     # knee joint velocity tracking
-        self.w_v_ankle = 0.01     # ankle joint velocity tracking
+        # self.w_v_hip   = 0.01     # hip joint velocity tracking
+        # self.w_v_knee  = 0.01     # knee joint velocity tracking
+        # self.w_v_ankle = 0.01     # ankle joint velocity tracking
         self.w_v_shoulder = 1.0  # shoulder joint velocity tracking
         self.w_v_elbow = 1.0     # elbow joint velocity tracking
-        self.w_control = 1e-6  # control effort
+        self.w_control = 1e-9  # control effort
         
         self.w_force_assist = 0.1    # external wrench penalty
         self.w_moment_assist = 0.1   # external moment penalty
@@ -152,15 +160,17 @@ class G1_Walk_Mirrored_CEM(CrossEntropyMethod):
         self.wf_vz = terminal_scale * self.w_vz
         self.wf_omega = terminal_scale * self.w_omega
         
-        self.wf_p_hip = terminal_scale * self.w_p_hip
-        self.wf_p_knee = terminal_scale * self.w_p_knee
-        self.wf_p_ankle = terminal_scale * self.w_p_ankle
+        self.wf_foot_x     = terminal_scale * self.w_foot_x
+        self.wf_foot_theta = terminal_scale * self.w_foot_theta
+        # self.wf_p_hip = terminal_scale * self.w_p_hip
+        # self.wf_p_knee = terminal_scale * self.w_p_knee
+        # self.wf_p_ankle = terminal_scale * self.w_p_ankle
         self.wf_p_shoulder = terminal_scale * self.w_p_shoulder
         self.wf_p_elbow = terminal_scale * self.w_p_elbow
         
-        self.wf_v_hip = terminal_scale * self.w_v_hip
-        self.wf_v_knee = terminal_scale * self.w_v_knee
-        self.wf_v_ankle = terminal_scale * self.w_v_ankle
+        # self.wf_v_hip = terminal_scale * self.w_v_hip
+        # self.wf_v_knee = terminal_scale * self.w_v_knee
+        # self.wf_v_ankle = terminal_scale * self.w_v_ankle
         self.wf_v_shoulder = terminal_scale * self.w_v_shoulder
         self.wf_v_elbow = terminal_scale * self.w_v_elbow
 
@@ -241,7 +251,7 @@ class G1_Walk_Mirrored_CEM(CrossEntropyMethod):
 
         # take joint state references
         self.p_hip_ref = qpos_standing[3]      # scalar
-        self.p_knee_ref = qpos_standing[4]   
+        self.p_knee_ref = qpos_standing[4]
         self.p_ankle_ref = qpos_standing[5]
         self.p_shoulder_ref = qpos_standing[9]
         self.p_elbow_ref = qpos_standing[10]
@@ -374,17 +384,30 @@ class G1_Walk_Mirrored_CEM(CrossEntropyMethod):
             theta    = q[:, :N+1, 2]   # (B, N+1)
             thetadot = v[:, :N+1, 2]   # (B, N+1)
 
-            p_hip      = q[:, :N+1, 3]   # (B, N+1)
-            p_knee     = q[:, :N+1, 4]   # (B, N+1)
-            p_ankle    = q[:, :N+1, 5]   # (B, N+1)
+            # p_hip      = q[:, :N+1, 3]   # (B, N+1)
+            # p_knee     = q[:, :N+1, 4]   # (B, N+1)
+            # p_ankle    = q[:, :N+1, 5]   # (B, N+1)
             p_shoulder = q[:, :N+1, 9]   # (B, N+1)
             p_elbow    = q[:, :N+1, 10]  # (B, N+1)
 
-            v_hip      = v[:, :N+1, 3]   # (B, N+1)
-            v_knee     = v[:, :N+1, 4]   # (B, N+1)
-            v_ankle    = v[:, :N+1, 5]   # (B, N+1)
+            # v_hip      = v[:, :N+1, 3]   # (B, N+1)
+            # v_knee     = v[:, :N+1, 4]   # (B, N+1)
+            # v_ankle    = v[:, :N+1, 5]   # (B, N+1)
             v_shoulder = v[:, :N+1, 9]   # (B, N+1)
             v_elbow    = v[:, :N+1, 10]  # (B, N+1)
+
+            # left foot: position and orientation from sensors
+            foot_pos = self.dyn.sensor_pos_in_world_trajectory(
+                q[:, :N+1, :], v[:, :N+1, :]
+            )  # (B, N+1, 1, 3)
+            foot_x = foot_pos[:, :, 0, 0]   # (B, N+1) world x
+
+            foot_ori = self.dyn.sensor_ori_in_world_trajectory(
+                q[:, :N+1, :], v[:, :N+1, :]
+            )  # (B, N+1, 1, 4) quat [qw, qx, qy, qz]
+            qw, qx, qy, qz = foot_ori[:, :, 0, 0], foot_ori[:, :, 0, 1], foot_ori[:, :, 0, 2], foot_ori[:, :, 0, 3]
+            # pitch (rotation about world y): theta_y = asin(-2*(w*y - x*z))
+            foot_theta = jnp.arcsin(jnp.clip(-2.0 * (qw * qy - qx * qz), -1.0, 1.0))  # (B, N+1)
 
             # errors over full trajectory -> (B, N+1)
             e_px       = px       - self.px_ref[:N+1]        # (B, N+1)
@@ -394,15 +417,17 @@ class G1_Walk_Mirrored_CEM(CrossEntropyMethod):
             e_vz       = vz       - self.vz_ref[:N+1]        # (B, N+1)
             e_thetadot = thetadot - self.thetadot_ref[:N+1]  # (B, N+1)
 
-            e_p_hip      = p_hip      - self.p_hip_ref       # (B, N+1)
-            e_p_knee     = p_knee     - self.p_knee_ref      # (B, N+1)
-            e_p_ankle    = p_ankle    - self.p_ankle_ref     # (B, N+1)
+            e_foot_x     = foot_x                           # (B, N+1) target 0
+            e_foot_theta = foot_theta                       # (B, N+1) target 0
+            # e_p_hip      = p_hip      - self.p_hip_ref       # (B, N+1)
+            # e_p_knee     = p_knee     - self.p_knee_ref      # (B, N+1)
+            # e_p_ankle    = p_ankle    - self.p_ankle_ref     # (B, N+1)
             e_p_shoulder = p_shoulder - self.p_shoulder_ref  # (B, N+1)
             e_p_elbow    = p_elbow    - self.p_elbow_ref     # (B, N+1)
 
-            e_v_hip      = v_hip      - self.v_hip_ref       # (B, N+1)
-            e_v_knee     = v_knee     - self.v_knee_ref      # (B, N+1)
-            e_v_ankle    = v_ankle    - self.v_ankle_ref     # (B, N+1)
+            # e_v_hip      = v_hip      - self.v_hip_ref       # (B, N+1)
+            # e_v_knee     = v_knee     - self.v_knee_ref      # (B, N+1)
+            # e_v_ankle    = v_ankle    - self.v_ankle_ref     # (B, N+1)
             e_v_shoulder = v_shoulder - self.v_shoulder_ref  # (B, N+1)
             e_v_elbow    = v_elbow    - self.v_elbow_ref     # (B, N+1)
 
@@ -419,14 +444,16 @@ class G1_Walk_Mirrored_CEM(CrossEntropyMethod):
                 self.w_vx        * se(e_vx)       +
                 self.w_vz        * se(e_vz)       +
                 self.w_omega     * se(e_thetadot) +
-                self.w_p_hip     * se(e_p_hip)    +
-                self.w_p_knee    * se(e_p_knee)   +
-                self.w_p_ankle   * se(e_p_ankle)  +
+                self.w_foot_x    * se(e_foot_x)   +
+                self.w_foot_theta* se(e_foot_theta) +
+                # self.w_p_hip     * se(e_p_hip)    +
+                # self.w_p_knee    * se(e_p_knee)   +
+                # self.w_p_ankle   * se(e_p_ankle)  +
                 self.w_p_shoulder* se(e_p_shoulder)+
                 self.w_p_elbow   * se(e_p_elbow)  +
-                self.w_v_hip     * se(e_v_hip)    +
-                self.w_v_knee    * se(e_v_knee)   +
-                self.w_v_ankle   * se(e_v_ankle)  +
+                # self.w_v_hip     * se(e_v_hip)    +
+                # self.w_v_knee    * se(e_v_knee)   +
+                # self.w_v_ankle   * se(e_v_ankle)  +
                 self.w_v_shoulder* se(e_v_shoulder)+
                 self.w_v_elbow   * se(e_v_elbow)  +
                 self.w_control   * jnp.sum(jnp.sum(tau**2, axis=-1), axis=-1) +
@@ -443,14 +470,16 @@ class G1_Walk_Mirrored_CEM(CrossEntropyMethod):
                 self.wf_vx        * se_f(e_vx)       +
                 self.wf_vz        * se_f(e_vz)       +
                 self.wf_omega     * se_f(e_thetadot) +
-                self.wf_p_hip     * se_f(e_p_hip)    +
-                self.wf_p_knee    * se_f(e_p_knee)   +
-                self.wf_p_ankle   * se_f(e_p_ankle)  +
+                self.wf_foot_x    * se_f(e_foot_x)   +
+                self.wf_foot_theta* se_f(e_foot_theta) +
+                # self.wf_p_hip     * se_f(e_p_hip)    +
+                # self.wf_p_knee    * se_f(e_p_knee)   +
+                # self.wf_p_ankle   * se_f(e_p_ankle)  +
                 self.wf_p_shoulder* se_f(e_p_shoulder)+
                 self.wf_p_elbow   * se_f(e_p_elbow)  +
-                self.wf_v_hip     * se_f(e_v_hip)    +
-                self.wf_v_knee    * se_f(e_v_knee)   +
-                self.wf_v_ankle   * se_f(e_v_ankle)  +
+                # self.wf_v_hip     * se_f(e_v_hip)    +
+                # self.wf_v_knee    * se_f(e_v_knee)   +
+                # self.wf_v_ankle   * se_f(e_v_ankle)  +
                 self.wf_v_shoulder* se_f(e_v_shoulder)+
                 self.wf_v_elbow   * se_f(e_v_elbow)
             )  # (B,)
@@ -624,7 +653,7 @@ if __name__ == "__main__":
     cem_config = CrossEntropyMethod_Config(
         rng=cem_rng,
         T=t_SRB[-1],  
-        iterations=50,
+        iterations=25,
         N_elite=512,
         N_knots=10,
         spline_type="Bezier",
