@@ -147,6 +147,9 @@ N = int(T / dt)
 stance_end = N_stance
 flight_end = N_stance + N_flight
 
+# stance yaw allowance for limiting pre-rotation toward desired twist direction
+yaw_allow = 0.15  # [rad]
+
 # ----------------------------------------------------------
 # Setup the optimization problem
 # ----------------------------------------------------------
@@ -251,6 +254,15 @@ for k in range(N):
         opti.subject_to(ca.sumsqr(r_L) >= L_min**2)
         opti.subject_to(ca.sumsqr(r_R) >= L_min**2)
 
+        # # hard bound on pre-rotation toward desired twist direction during stance
+        # qk = X[3:7, k]  # [qw, qx, qy, qz]
+        # yaw_k = ca.atan2(
+        #     2.0 * (qk[0] * qk[3] + qk[1] * qk[2]),
+        #     1.0 - 2.0 * (qk[2] * qk[2] + qk[3] * qk[3])
+        # )
+        # yaw_progress = ca.sign(yaw_goal) * yaw_k
+        # opti.subject_to(yaw_progress <= yaw_allow)
+
     # FLIGHT
     elif (k>= stance_end) and (k < flight_end):
         F_total = ca.DM.zeros(3)
@@ -315,6 +327,7 @@ for k in range(N):
 
     # STANCE
     if k < stance_end:
+
         # friction cone constraints
         opti.subject_to(A_friction @ F_L[:, k] <= b_friction)
         opti.subject_to(A_friction @ F_R[:, k] <= b_friction)
@@ -370,7 +383,6 @@ opti.subject_to(ca.sumsqr(p_R_land - p_R_goal) <= landing_tol**2)
 
 # stance yaw-overrun penalty settings (encourage twist to happen in flight)
 W_stance_yaw = 200.0
-yaw_allow = 0.15  # [rad]
 
 # total cost
 J = 0
@@ -404,6 +416,8 @@ for k in range(N):
         x_ref_k[2] = x_goal[2]
         x_ref_k[3:7] = quat_k
         x_ref_k[7:13] = 0.0
+        # Encourage in-flight yaw rate consistent with completing yaw_goal over T_flight.
+        x_ref_k[12] = yaw_goal / T_flight
     else:
         x_ref_k = x_goal
 

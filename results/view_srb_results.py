@@ -71,7 +71,7 @@ else:
 #################################################################
 
 # Toggle COM wrench visualization from tau_opt (straight vectors for force and moment)
-SHOW_WRENCH_VIZ = True
+SHOW_WRENCH_VIZ = False
 
 # Wrench visual scale factors (tune for readability)
 FORCE_VIZ_SCALE = 0.001   # meters per Newton
