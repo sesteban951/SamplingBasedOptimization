@@ -29,10 +29,11 @@ class Hopper_CEM(CrossEntropyMethod):
 
     def __init__(self, model_config: Model_Config,
                        sim_config:   ParallelSim_Config,
-                       cem_config:   CrossEntropyMethod_Config):
+                       cem_config:   CrossEntropyMethod_Config,
+                       log_config:   Logger_Config):
         
         # initialize the parent class
-        super().__init__(model_config, sim_config, cem_config)
+        super().__init__(model_config, sim_config, cem_config, log_config)
 
         # Create reference trajectory (simple linear interpolation)
         self._make_reference()
@@ -255,6 +256,12 @@ if __name__ == "__main__":
         batch_size = 2048,
     )
 
+    # logger
+    log_config = Logger_Config(
+        experiment_name="hopper/hopper_cem/",
+        log_freq=2,
+    )
+
     # cem config
     cem_rng = jax.random.PRNGKey(42)
     cem_config = CrossEntropyMethod_Config(
@@ -270,7 +277,8 @@ if __name__ == "__main__":
     cem_optimizer = Hopper_CEM(
         model_config=model_config,
         sim_config=sim_config,
-        cem_config=cem_config
+        cem_config=cem_config,
+        log_config=log_config
     )
 
     # optimize from an initial state
