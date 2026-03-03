@@ -29,7 +29,7 @@
             <joint name="pz"    type="slide" axis="0 0 1"/>
             <joint name="theta" type="hinge" axis="0 1 0" limited="true" range="-405.0 405.0"/>
             <geom name="torso" type="sphere" size="0.1" rgba="1.0 0.424 0.047 1" contype="2" conaffinity="1"/>
-            <site name="torso_site" type="sphere" size="0.101" rgba="0 0 0 0"/>
+            <site name="torso" type="sphere" size="0.102" pos="0 0 0" rgba="0 0 1 1"/>
             <geom name="upper_leg" type="cylinder" fromto="0 0 0 0 0 -0.5" size="0.04" rgba="0.4 0.4 0.4 0.5"/>
 
             <!-- SpringLoaded Leg -->
@@ -37,7 +37,7 @@
                 <joint name="leg" type="slide" axis="0 0 1" range="-0.25 0.25" springref="0.0" stiffness="2000.0" damping="50.0"/>
                 <geom name="lower_leg" type="cylinder" fromto="0 0 0.25 0 0 -0.25" size="0.03" rgba="0.8 0.8 0.8 0.5"/>
                 <geom name="foot" type="sphere" size="0.05" pos="0 0 -0.25" rgba="0.1 0.1 0.1 1" contype="4" conaffinity="1"/>
-                <site name="foot_site" type="sphere" size="0.051" pos="0 0 -0.25" rgba="0 0 0 0"/>
+                <site name="foot" type="sphere" size="0.052" pos="0 0 -0.25" rgba="0 0 1 1"/>
             </body>
         </body>
 
@@ -45,8 +45,8 @@
 
     <!-- Sensors -->    
     <sensor>
-        <touch name="torso_touch" site="torso_site"/>
-        <touch name="foot_touch"  site="foot_site"/>
+        <touch name="torso_touch" site="torso"/>
+        <touch name="foot_touch"  site="foot"/>
     </sensor>
 
     <!-- Actuators -->

@@ -50,6 +50,9 @@ np.set_printoptions(precision=4, suppress=True)
 # print some info about the model
 print("\n#####################  INFO  #####################")
 
+# map sensor enum values to readable names
+sensor_type_dict = {int(v): k for k, v in mujoco.mjtSensor.__members__.items()}
+
 # file name
 print("Model file name:", xml_file)
 
@@ -100,6 +103,20 @@ for i in range(model.nbody):
         print(f"    Body {i} inertia: {inertia}")
 
 print(f"\n    Total mass: {total_mass:.4f}")
+
+# sensors
+print("\nNumber of sensors:", model.nsensor)
+for i in range(model.nsensor):
+    name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_SENSOR, i)
+    stype = int(model.sensor_type[i])
+    stype_name = sensor_type_dict.get(stype, f"UNKNOWN({stype})")
+    sdim = model.sensor_dim[i]
+    sadr = model.sensor_adr[i]
+    print(f"    Sensor {i} name: {name}")
+    print(f"    Sensor {i} type: {stype_name}")
+    print(f"    Sensor {i} dim: {sdim}")
+    print(f"    Sensor {i} adr: {sadr}")
+
 
 print("\n##################################################")
 
