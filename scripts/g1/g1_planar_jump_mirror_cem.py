@@ -119,6 +119,7 @@ class G1_Walk_Mirrored_CEM(CrossEntropyMethod):
             sim_config.batch_size,
             pos_sensor_names=["left_foot_position"],
             ori_sensor_names=["left_foot_orientation"],
+            touch_sensor_names=["left_foot_touch"]
         )
         self.dyn = Dynamics(dyn_config)
 
