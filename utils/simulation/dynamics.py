@@ -36,6 +36,7 @@ class Dynamics_Config:
     # optional list of site names to track
     pos_sensor_names: list[str] = None
     ori_sensor_names: list[str] = None
+    touch_sensor_names: list[str] = None
 
 
 class Dynamics:
@@ -88,6 +89,9 @@ class Dynamics:
             lambda _: mjx.put_data(mj_model, mj_data)
         )(jnp.arange(self.B))
 
+        # single-environment data (used in trajectory functions to avoid nested vmap)
+        self.data0_single = mjx.put_data(mj_model, mj_data)
+
         # get the default state
         keyframe = "default"
         key_id = mj_model.key(keyframe).id
@@ -129,11 +133,22 @@ class Dynamics:
         self.ns_ori = 0
         if dynamics_config.ori_sensor_names is not None:
             self.ori_sensor_addr = self._get_sensor_addresses(
-                mj_model, 
+                mj_model,
                 dynamics_config.ori_sensor_names)
             self.ns_ori = len(self.ori_sensor_addr)
-            print(f"Initialized orientation sensors: {dynamics_config.ori_sensor_names}, " 
+            print(f"Initialized orientation sensors: {dynamics_config.ori_sensor_names}, "
                   f"total {self.ns_ori} sensors.")
+
+        # touch sensor addresses
+        self.touch_sensor_addr = None
+        self.ns_touch = 0
+        if dynamics_config.touch_sensor_names is not None:
+            self.touch_sensor_addr = self._get_sensor_addresses(
+                mj_model,
+                dynamics_config.touch_sensor_names)
+            self.ns_touch = len(self.touch_sensor_addr)
+            print(f"Initialized touch sensors: {dynamics_config.touch_sensor_names}, "
+                  f"total {self.ns_touch} sensors.")
 
         # compute the nominal inertia about the base body frame
         I_w = np.zeros((3, 3))
@@ -194,6 +209,9 @@ class Dynamics:
         if self.ori_sensor_addr is not None:
             self.sensor_ori_in_world = jax.jit(self._sensor_ori_in_world)
             self.sensor_ori_in_world_trajectory = jax.jit(self._sensor_ori_in_world_trajectory)
+        if self.touch_sensor_addr is not None:
+            self.sensor_touch = jax.jit(self._sensor_touch)
+            self.sensor_touch_trajectory = jax.jit(self._sensor_touch_trajectory)
 
         # helpful vector operations
         self.skew = jax.jit(self._skew)
@@ -376,12 +394,19 @@ class Dynamics:
         Returns:
             positions: (B, T, ns_pos, 3)
         """
-        q_t = jnp.swapaxes(q_traj, 0, 1)  # (T, B, nq)
-        v_t = jnp.swapaxes(v_traj, 0, 1)  # (T, B, nv)
+        # Flatten (B, T) → (B*T,) and run a single vmap over all envs×timesteps.
+        # This is faster than lax.scan (sequential over T) because all B*T
+        # forward passes execute in parallel on the GPU.
+        B, T, _ = q_traj.shape
+        q_flat = q_traj.reshape(B * T, self.nq)
+        v_flat = v_traj.reshape(B * T, self.nv)
 
-        positions_t = jax.vmap(self._sensor_pos_in_world)(q_t, v_t)  # (T, B, ns_pos, 3)
+        def single(q, v):
+            data = self.data0_single.replace(qpos=q, qvel=v)
+            return self._sensor_pos_in_world_single_env(self.mjx_model, data)
 
-        return jnp.swapaxes(positions_t, 0, 1)  # (B, T, ns_pos, 3)
+        positions_flat = jax.vmap(single)(q_flat, v_flat)  # (B*T, ns_pos, 3)
+        return positions_flat.reshape(B, T, self.ns_pos, 3)
 
     
     def _sensor_ori_in_world_single_env(self, model, data):
@@ -426,12 +451,70 @@ class Dynamics:
         Returns:
             orientations: (B, T, ns_ori, 4)
         """
-        q_t = jnp.swapaxes(q_traj, 0, 1)  # (T, B, nq)
-        v_t = jnp.swapaxes(v_traj, 0, 1)  # (T, B, nv)
+        B, T, _ = q_traj.shape
+        q_flat = q_traj.reshape(B * T, self.nq)
+        v_flat = v_traj.reshape(B * T, self.nv)
 
-        orientations_t = jax.vmap(self._sensor_ori_in_world)(q_t, v_t)  # (T, B, ns_ori, 4)
+        def single(q, v):
+            data = self.data0_single.replace(qpos=q, qvel=v)
+            return self._sensor_ori_in_world_single_env(self.mjx_model, data)
 
-        return jnp.swapaxes(orientations_t, 0, 1)  # (B, T, ns_ori, 4)
+        orientations_flat = jax.vmap(single)(q_flat, v_flat)  # (B*T, ns_ori, 4)
+        return orientations_flat.reshape(B, T, self.ns_ori, 4)
+
+
+    def _sensor_touch_single_env(self, model, data):
+        """
+        Reads touch sensor values for a single environment.
+        Retuns the magnitude of the touch sensor readings.
+        """
+        data = mjx.forward(model, data)
+
+        # stack all touch readings into (ns_touch,)
+        touch = jnp.stack([
+            data.sensordata[addr]
+            for addr in self.touch_sensor_addr.values()
+        ])  # (ns_touch,)
+
+        return touch
+
+    def _sensor_touch(self, q, v):
+        """
+        Computes touch sensor readings for all parallel environments.
+
+        Args:
+            q (jnp.ndarray): (B, nq) array of generalized positions
+            v (jnp.ndarray): (B, nv) array of generalized velocities
+        Returns:
+            touch (jnp.ndarray): (B, ns_touch) array of touch sensor values [N]
+        """
+        data = self.data0.replace(qpos=q, qvel=v)
+
+        single = lambda d: self._sensor_touch_single_env(self.mjx_model, d)
+        touch = jax.vmap(single)(data)  # (B, ns_touch)
+
+        return touch
+
+    def _sensor_touch_trajectory(self, q_traj, v_traj):
+        """
+        Computes touch sensor readings over a full trajectory.
+
+        Args:
+            q_traj: (B, T, nq)
+            v_traj: (B, T, nv)
+        Returns:
+            touch: (B, T, ns_touch)
+        """
+        B, T, _ = q_traj.shape
+        q_flat = q_traj.reshape(B * T, self.nq)
+        v_flat = v_traj.reshape(B * T, self.nv)
+
+        def single(q, v):
+            data = self.data0_single.replace(qpos=q, qvel=v)
+            return self._sensor_touch_single_env(self.mjx_model, data)
+
+        touch_flat = jax.vmap(single)(q_flat, v_flat)  # (B*T, ns_touch)
+        return touch_flat.reshape(B, T, self.ns_touch)
 
 
     ################################## HELPERS ##################################
@@ -823,7 +906,9 @@ if __name__ == "__main__":
         pos_sensor_names=["left_foot_position", 
                           "right_foot_position"],
         ori_sensor_names=["left_foot_orientation", 
-                          "right_foot_orientation"]
+                          "right_foot_orientation"],
+        touch_sensor_names=["left_foot_touch",
+                           "right_foot_touch"]
     )
 
     # initialize
@@ -1309,3 +1394,42 @@ if __name__ == "__main__":
     assert_close("vec_body_to_world_traj identity quat", vec_W_id, vec_B_traj, atol=1e-6, rtol=1e-6)
 
     print("\n✅ All vec trajectory tests passed.\n")
+
+
+    print("\n================ TOUCH SENSOR TESTS ================\n")
+
+    q_same = jnp.zeros((dyn.B, dyn.nq)).at[:, 3].set(1.0)
+    v_same = jnp.zeros((dyn.B, dyn.nv))
+
+    # (a) output shape
+    touch = dyn.sensor_touch(q_same, v_same)
+    assert touch.shape == (dyn.B, dyn.ns_touch), \
+        f"Expected ({dyn.B}, {dyn.ns_touch}), got {touch.shape}"
+    print(f"sensor_touch shape: {touch.shape}  ✅")
+    print(f"sensor_touch values:\n{touch}")
+
+    # (b) readings should be non-negative (touch reports normal force magnitude)
+    assert jnp.all(touch >= 0.0), f"Touch sensor readings should be non-negative, got: {touch}"
+    print(f"sensor_touch non-negative: min={float(touch.min()):.3e}  ✅")
+
+    # (c) identical states -> identical readings across envs
+    spread = jnp.max(jnp.abs(touch - touch[0]))
+    print(f"sensor_touch identical envs max spread (expect ~0): {float(spread):.3e}")
+    assert spread < 1e-5, f"Touch readings differ across identical envs: {spread}"
+
+    # (d) trajectory shape
+    T = 10
+    q_traj = jnp.tile(q_same[:, None, :], (1, T, 1))  # (B, T, nq)
+    v_traj = jnp.zeros((dyn.B, T, dyn.nv))
+
+    touch_traj = dyn.sensor_touch_trajectory(q_traj, v_traj)
+    assert touch_traj.shape == (dyn.B, T, dyn.ns_touch), \
+        f"Expected ({dyn.B}, {T}, {dyn.ns_touch}), got {touch_traj.shape}"
+    print(f"sensor_touch_trajectory shape: {touch_traj.shape}  ✅")
+
+    # (e) trajectory matches single-step
+    touch_traj_err = jnp.max(jnp.abs(touch_traj - touch[:, None, :]))
+    print(f"sensor_touch_traj vs single-step max err (expect ~0): {float(touch_traj_err):.3e}")
+    assert touch_traj_err < 1e-5, f"Touch trajectory inconsistent with single-step: {touch_traj_err}"
+
+    print("\n✅ All touch sensor tests passed.\n")

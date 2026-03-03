@@ -326,6 +326,9 @@
     <framequat name="left_foot_orientation" objtype="site" objname="left_foot" />
     <framepos name="right_foot_position" objtype="site" objname="right_foot" />
     <framequat name="right_foot_orientation" objtype="site" objname="right_foot" />
+
+    <touch name="left_foot_touch" site="left_foot" />
+    <touch name="right_foot_touch" site="right_foot" />
   </sensor>
 
   <statistic center="0.0 0.0 0.5" extent="1.5"/>
