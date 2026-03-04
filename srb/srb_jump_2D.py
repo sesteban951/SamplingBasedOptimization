@@ -98,7 +98,7 @@ nv  = srb.nv
 # fix timings
 dt       = 0.02
 T_stance = 0.5
-T_flight = 0.5
+T_flight = 0.7
 T_land   = 0.5
 T        = T_stance + T_flight + T_land
 
@@ -248,11 +248,11 @@ for k in range(N):
 
 
 # COM height bounds
-pz_min = 0.40
-pz_max = 0.95
+pz_min = 0.30
+# pz_max = 0.95
 for k in range(N + 1):
     opti.subject_to(X[1, k] >= pz_min)
-    opti.subject_to(X[1, k] <= pz_max)
+    # opti.subject_to(X[1, k] <= pz_max)
 
 # ----------------------------------------------------------
 # Contact Constraints
@@ -440,6 +440,19 @@ for k in range(N):
 a_opt[N, :] = a_opt[N - 1, :]
 
 # ----------------------------------------------------------
+# Create contact schedule signal
+# ----------------------------------------------------------
+
+contact_schedule = np.zeros((N+1, ))  # (N+1)
+for k in range(N + 1):
+    if k < stance_end:
+        contact_schedule[k] = 1.0  # stance
+    elif k < flight_end:
+        contact_schedule[k] = 0.0  # flight
+    else:
+        contact_schedule[k] = 1.0  # landing
+
+# ----------------------------------------------------------
 # Print Results
 # ----------------------------------------------------------
 
@@ -472,5 +485,6 @@ np.savetxt(save_dir + "q_opt.csv",   q_opt,   delimiter=",")
 np.savetxt(save_dir + "v_opt.csv",   v_opt,   delimiter=",")
 np.savetxt(save_dir + "a_opt.csv",   a_opt,   delimiter=",")
 np.savetxt(save_dir + "tau_opt.csv", U,       delimiter=",")
+np.savetxt(save_dir + "contact_schedule.csv", contact_schedule, delimiter=",")
 
 print(f"\nSaved results to {save_dir}")
