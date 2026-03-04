@@ -190,6 +190,9 @@ if __name__ == "__main__":
         batch_size = 4096,
     )
 
+    mu0  = jnp.array([0.0])  # initial state (cart at 0, pole upright)
+    std0 = 1.0
+
     # cem config
     s = int(time.time())
     # s = 42
@@ -199,12 +202,14 @@ if __name__ == "__main__":
         T=3.0,
         iterations=200,
         N_elite=2048,
+        initial_mu=mu0,
+        initial_std=std0,
         # N_knots=4*5,
         # spline_type="ZOH",
-        # N_knots=10,
-        # spline_type="Linear",
         N_knots=10,
-        spline_type="Cubic",
+        spline_type="Linear",
+        # N_knots=10,
+        # spline_type="Cubic",
         # N_knots=10,
         # spline_type="Bezier",
     )

@@ -42,10 +42,10 @@ plot_touch_sensors = 1
 #################################################################################
 
 # which data to load
-# experiment = "cartpole/cartpole_cem"
+experiment = "cartpole/cartpole_cem"
 # experiment = "cartpole/cartpole_mppi"
 # experiment = "cartpole/cartpole_cmaes"
-# xml_path = f"./models/cartpole/cartpole.xml"
+xml_path = f"./models/cartpole/cartpole.xml"
 # experiment = "cartpole/cartpole_walls_cem"
 # xml_path = f"./models/cartpole/cartpole_walls.xml"
 
@@ -59,8 +59,8 @@ plot_touch_sensors = 1
 # experiment = "g1/g1_planar_walk_cem"
 # experiment = "g1/g1_planar_walk_mppi"
 # experiment = "g1/g1_planar_walk_weights_mppi"
-experiment = "g1/g1_planar_jump_mirror_cem"
-xml_path = f"./models/g1/g1_planar.xml"
+# experiment = "g1/g1_planar_jump_mirror_cem"
+# xml_path = f"./models/g1/g1_planar.xml"
 
 # experiment = "g1/g1_stand_cem"
 # experiment = "g1/g1_jump_wrench_cem"

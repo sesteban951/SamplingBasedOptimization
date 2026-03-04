@@ -40,6 +40,10 @@ class CrossEntropyMethod_Config:
     iterations: int  # number of CEM iterations
     N_elite: int     # number of elite samples
 
+    # for intial sampling distribution
+    initial_mu: jnp.ndarray  # initial mean action vector, shape (nu,)
+    initial_std: float       # initial standard deviation for sampling around the initial mean
+
     # spline params
     spline_type: str = "ZOH"   # "ZOH" | "Linear" | "Cubic" | "Bezier" | "Fourier"
 
@@ -88,7 +92,8 @@ class CrossEntropyMethod(ABC):
         self.Sigma = None
 
         # initialize the spline knots points
-        self._initialize_spline_knots()
+        # self._initialize_spline_knots()
+        self.__initialize_spline_knots()
 
         print("CEM Optimizer initialized.")
 
@@ -126,6 +131,10 @@ class CrossEntropyMethod(ABC):
             or self.cem_config.initial_action_range_scale > 1.0):
             raise ValueError(f"Initial action range scale [{self.cem_config.initial_action_range_scale}]"
                              f" must be in (0, 1].")
+
+        # initial standard deviation must be positive
+        if self.cem_config.initial_std <= 0.0:
+            raise ValueError(f"Initial std [{self.cem_config.initial_std}] must be positive.")
         
         # if using step size, check that step_size is in (0, 1]
         if self.cem_config.use_step_size == True:
@@ -221,6 +230,51 @@ class CrossEntropyMethod(ABC):
 
         # update the distribution with the initial knot points
         self._update_distribution(Y0)
+
+    # initialize the distribution with a pre-defined mean and std
+    def __initialize_spline_knots(self):
+        
+        # initialize an empty array for the knot points
+        y_size = (self.sim.B, self.cem_config.N_knots, self.sim.nu)
+        Y0 = jnp.zeros(y_size)
+
+        # expected mean action vector shape (nu,)
+        expected_shape = (self.sim.nu,)
+        initial_mu = jnp.asarray(self.cem_config.initial_mu)
+
+        if initial_mu.shape != expected_shape:
+            raise ValueError(
+                f"initial_mu has shape {initial_mu.shape}, expected {expected_shape}."
+            )
+
+        # copy a single mean action vector across all knots and rollouts
+        Y0 = Y0 + initial_mu[None, None, :]
+
+        # create the spline object
+        if self.cem_config.spline_type == "ZOH":
+            self.spline = zoh.ZOH_Spline(Y0, self.T_eff)
+        elif self.cem_config.spline_type == "Linear":
+            self.spline = linear.Linear_Spline(Y0, self.T_eff)
+        elif self.cem_config.spline_type == "Cubic":
+            self.spline = cubic.Cubic_Spline(Y0, self.T_eff)
+        elif self.cem_config.spline_type == "Bezier":
+            self.spline = bezier.Bezier_Spline(Y0, self.T_eff)
+        elif self.cem_config.spline_type == "Fourier":
+            self.spline = fourier.Fourier_Spline(Y0, self.T_eff, periodic=False)
+        else:
+            raise NotImplementedError(f"Spline type [{self.cem_config.spline_type}] not implemented.")
+
+        # initialize mean/covariance directly from initial_mu and initial_std
+        self.mu = jnp.reshape(Y0[0], (-1,))  # shape (N_knots * nu,)
+        dim = self.mu.shape[0]
+        sigma2 = (self.cem_config.initial_std ** 2)
+        self.Sigma = sigma2 * jnp.eye(dim, dtype=initial_mu.dtype)
+
+        # seed CEM with an actual sampled batch; otherwise the first update
+        # sees identical trajectories and collapses Sigma to epsilon*I.
+        Y_samples = self._sample_knot_points()
+        self.spline.update_knots(Y_samples)
+
 
 
     def _sample_knot_points(self):
