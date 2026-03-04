@@ -21,11 +21,8 @@ from mujoco.viewer import launch
 # xml_file = "./models/cartpole/cartpole_walls.xml"
 
 # xml_file = "./models/hopper/hopper.xml"
-# xml_file = "./models/hopper/hopper_stairs.xml"
 
 # xml_file = "./models/biped/biped.xml"
-# xml_file = "./models/biped/biped_platform.xml"
-# xml_file = "./models/biped/biped_cliff.xml"
 
 # xml_file = "./models/cube/scene.xml"
 
