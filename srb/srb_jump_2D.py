@@ -164,7 +164,7 @@ p0_L = ca.DM([x0[0]])  # left  foot x
 p0_R = ca.DM([x0[0]])  # right foot x
 
 # Goal state: jumped forward, same height, upright, stopped
-px_goal = 1.0
+px_goal = 0.0
 x_goal = np.array([
     px_goal, pz_nom,  # px, pz,
     0.0,              # theta
