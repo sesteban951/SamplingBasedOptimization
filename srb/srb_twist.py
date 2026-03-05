@@ -17,7 +17,7 @@ from utils.interpolation import interp
 from srb.srb import SRBDynamics
 
 
-class SRB_Jump(SRBDynamics):
+class SRB_Twist(SRBDynamics):
 
     # initialize the class
     def __init__(self):
@@ -169,7 +169,7 @@ def sample_piecewise_slerp(alpha, quat_keyframes):
 ##############################################################
 
 # create the dynamics object
-srb = SRB_Jump()
+srb = SRB_Twist()
 f = srb.f_disc
 nq = srb.nq
 nv = srb.nv
