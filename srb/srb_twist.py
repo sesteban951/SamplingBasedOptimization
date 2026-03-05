@@ -160,7 +160,6 @@ def sample_piecewise_slerp(alpha, quat_keyframes):
     s = alpha * (quat_keyframes.shape[0] - 1)
     i = min(int(np.floor(s)), quat_keyframes.shape[0] - 2)
     alpha_local = s - i
-    print("I'M SLERPING!")
     return interp.slerp(quat_keyframes[i], quat_keyframes[i + 1], alpha_local)
 
 
