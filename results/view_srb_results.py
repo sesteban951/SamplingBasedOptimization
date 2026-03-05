@@ -8,6 +8,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import time
+import os
 
 # mujoco imports
 import mujoco 
@@ -24,7 +25,8 @@ from utils.kinematics import kin
 # which data to load
 # experiment = "srb/srb_free_wrench"
 # experiment = "srb/srb_jump"
-experiment = "srb/srb_jump_2d"
+# experiment = "srb/srb_jump_2d"
+experiment = "srb/srb_twist"
 
 # which data to load
 time_file = f"./results/{experiment}/time.csv"
@@ -32,6 +34,7 @@ q_file = f"./results/{experiment}/q_opt.csv"
 v_file = f"./results/{experiment}/v_opt.csv"
 a_file = f"./results/{experiment}/a_opt.csv"
 tau_file = f"./results/{experiment}/tau_opt.csv"
+feet_file = f"./results/{experiment}/feet.csv"
 
 # load data from csv files
 times = np.loadtxt(time_file, delimiter=",")
@@ -40,12 +43,26 @@ v_opt = np.loadtxt(v_file, delimiter=",")
 a_opt = np.loadtxt(a_file, delimiter=",")
 tau_opt = np.loadtxt(tau_file, delimiter=",")
 
+# optional feet trajectory: columns [pL_x, pL_y, pR_x, pR_y], shape (N, 4)
+feet_opt = None
+if os.path.exists(feet_file):
+    feet_opt = np.loadtxt(feet_file, delimiter=",")
+    if feet_opt.ndim == 1:
+        feet_opt = feet_opt.reshape(1, -1)
+    if feet_opt.shape[1] != 4:
+        print(f"Warning: expected feet.csv with 4 columns, got {feet_opt.shape}. Ignoring feet visualization.")
+        feet_opt = None
+
 print("Loaded data:")
 print(f"  times: {times.shape}")
 print(f"  q_opt: {q_opt.shape}")
 print(f"  v_opt: {v_opt.shape}")
 print(f"  a_opt: {a_opt.shape}")
 print(f"  tau_opt: {tau_opt.shape}")
+if feet_opt is not None:
+    print(f"  feet_opt: {feet_opt.shape}")
+else:
+    print("  feet_opt: not found (continuing without feet overlays)")
 
 #################################################################
 # VISUALIZATION
@@ -87,6 +104,37 @@ data = mujoco.MjData(model)
 # visualize the optimal trajectory
 viewer = mujoco.viewer.launch_passive(model, data)
 
+def _add_box_geom(scene, pos, halfsizes, rgba):
+    if scene.ngeom >= scene.maxgeom:
+        return
+    geom = scene.geoms[scene.ngeom]
+    mujoco.mjv_initGeom(
+        geom,
+        mujoco.mjtGeom.mjGEOM_BOX,
+        np.array(halfsizes, dtype=np.float64),
+        np.array(pos, dtype=np.float64),
+        np.eye(3).reshape(9),
+        np.array(rgba, dtype=np.float64),
+    )
+    geom.category = int(mujoco.mjtCatBit.mjCAT_DECOR)
+    scene.ngeom += 1
+
+def _add_connector_geom(scene, p_from, p_to, radius, rgba):
+    if scene.ngeom >= scene.maxgeom:
+        return
+    geom = scene.geoms[scene.ngeom]
+    # Draw straight decorative connector between points.
+    mujoco.mjv_connector(
+        geom,
+        mujoco.mjtGeom.mjGEOM_CAPSULE,
+        radius,
+        np.array(p_from, dtype=np.float64),
+        np.array(p_to, dtype=np.float64),
+    )
+    geom.rgba[:] = np.array(rgba, dtype=np.float32)
+    geom.category = int(mujoco.mjtCatBit.mjCAT_DECOR)
+    scene.ngeom += 1
+
 # decide if 2D or 3D trajectory
 if "2d" in experiment.lower():
     q_replay = srb_2D_to_3D(q_opt)
@@ -108,6 +156,48 @@ try:
 
         data.qpos[:] = q_replay[i, :]
         mujoco.mj_step(model, data)
+
+        # optional feet/legs overlays
+        if viewer.user_scn is not None:
+            viewer.user_scn.ngeom = 0
+
+            if feet_opt is not None and i < feet_opt.shape[0]:
+                feet_k = feet_opt[i, :]
+                if np.all(np.isfinite(feet_k)):
+                    p_com = q_replay[i, 0:3]
+                    p_L = np.array([feet_k[0], feet_k[1], 0.0], dtype=np.float64)
+                    p_R = np.array([feet_k[2], feet_k[3], 0.0], dtype=np.float64)
+
+                    # feet as small boxes
+                    _add_box_geom(
+                        viewer.user_scn,
+                        p_L,
+                        halfsizes=[0.05, 0.03, 0.015],
+                        rgba=[0.95, 0.45, 0.10, 0.9],
+                    )
+                    _add_box_geom(
+                        viewer.user_scn,
+                        p_R,
+                        halfsizes=[0.05, 0.03, 0.015],
+                        rgba=[0.10, 0.55, 0.95, 0.9],
+                    )
+
+                    # simple unactuated visual connectors (legs)
+                    _add_connector_geom(
+                        viewer.user_scn,
+                        p_com,
+                        p_L,
+                        radius=0.01,
+                        rgba=[0.85, 0.85, 0.85, 0.8],
+                    )
+                    _add_connector_geom(
+                        viewer.user_scn,
+                        p_com,
+                        p_R,
+                        radius=0.01,
+                        rgba=[0.85, 0.85, 0.85, 0.8],
+                    )
+
         viewer.sync()
 
         if time.time() - t0 > times[-1]:
