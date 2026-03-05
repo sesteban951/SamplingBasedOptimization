@@ -23,8 +23,8 @@ from utils.kinematics import kin
 
 # which data to load
 # experiment = "srb/srb_free_wrench"
-# experiment = "srb/srb_jump"
-experiment = "srb/srb_jump_2d"
+experiment = "srb/srb_jump"
+# experiment = "srb/srb_jump_2d"
 
 # which data to load
 time_file = f"./results/{experiment}/time.csv"
@@ -127,42 +127,60 @@ viewer.close()
 # 2D SRB Trajectory
 if "2d" in experiment.lower():
 
-    # ----------------------- POS / VEL -----------------------
+    # ----------------------- POS / VEL / ACC -----------------------
     plt.figure(num="State")
 
-    plt.subplot(2, 3, 1)
+    plt.subplot(3, 3, 1)
     plt.plot(times, q_opt[:, 0])
     plt.ylabel("Pos x (m)")
     plt.xlabel("Time (s)")
     plt.grid()
 
-    plt.subplot(2, 3, 2)
+    plt.subplot(3, 3, 2)
     plt.plot(times, q_opt[:, 1])
     plt.ylabel("Pos z (m)")
     plt.xlabel("Time (s)")
     plt.grid()
 
-    plt.subplot(2, 3, 3)
+    plt.subplot(3, 3, 3)
     plt.plot(times, q_opt[:, 2])
     plt.ylabel("Theta (rad)")
     plt.xlabel("Time (s)")
     plt.grid()
 
-    plt.subplot(2, 3, 4)
+    plt.subplot(3, 3, 4)
     plt.plot(times, v_opt[:, 0])
     plt.ylabel("Vel x (m/s)")
     plt.xlabel("Time (s)")
     plt.grid()
 
-    plt.subplot(2, 3, 5)
+    plt.subplot(3, 3, 5)
     plt.plot(times, v_opt[:, 1])
     plt.ylabel("Vel z (m/s)")
     plt.xlabel("Time (s)")
     plt.grid()
 
-    plt.subplot(2, 3, 6)
+    plt.subplot(3, 3, 6)
     plt.plot(times, v_opt[:, 2])
     plt.ylabel("Omega (rad/s)")
+    plt.xlabel("Time (s)")
+    plt.grid()
+
+    plt.subplot(3, 3, 7)
+    plt.plot(times, a_opt[:, 0])
+    plt.ylabel("Acc x (m/s²)")
+    plt.xlabel("Time (s)")
+    plt.grid()
+
+    plt.subplot(3, 3, 8)
+    plt.plot(times, a_opt[:, 1])
+    plt.ylabel("Acc z (m/s²)")
+    plt.xlabel("Time (s)")
+    plt.grid()
+
+    plt.subplot(3, 3, 9)
+    plt.plot(times, a_opt[:, 2])
+    plt.ylabel("Alpha (rad/s²)")
     plt.xlabel("Time (s)")
     plt.grid()
 
@@ -300,6 +318,45 @@ else:
     plt.subplot(2, 3, 6)
     plt.plot(times, v_opt[:, 5])
     plt.ylabel("Omega z (rad/s)")
+    plt.xlabel("Time (s)")
+    plt.grid()
+
+    # ----------------------- ACC -----------------------
+    plt.figure(num="Accelerations (a)")
+
+    plt.subplot(2, 3, 1)
+    plt.plot(times, a_opt[:, 0])
+    plt.ylabel("Acc x (m/s²)")
+    plt.xlabel("Time (s)")
+    plt.grid()
+
+    plt.subplot(2, 3, 2)
+    plt.plot(times, a_opt[:, 1])
+    plt.ylabel("Acc y (m/s²)")
+    plt.xlabel("Time (s)")
+    plt.grid()
+
+    plt.subplot(2, 3, 3)
+    plt.plot(times, a_opt[:, 2])
+    plt.ylabel("Acc z (m/s²)")
+    plt.xlabel("Time (s)")
+    plt.grid()
+
+    plt.subplot(2, 3, 4)
+    plt.plot(times, a_opt[:, 3])
+    plt.ylabel("Alpha x (rad/s²)")
+    plt.xlabel("Time (s)")
+    plt.grid()
+
+    plt.subplot(2, 3, 5)
+    plt.plot(times, a_opt[:, 4])
+    plt.ylabel("Alpha y (rad/s²)")
+    plt.xlabel("Time (s)")
+    plt.grid()
+
+    plt.subplot(2, 3, 6)
+    plt.plot(times, a_opt[:, 5])
+    plt.ylabel("Alpha z (rad/s²)")
     plt.xlabel("Time (s)")
     plt.grid()
 

@@ -25,21 +25,23 @@ class SRB_Jump(SRBDynamics):
 
         # simple quadratic penalalty on states
         self.Qx = ca.diag(ca.vertcat(
-            1.0, 1.0, 1.0,  # px, py, pz
-            1.0, 1.0, 1.0,  # qx, qy, qz
-            1.0, 1.0, 1.0,  # vx, vy, vz
-            1.0, 1.0, 1.0   # wx, wy, wz
+            1.0, 1.0, 1.0,    # px, py, pz
+            15.0, 15.0, 15.0, # qx, qy, qz
+            1.0, 1.0, 1.0,    # vx, vy, vz
+            3.0, 3.0, 3.0     # wx, wy, wz
         ))
 
         # foot placement cost weights
-        self.Q_foot = 10.0
+        self.Q_foot = 1.0
 
         # penalize forces and moments
-        self.Q_force = 0.005
-        self.Q_moment = 0.0005
+        self.Q_force = 1e-4
+        self.Q_moment = 1e-4
+        self.Q_force_dot  = 1e-4
+        self.Q_moment_dot = 1e-4
 
         # terminal weights
-        self.Qx_f = 20.0 * self.Qx
+        self.Qx_f = 10.0 * self.Qx
 
 
     ###############################################################
@@ -82,6 +84,19 @@ class SRB_Jump(SRBDynamics):
         
         return cost
     
+    def force_rate_cost(self, F_L_k, F_R_k, M_L_k, M_R_k,
+                              F_L_k1, F_R_k1, M_L_k1, M_R_k1,
+                              dt):
+        """Cost on force and moment rate of change"""
+        dF_L = (F_L_k1 - F_L_k) / dt
+        dF_R = (F_R_k1 - F_R_k) / dt
+        dM_L = (M_L_k1 - M_L_k) / dt
+        dM_R = (M_R_k1 - M_R_k) / dt
+        return (
+            0.5 * self.Q_force_dot  * (ca.sumsqr(dF_L) + ca.sumsqr(dF_R))
+          + 0.5 * self.Q_moment_dot * (ca.sumsqr(dM_L) + ca.sumsqr(dM_R))
+        )
+
     # Foot placement cost
     def foot_placement_cost(self, p_L, p_R, p_L_des, p_R_des):
         """Cost on foot placement tracking"""
@@ -132,9 +147,9 @@ nu = srb.nu
 
 # fix timings
 dt = 0.02        # time step
-T_stance = 0.5   # stance duration
+T_stance = 1.0   # stance duration
 T_flight = 0.5   # flight duration
-T_land = 0.5     # landing duration
+T_land =   0.8   # landing duration
 T = T_stance + T_flight + T_land  # total trajectory duration
 
 # number of steps
@@ -166,6 +181,7 @@ M_L = opti.variable(3, N)   # ankle moments at left ankle
 M_R = opti.variable(3, N)   # ankle moments at right ankle
 
 # initial condition
+pz_nom = 0.77
 pitch0_deg = 0.0
 quat0 = np.array([
     np.cos(np.radians(pitch0_deg) / 2),  # qw
@@ -173,10 +189,10 @@ quat0 = np.array([
     np.sin(np.radians(pitch0_deg) / 2),  # qy
     0,                                   # qz
 ])
-x0 = np.array([0, 0, 0.69,  # p_com
+x0 = np.array([0, 0, pz_nom,  # p_com
                quat0[0], quat0[1], quat0[2], quat0[3],  # quaternion
-               0, 0, 0,    # v_com
-               0, 0, 0])   # w_body
+               0, 0, 0,       # v_com
+               0, 0, 0])      # w_body
 x0_ca = ca.DM(x0)
 p0_L = np.array([0,  srb.hip_offset]) # initial left foot position
 p0_R = np.array([0, -srb.hip_offset]) # initial right foot position
@@ -192,7 +208,7 @@ quatT = np.array([
     np.sin(np.radians(pitchT_deg) / 2),  # qy
     0,                                   # qz
 ])
-x_goal = np.array([px_goal, 0, 0.69, # p_com (forward, same height)
+x_goal = np.array([px_goal, 0, pz_nom, # p_com (forward, same height)
                    quatT[0], quatT[1], quatT[2], quatT[3],  # quaternion (same orientation)
                    0, 0, 0,          # v_com (stopped)
                    0, 0, 0])         # w_body
@@ -217,8 +233,8 @@ opti.subject_to(X[:, N] >= x_terminal_lb)
 opti.subject_to(X[:, N] <= x_terminal_ub)
 
 # kinematic limits
-L_max = 0.75   # [m] max leg length
-L_min = 0.30   # [m] min leg length
+L_max = 0.80   # [m] max leg length
+L_min = 0.45   # [m] min leg length
 
 # compute the dynamics constraints
 for k in range(N):
@@ -290,11 +306,11 @@ for k in range(N):
     opti.subject_to(X[:, k + 1] == x_next)
 
 # add z_com constraints
-pz_min = 0.40
-pz_max = 0.95
+pz_min = 0.45
+# pz_max = 0.95
 for k in range(N+1):
     opti.subject_to(X[2, k] >= pz_min)  # enforce constant height
-    opti.subject_to(X[2, k] <= pz_max)  # enforce constant height
+    # opti.subject_to(X[2, k] <= pz_max)  # enforce constant height
 
 # ----------------------------------------------------------
 # Contact Constraints
@@ -377,6 +393,12 @@ for k in range(N):
     # contact cost
     if k < stance_end or k >= flight_end:
         J += srb.contact_cost(F_L[:, k], F_R[:, k], M_L[:, k], M_R[:, k])
+
+    # force rate cost
+    if k < N - 1:
+        J += srb.force_rate_cost(F_L[:, k], F_R[:, k], M_L[:, k], M_R[:, k], 
+                                 F_L[:, k+1], F_R[:, k+1], M_L[:, k+1], M_R[:, k+1], 
+                                 dt)
 
 # foot placement cost
 J += srb.foot_placement_cost(p_L_land, p_R_land, p_L_goal, p_R_goal)
@@ -495,6 +517,24 @@ for k in range(N):
 a_opt[N, :] = a_opt[N-1, :]
 
 # ----------------------------------------------------------
+# Create contact schedule signal
+# ----------------------------------------------------------
+
+contact_schedule = np.zeros((N+1, ))  # (N+1)
+for k in range(N + 1):
+    if k < stance_end:
+        contact_schedule[k] = 1.0  # stance
+    elif k < flight_end:
+        contact_schedule[k] = 0.0  # flight
+    else:
+        contact_schedule[k] = 1.0  # landing
+
+foot_positions = np.array([
+    [float(p0_L[0]), float(p0_L[1]), 0.0, float(p0_R[0]), float(p0_R[1]), 0.0],
+    [pL_land[0],     pL_land[1],     0.0, pR_land[0],     pR_land[1],     0.0],
+])
+
+# ----------------------------------------------------------
 # Print results
 # ----------------------------------------------------------
 print(f"\nOptimal landing foot positions:")
@@ -514,7 +554,8 @@ print(f"  v_com = {X_sol[N, 7:10]}")
 # ----------------------------------------------------------
 # Save
 # ----------------------------------------------------------
-time = np.linspace(0, T, N+1)
+
+time = np.linspace(0, T, N + 1)
 
 save_dir = "./results/srb/srb_jump/"
 os.makedirs(save_dir, exist_ok=True)
@@ -524,5 +565,7 @@ np.savetxt(save_dir + "q_opt.csv",   q_opt, delimiter=",")
 np.savetxt(save_dir + "v_opt.csv",   v_opt, delimiter=",")
 np.savetxt(save_dir + "a_opt.csv",   a_opt, delimiter=",")
 np.savetxt(save_dir + "tau_opt.csv", U,     delimiter=",")
+np.savetxt(save_dir + "contact_schedule.csv", contact_schedule, delimiter=",")
+np.savetxt(save_dir + "foot_positions.csv", foot_positions, delimiter=",")
 
 print(f"\nSaved results to {save_dir}")

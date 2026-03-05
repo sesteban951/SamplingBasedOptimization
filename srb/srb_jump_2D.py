@@ -24,20 +24,22 @@ class SRB_Jump2D(SRBDynamics2D):
         # simple quadratic penalalty on states
         self.Qx = ca.diag(ca.vertcat(
             1.0, 1.0,    # px, pz
-            1.0,         # theta
+            15.0,         # theta
             1.0, 1.0,    # vx, vz
-            1.0          # w
+            3.0          # w
         ))
 
         # foot placement cost weights
-        self.Q_foot    = 100.0
+        self.Q_foot    = 1.0
 
         # penalize forces and moments
-        self.Q_force   = 0.005
-        self.Q_moment  = 0.0005
+        self.Q_force   = 1e-4
+        self.Q_moment  = 1e-4
+        self.Q_force_dot    = 1e-4
+        self.Q_moment_dot   = 1e-4
 
         # terminal weights
-        self.Qx_f = 100.0 * self.Qx
+        self.Qx_f = 10.0 * self.Qx
 
 
     ###############################################################
@@ -56,6 +58,19 @@ class SRB_Jump2D(SRBDynamics2D):
           + 0.5 * self.Q_moment * (ca.sumsqr(M_L) + ca.sumsqr(M_R))
         )
         return cost
+
+    def force_rate_cost(self, F_L_k, F_R_k, M_L_k, M_R_k, 
+                              F_L_k1, F_R_k1, M_L_k1, M_R_k1, 
+                              dt):
+        """Cost on force and moment rate of change"""
+        dF_L = (F_L_k1 - F_L_k) / dt
+        dF_R = (F_R_k1 - F_R_k) / dt
+        dM_L = (M_L_k1 - M_L_k) / dt
+        dM_R = (M_R_k1 - M_R_k) / dt
+        return (
+            0.5 * self.Q_force_dot  * (ca.sumsqr(dF_L) + ca.sumsqr(dF_R))
+          + 0.5 * self.Q_moment_dot * (ca.sumsqr(dM_L) + ca.sumsqr(dM_R))
+        )
 
     def foot_placement_cost(self, p_L, p_R, p_L_des, p_R_des):
         """Cost on foot placement tracking"""
@@ -97,9 +112,9 @@ nv  = srb.nv
 
 # fix timings
 dt       = 0.02
-T_stance = 0.5
-T_flight = 0.7
-T_land   = 0.5
+T_stance = 1.0
+T_flight = 0.5
+T_land   = 0.8
 T        = T_stance + T_flight + T_land
 
 # number of steps
@@ -135,11 +150,12 @@ M_R       = opti.variable(1, N)       # right ankle moment   [My]
 # ----------------------------------------------------------
 
 # Initial state: standing upright
+pz_nom = 0.77
 x0 = np.array([
-    0.0, 0.69,  # px, pz
-    0.0,        # theta
-    0.0, 0.0,   # vx, vz
-    0.0         # w
+    0.0, pz_nom,  # px, pz
+    0.0,          # theta
+    0.0, 0.0,     # vx, vz
+    0.0           # w
 ])
 x0_ca = ca.DM(x0)
 
@@ -148,12 +164,12 @@ p0_L = ca.DM([x0[0]])  # left  foot x
 p0_R = ca.DM([x0[0]])  # right foot x
 
 # Goal state: jumped forward, same height, upright, stopped
-px_goal = 0.0
+px_goal = 1.0
 x_goal = np.array([
-    px_goal, 0.69,  # px, pz, 
-    0.0,            # theta
-    0.0, 0.0,       # vx, vz, 
-    0.0             # w
+    px_goal, pz_nom,  # px, pz,
+    0.0,              # theta
+    0.0, 0.0,         # vx, vz, 
+    0.0               # w
 ])
 x_goal_ca = ca.DM(x_goal)
 
@@ -174,8 +190,8 @@ opti.subject_to(X[:, N] >= x_goal_ca - epsilon)
 opti.subject_to(X[:, N] <= x_goal_ca + epsilon)
 
 # kinematic limits
-L_max = 0.75   # [m] max leg length
-L_min = 0.30   # [m] min leg length
+L_max = 0.80   # [m] max leg length
+L_min = 0.45   # [m] min leg length
 
 # dynamics constraints
 for k in range(N):
@@ -248,8 +264,8 @@ for k in range(N):
 
 
 # COM height bounds
-pz_min = 0.30
-# pz_max = 0.95
+pz_min = 0.45
+# pz_max = 1.0
 for k in range(N + 1):
     opti.subject_to(X[1, k] >= pz_min)
     # opti.subject_to(X[1, k] <= pz_max)
@@ -304,7 +320,7 @@ for k in range(N):
         opti.subject_to(opti.bounded(-M_ankle_max, M_R[:, k], M_ankle_max))
 
 # Landing foot placement
-landing_tol = 0.005
+landing_tol = 0.01
 opti.subject_to(ca.sumsqr(p_L_land - p_L_goal) <= landing_tol**2)
 opti.subject_to(ca.sumsqr(p_R_land - p_R_goal) <= landing_tol**2)
 
@@ -324,7 +340,13 @@ for k in range(N):
     if k < stance_end or k >= flight_end:
         J += srb.contact_cost(F_L[:, k], F_R[:, k], M_L[:, k], M_R[:, k])
 
-# foo tplacement cost
+    # force rate cost
+    if k < N - 1:
+        J += srb.force_rate_cost(F_L[:, k], F_R[:, k], M_L[:, k], M_R[:, k], 
+                                 F_L[:, k+1], F_R[:, k+1], M_L[:, k+1], M_R[:, k+1], 
+                                 dt)
+
+# foot placement cost
 J += srb.foot_placement_cost(p_L_land, p_R_land, p_L_goal, p_R_goal)
 
 # terminal cost
@@ -452,6 +474,11 @@ for k in range(N + 1):
     else:
         contact_schedule[k] = 1.0  # landing
 
+foot_positions = np.array([
+    [float(p0_L[0]), 0.0, float(p0_R[0]), 0.0],
+    [float(pL_land), 0.0, float(pR_land), 0.0],
+])
+
 # ----------------------------------------------------------
 # Print Results
 # ----------------------------------------------------------
@@ -486,5 +513,6 @@ np.savetxt(save_dir + "v_opt.csv",   v_opt,   delimiter=",")
 np.savetxt(save_dir + "a_opt.csv",   a_opt,   delimiter=",")
 np.savetxt(save_dir + "tau_opt.csv", U,       delimiter=",")
 np.savetxt(save_dir + "contact_schedule.csv", contact_schedule, delimiter=",")
+np.savetxt(save_dir + "foot_positions.csv", foot_positions, delimiter=",")
 
 print(f"\nSaved results to {save_dir}")
