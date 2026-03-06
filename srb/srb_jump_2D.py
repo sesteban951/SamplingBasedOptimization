@@ -150,7 +150,7 @@ M_R       = opti.variable(1, N)       # right ankle moment   [My]
 # ----------------------------------------------------------
 
 # Initial state: standing upright
-pz_nom = 0.77
+pz_nom = 0.79
 x0 = np.array([
     0.0, pz_nom,  # px, pz
     0.0,          # theta
@@ -264,7 +264,7 @@ for k in range(N):
 
 
 # COM height bounds
-pz_min = 0.45
+pz_min = 0.5
 # pz_max = 1.0
 for k in range(N + 1):
     opti.subject_to(X[1, k] >= pz_min)
@@ -277,7 +277,7 @@ for k in range(N + 1):
 # Contact parameters
 mu           = 1.0
 M_ankle_max  = 50.0   # [N*m]
-F_leg_max    = 500.0  # [N]
+F_leg_max    = 400.0  # [N]
 
 # Get friction cone constraint matrices
 A_friction, b_friction = srb.friction_cone_matrix(mu)

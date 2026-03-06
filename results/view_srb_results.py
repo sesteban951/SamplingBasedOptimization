@@ -25,8 +25,8 @@ from utils.kinematics import kin
 # which data to load
 # experiment = "srb/srb_free_wrench"
 # experiment = "srb/srb_jump"
-# experiment = "srb/srb_jump_2d"
-experiment = "srb/srb_twist"
+experiment = "srb/srb_jump_2d"
+# experiment = "srb/srb_twist"
 
 # which data to load
 time_file = f"./results/{experiment}/time.csv"
@@ -71,7 +71,7 @@ else:
 #################################################################
 
 # Toggle COM wrench visualization from tau_opt (straight vectors for force and moment)
-SHOW_WRENCH_VIZ = False
+SHOW_WRENCH_VIZ = True
 
 # Wrench visual scale factors (tune for readability)
 FORCE_VIZ_SCALE = 0.001   # meters per Newton
