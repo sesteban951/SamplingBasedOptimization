@@ -221,7 +221,7 @@ quat0 = np.array([
     np.sin(np.radians(pitch0_deg) / 2),  # qy
     0                                    # qz
 ])
-x0 = np.array([0, 0, 0.69,  # p_com
+x0 = np.array([0, 0, 0.77,  # p_com
                quat0[0], quat0[1], quat0[2], quat0[3],  # quaternion
                0, 0, 0,    # v_com
                0, 0, 0])   # w_body
@@ -240,7 +240,7 @@ quat_goal = np.array([
     0.0,                   # qy
     np.sin(yaw_goal / 2),  # qz
 ])
-x_goal = np.array([px_goal, 0, 0.69,           # p_com (forward, same height)
+x_goal = np.array([px_goal, 0, 0.77,           # p_com (forward, same height)
                    quat_goal[0], quat_goal[1], # quaternion (upright, yaw = +pi)
                    quat_goal[2], quat_goal[3],
                    0, 0, 0,                    # v_com (stopped)
@@ -270,8 +270,8 @@ opti.subject_to(X[:, N] >= x_terminal_lb)
 opti.subject_to(X[:, N] <= x_terminal_ub)
 
 # kinematic limits
-L_max = 0.75   # [m] max leg length
-L_min = 0.30   # [m] min leg length
+L_max = 0.8   # [m] max leg length
+L_min = 0.45   # [m] min leg length
 
 # compute the dynamics constraints
 for k in range(N):
@@ -352,11 +352,11 @@ for k in range(N):
     opti.subject_to(X[:, k + 1] == x_next)
 
 # add z_com constraints
-pz_min = 0.20
-pz_max = 2.0
+pz_min = 0.45
+# pz_max = 2.0
 for k in range(N+1):
     opti.subject_to(X[2, k] >= pz_min)  # enforce constant height
-    opti.subject_to(X[2, k] <= pz_max)  # enforce constant height
+    # opti.subject_to(X[2, k] <= pz_max)  # enforce constant height
 
 # ----------------------------------------------------------
 # Contact Constraints
