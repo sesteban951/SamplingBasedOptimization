@@ -573,5 +573,8 @@ np.savetxt(save_dir + "q_opt.csv",   q_opt, delimiter=",")
 np.savetxt(save_dir + "v_opt.csv",   v_opt, delimiter=",")
 np.savetxt(save_dir + "a_opt.csv",   a_opt, delimiter=",")
 np.savetxt(save_dir + "tau_opt.csv", U,     delimiter=",")
+np.savetxt(save_dir + "feet.csv",    feet,  delimiter=",")
+np.savetxt(save_dir + "contact_schedule.csv", contact_schedule, delimiter=",")
+np.savetxt(save_dir + "foot_positions.csv", foot_positions, delimiter=",")
 
 print(f"\nSaved results to {save_dir}")
