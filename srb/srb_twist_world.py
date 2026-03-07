@@ -127,14 +127,6 @@ def quat_to_yaw(q):
     )
 
 
-def quat_to_yaw_ca(q):
-    """Extract yaw from CasADi quaternion [qw, qx, qy, qz]."""
-    return ca.atan2(
-        2.0 * (q[0] * q[3] + q[1] * q[2]),
-        1.0 - 2.0 * (q[2] * q[2] + q[3] * q[3]),
-    )
-
-
 def yaw_to_quat(yaw):
     """Construct yaw-only quaternion [qw, qx, qy, qz]."""
     return np.array([np.cos(0.5 * yaw), 0.0, 0.0, np.sin(0.5 * yaw)])
@@ -240,8 +232,8 @@ p0_L = ca.DM(p0_L)
 p0_R = ca.DM(p0_R)
 
 # desired goal state - jump forward, land upright with 180 deg CCW yaw twist
-px_goal = 1
-yaw_goal = 1*np.pi
+px_goal = 0.5
+yaw_goal = 2*np.pi
 quat_goal = np.array([
     np.cos(yaw_goal / 2),  # qw
     0.0,                   # qx
@@ -259,26 +251,9 @@ x_goal_ca = ca.DM(x_goal)
 yaw_start = quat_to_yaw(quat0)
 quat_slerp_keyframes = build_yaw_slerp_keyframes(yaw_start, yaw_goal)
 
-# Desired landing foot positions in body-frame XY (COM-centered)
-p_L_goal = ca.DM([0.0,  srb.hip_offset])
-p_R_goal = ca.DM([0.0, -srb.hip_offset])
-
-# Touchdown-to-world mapping for landing feet.
-# p_L_land and p_R_land are body-frame XY coordinates and remain constant decision vars.
-# Their world-frame touchdown positions are locked for the entire landing phase.
-q_touchdown = X[3:7, flight_end]
-yaw_touchdown = quat_to_yaw_ca(q_touchdown)
-c_td = ca.cos(yaw_touchdown)
-s_td = ca.sin(yaw_touchdown)
-Rz_touchdown = ca.vertcat(
-    ca.horzcat(c_td, -s_td),
-    ca.horzcat(s_td,  c_td),
-)
-p_com_touchdown_xy = X[0:2, flight_end]
-p_L_land_xy_W = p_com_touchdown_xy + Rz_touchdown @ p_L_land
-p_R_land_xy_W = p_com_touchdown_xy + Rz_touchdown @ p_R_land
-p_L_land_W = ca.vertcat(p_L_land_xy_W, 0)
-p_R_land_W = ca.vertcat(p_R_land_xy_W, 0)
+# Desired landing foot positions
+p_L_goal = ca.DM([x_goal[0],  srb.hip_offset])
+p_R_goal = ca.DM([x_goal[0], -srb.hip_offset])
 
 # ----------------------------------------------------------
 # Dynamics Constraints
@@ -347,9 +322,9 @@ for k in range(N):
         # Extract COM position
         p_com = X[0:3, k]
         
-        # landing feet are locked in world after touchdown
-        p_L = p_L_land_W
-        p_R = p_R_land_W
+        # feet are decision variables but at fixed height
+        p_L = ca.vertcat(p_L_land, 0)
+        p_R = ca.vertcat(p_R_land, 0)
 
         # moment arms from COM to feet
         r_L = p_L - p_com
@@ -447,7 +422,7 @@ for k in range(N):
         opti.subject_to(opti.bounded(-M_ankle_z_max, M_R[2, k], M_ankle_z_max))
 
 # landing foot placement constraint
-landing_tol = 0.5  # foot landing tolerance
+landing_tol = 0.1  # foot landing tolerance
 opti.subject_to(ca.sumsqr(p_L_land - p_L_goal) <= landing_tol**2)
 opti.subject_to(ca.sumsqr(p_R_land - p_R_goal) <= landing_tol**2)
 
@@ -578,19 +553,6 @@ MR_sol   = sol.value(M_R)       # (3, N)
 # Forces (in world frame)
 F = (FL_sol + FR_sol).T  # (N, 3)
 
-# Convert solved body-frame landing feet to world frame at touchdown and lock.
-q_touchdown_sol = X_sol[3:7, flight_end]
-yaw_touchdown_sol = quat_to_yaw(q_touchdown_sol)
-c_td_sol = np.cos(yaw_touchdown_sol)
-s_td_sol = np.sin(yaw_touchdown_sol)
-Rz_touchdown_sol = np.array([
-    [c_td_sol, -s_td_sol],
-    [s_td_sol,  c_td_sol],
-])
-p_com_touchdown_xy_sol = X_sol[0:2, flight_end]
-pL_land_world_xy = p_com_touchdown_xy_sol + Rz_touchdown_sol @ pL_land
-pR_land_world_xy = p_com_touchdown_xy_sol + Rz_touchdown_sol @ pR_land
-
 # Moments (in world frame)
 M = np.zeros((N, 3))
 for k in range(N):
@@ -606,8 +568,8 @@ for k in range(N):
 
     else:
         p_com = X_sol[0:3, k]
-        p_L = np.array([pL_land_world_xy[0], pL_land_world_xy[1], 0.0])
-        p_R = np.array([pR_land_world_xy[0], pR_land_world_xy[1], 0.0])
+        p_L = np.array([pL_land[0], pL_land[1], 0.0])  # was p0_L — bug
+        p_R = np.array([pR_land[0], pR_land[1], 0.0])
 
     r_L = p_L - p_com
     r_R = p_R - p_com
@@ -639,10 +601,8 @@ a_opt[N, :] = a_opt[N-1, :]
 # Print results
 # ----------------------------------------------------------
 print(f"\nOptimal landing foot positions:")
-print(f"  Left  foot (body): x={pL_land[0]:.3f}, y={pL_land[1]:.3f}")
-print(f"  Right foot (body): x={pR_land[0]:.3f}, y={pR_land[1]:.3f}")
-print(f"  Left  foot (world): x={pL_land_world_xy[0]:.3f}, y={pL_land_world_xy[1]:.3f}")
-print(f"  Right foot (world): x={pR_land_world_xy[0]:.3f}, y={pR_land_world_xy[1]:.3f}")
+print(f"  Left  foot: x={pL_land[0]:.3f}, y={pL_land[1]:.3f}")
+print(f"  Right foot: x={pR_land[0]:.3f}, y={pR_land[1]:.3f}")
 
 print(f"\nPhase summary:")
 print(f"  Stance:  k=0  -> {stance_end-1}   (t=0.00 -> {stance_end*dt:.2f}s)")
@@ -665,8 +625,8 @@ time = np.linspace(0, T, N+1)
 feet = np.full((N, 4), np.nan)
 feet[:stance_end, 0:2] = np.array([float(p0_L[0]), float(p0_L[1])])
 feet[:stance_end, 2:4] = np.array([float(p0_R[0]), float(p0_R[1])])
-feet[flight_end:, 0:2] = np.array([float(pL_land_world_xy[0]), float(pL_land_world_xy[1])])
-feet[flight_end:, 2:4] = np.array([float(pR_land_world_xy[0]), float(pR_land_world_xy[1])])
+feet[flight_end:, 0:2] = np.array([float(pL_land[0]), float(pL_land[1])])
+feet[flight_end:, 2:4] = np.array([float(pR_land[0]), float(pR_land[1])])
 
 save_dir = "./results/srb/srb_twist/"
 os.makedirs(save_dir, exist_ok=True)
