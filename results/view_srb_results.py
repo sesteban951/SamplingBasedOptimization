@@ -113,16 +113,18 @@ data = mujoco.MjData(model)
 # visualize the optimal trajectory
 viewer = mujoco.viewer.launch_passive(model, data)
 
-def _add_box_geom(scene, pos, halfsizes, rgba):
+def _add_box_geom(scene, pos, halfsizes, rgba, rotmat=None):
     if scene.ngeom >= scene.maxgeom:
         return
     geom = scene.geoms[scene.ngeom]
+    if rotmat is None:
+        rotmat = np.eye(3, dtype=np.float64)
     mujoco.mjv_initGeom(
         geom,
         mujoco.mjtGeom.mjGEOM_BOX,
         np.array(halfsizes, dtype=np.float64),
         np.array(pos, dtype=np.float64),
-        np.eye(3).reshape(9),
+        np.array(rotmat, dtype=np.float64).reshape(9),
         np.array(rgba, dtype=np.float64),
     )
     geom.category = int(mujoco.mjtCatBit.mjCAT_DECOR)
@@ -188,6 +190,24 @@ if "2d" in experiment.lower():
 else:
     q_replay = q_opt
 
+# infer foot-contact phases from feet.csv finite rows:
+# typically stance (finite), flight (NaN), landing (finite)
+stance_start_idx = None
+landing_touchdown_idx = None
+stance_yaw = None
+landing_yaw = None
+if feet_opt is not None and feet_opt.shape[0] > 0:
+    feet_finite = np.all(np.isfinite(feet_opt), axis=1)
+    touchdown_starts = np.where(feet_finite & np.logical_not(np.r_[False, feet_finite[:-1]]))[0]
+    if touchdown_starts.size >= 1:
+        stance_start_idx = int(touchdown_starts[0])
+    if touchdown_starts.size >= 2:
+        landing_touchdown_idx = int(touchdown_starts[1])
+    if stance_start_idx is not None and stance_start_idx < q_replay.shape[0]:
+        stance_yaw = kin.quat_to_yaw(q_replay[stance_start_idx, 3:7])
+    if landing_touchdown_idx is not None and landing_touchdown_idx < q_replay.shape[0]:
+        landing_yaw = kin.quat_to_yaw(q_replay[landing_touchdown_idx, 3:7])
+
 can_draw_wrench = SHOW_WRENCH_VIZ and (tau_opt.ndim == 2) and (tau_opt.shape[1] >= 6)
 if SHOW_WRENCH_VIZ and not can_draw_wrench:
     print("Warning: tau_opt does not have 6 columns; disabling wrench visualization.")
@@ -219,6 +239,16 @@ try:
                     p_com = q_replay[i, 0:3]
                     p_L = np.array([feet_k[0], feet_k[1], 0.0], dtype=np.float64)
                     p_R = np.array([feet_k[2], feet_k[3], 0.0], dtype=np.float64)
+                    # Hold foot yaw constant per contact phase:
+                    # sample once at stance start, sample once at landing touchdown.
+                    if landing_touchdown_idx is not None and feet_idx >= landing_touchdown_idx and landing_yaw is not None:
+                        foot_yaw = landing_yaw
+                    elif stance_yaw is not None:
+                        foot_yaw = stance_yaw
+                    else:
+                        quat_idx = min(feet_idx, q_replay.shape[0] - 1)
+                        foot_yaw = kin.quat_to_yaw(q_replay[quat_idx, 3:7])
+                    foot_rot = kin.yaw_to_rot_matrix(foot_yaw)
 
                     # feet as small boxes
                     _add_box_geom(
@@ -226,12 +256,14 @@ try:
                         p_L,
                         halfsizes=[0.05, 0.03, 0.015],
                         rgba=[0.95, 0.45, 0.10, 0.9],
+                        rotmat=foot_rot,
                     )
                     _add_box_geom(
                         viewer.user_scn,
                         p_R,
                         halfsizes=[0.05, 0.03, 0.015],
                         rgba=[0.10, 0.55, 0.95, 0.9],
+                        rotmat=foot_rot,
                     )
 
                     # simple unactuated visual connectors (legs)

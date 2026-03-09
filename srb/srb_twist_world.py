@@ -13,7 +13,6 @@ import casadi as ca
 
 # custom imports
 from utils.kinematics import kin
-from utils.interpolation import interp
 from srb.srb import SRBDynamics
 
 
@@ -36,8 +35,10 @@ class SRB_Twist(SRBDynamics):
         self.Q_foot = 100.0
 
         # penalize forces and moments
-        self.Q_force = 0.005
-        self.Q_moment = 0.0005
+        self.Q_force = 1e-4
+        self.Q_moment = 1e-4
+        self.Q_force_dot  = 1e-4
+        self.Q_moment_dot = 1e-4
 
         # terminal weights
         self.Qx_f = 100.0 * self.Qx
@@ -83,6 +84,19 @@ class SRB_Twist(SRBDynamics):
         
         return cost
     
+    def force_rate_cost(self, F_L_k, F_R_k, M_L_k, M_R_k,
+                              F_L_k1, F_R_k1, M_L_k1, M_R_k1,
+                              dt):
+        """Cost on force and moment rate of change"""
+        dF_L = (F_L_k1 - F_L_k) / dt
+        dF_R = (F_R_k1 - F_R_k) / dt
+        dM_L = (M_L_k1 - M_L_k) / dt
+        dM_R = (M_R_k1 - M_R_k) / dt
+        return (
+            0.5 * self.Q_force_dot  * (ca.sumsqr(dF_L) + ca.sumsqr(dF_R))
+          + 0.5 * self.Q_moment_dot * (ca.sumsqr(dM_L) + ca.sumsqr(dM_R))
+        )
+    
     # Foot placement cost
     def foot_placement_cost(self, p_L, p_R, p_L_des, p_R_des):
         """Cost on foot placement tracking"""
@@ -119,50 +133,6 @@ class SRB_Twist(SRBDynamics):
         return cost_terminal
 
 
-def quat_to_yaw(q):
-    """Extract yaw from quaternion [qw, qx, qy, qz]."""
-    return np.arctan2(
-        2.0 * (q[0] * q[3] + q[1] * q[2]),
-        1.0 - 2.0 * (q[2] * q[2] + q[3] * q[3]),
-    )
-
-
-def yaw_to_quat(yaw):
-    """Construct yaw-only quaternion [qw, qx, qy, qz]."""
-    return np.array([np.cos(0.5 * yaw), 0.0, 0.0, np.sin(0.5 * yaw)])
-
-
-def build_yaw_slerp_keyframes(yaw_start, yaw_goal, max_step=0.95 * np.pi):
-    """
-    Build yaw-only quaternion keyframes with <= pi step size for safe SLERP.
-    """
-    dyaw = yaw_goal - yaw_start
-    n_seg = max(1, int(np.ceil(abs(dyaw) / max_step)))
-    yaw_keyframes = yaw_start + np.linspace(0.0, dyaw, n_seg + 1)
-    quat_keyframes = np.array([yaw_to_quat(yaw) for yaw in yaw_keyframes])
-
-    # Keep a continuous quaternion sign convention across segments.
-    for i in range(1, quat_keyframes.shape[0]):
-        if np.dot(quat_keyframes[i - 1], quat_keyframes[i]) < 0.0:
-            quat_keyframes[i] = -quat_keyframes[i]
-
-    return quat_keyframes
-
-
-def sample_piecewise_slerp(alpha, quat_keyframes):
-    """
-    Sample piecewise SLERP over keyframes for alpha in [0, 1].
-    """
-    alpha = float(np.clip(alpha, 0.0, 1.0))
-    if alpha >= 1.0:
-        return quat_keyframes[-1]
-
-    s = alpha * (quat_keyframes.shape[0] - 1)
-    i = min(int(np.floor(s)), quat_keyframes.shape[0] - 2)
-    alpha_local = s - i
-    return interp.slerp(quat_keyframes[i], quat_keyframes[i + 1], alpha_local)
-
-
 ##############################################################
 # Trajectory Optimization
 ##############################################################
@@ -178,7 +148,7 @@ nu = srb.nu
 # fix timings
 dt = 0.02        # time step
 T_stance = 0.7   # stance duration
-T_flight = 0.6   # flight duration
+T_flight = 0.5   # flight duration
 T_land = 0.5     # landing duration
 T = T_stance + T_flight + T_land  # total trajectory duration
 
@@ -248,8 +218,8 @@ x_goal = np.array([px_goal, 0, 0.77,           # p_com (forward, same height)
 x_goal_ca = ca.DM(x_goal)
 
 # Build automated yaw keyframes for flight quaternion references.
-yaw_start = quat_to_yaw(quat0)
-quat_slerp_keyframes = build_yaw_slerp_keyframes(yaw_start, yaw_goal)
+yaw_start = kin.quat_to_yaw(quat0)
+quat_slerp_keyframes = kin.build_yaw_slerp_keyframes(yaw_start, yaw_goal)
 
 # Desired landing foot positions
 p_L_goal = ca.DM([x_goal[0],  srb.hip_offset])
@@ -305,10 +275,7 @@ for k in range(N):
 
         # hard bound on pre-rotation toward desired twist direction during stance
         qk = X[3:7, k]  # [qw, qx, qy, qz]
-        yaw_k = ca.atan2(
-            2.0 * (qk[0] * qk[3] + qk[1] * qk[2]),
-            1.0 - 2.0 * (qk[2] * qk[2] + qk[3] * qk[3])
-        )
+        yaw_k = kin.quat_to_yaw_ca(qk)
         yaw_progress = ca.sign(yaw_goal) * yaw_k
         opti.subject_to(yaw_progress <= yaw_allow)
 
@@ -452,7 +419,7 @@ for k in range(N):
         x_ref_k = None
     elif k < flight_end:
         alpha = (k - stance_end + 1) / N_flight
-        quat_k = sample_piecewise_slerp(alpha, quat_slerp_keyframes)
+        quat_k = kin.sample_piecewise_slerp(alpha, quat_slerp_keyframes)
         x_ref_k = x0.copy()
         x_ref_k[0] = alpha * px_goal
         x_ref_k[1] = 0.0
@@ -471,6 +438,12 @@ for k in range(N):
     # contact cost
     if k < stance_end or k >= flight_end:
         J += srb.contact_cost(F_L[:, k], F_R[:, k], M_L[:, k], M_R[:, k])
+
+    # force rate cost
+    if k < N - 1:
+        J += srb.force_rate_cost(F_L[:, k], F_R[:, k], M_L[:, k], M_R[:, k], 
+                                 F_L[:, k+1], F_R[:, k+1], M_L[:, k+1], M_R[:, k+1], 
+                                 dt)
 
 # foot placement cost
 J += srb.foot_placement_cost(p_L_land, p_R_land, p_L_goal, p_R_goal)
@@ -498,13 +471,13 @@ for k in range(N + 1):
     # quaternion initial guess aligned with phase-aware yaw objective
     if k < stance_end:
         yaw_k = 0.0
-        quat_guess = yaw_to_quat(yaw_k)
+        quat_guess = kin.yaw_to_quat(yaw_k)
     elif k < flight_end:
         alpha_f = (k - stance_end + 1) / N_flight
-        quat_guess = sample_piecewise_slerp(alpha_f, quat_slerp_keyframes)
+        quat_guess = kin.sample_piecewise_slerp(alpha_f, quat_slerp_keyframes)
     else:
         yaw_k = yaw_goal
-        quat_guess = yaw_to_quat(yaw_k)
+        quat_guess = kin.yaw_to_quat(yaw_k)
     opti.set_initial(X[3:7, k], quat_guess)
 
 # # landing foot positions
