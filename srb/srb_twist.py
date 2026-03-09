@@ -26,8 +26,8 @@ class SRB_Twist(SRBDynamics):
         # simple quadratic penalty on states
         self.Qx = ca.diag(ca.vertcat(
             1.0, 1.0, 1.0,  # px, py, pz
-            1.0, 1.0, 1.0,  # qx, qy, qz
-            10.0, 10.0, 10.0,  # vx, vy, vz
+            50.0, 50.0, 50.0,  # qx, qy, qz
+            1.0, 1.0, 1.0,  # vx, vy, vz
             1.0, 1.0, 1.0   # wx, wy, wz
         ))
 
