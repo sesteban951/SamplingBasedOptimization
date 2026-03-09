@@ -26,6 +26,7 @@ from utils.kinematics import kin
 # experiment = "srb/srb_free_wrench"
 # experiment = "srb/srb_jump"
 experiment = "srb/srb_jump_2d"
+experiment = "srb/srb_backflip_2d"
 # experiment = "srb/srb_twist"
 
 # which data to load
