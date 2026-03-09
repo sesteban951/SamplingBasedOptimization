@@ -65,16 +65,16 @@ class SRBDynamics(ABC):
         self.pz_com = 0.693  # center of mass height in world frame
         self.m = 33.34      # mass [kg]
         self.g = 9.81       # gravity [m/s^2]
-        self.I = ca.vertcat(
-            ca.horzcat(3.747533,  0.000051,  0.086972),
-            ca.horzcat(0.000051,  3.300958, -0.000894),
-            ca.horzcat(0.086972, -0.000894,  0.516523),
-        ) # inertia matrix about COM [kg*m^2]
         # self.I = ca.vertcat(
-        #     ca.horzcat(4.061963,  0.000039,  0.101482),
-        #     ca.horzcat(0.000039,  3.616058, -0.000628),
-        #     ca.horzcat(0.101482, -0.000628,  0.517193),
-        # ) # inertia matrix about base frame [kg*m^2]
+        #     ca.horzcat(3.747533,  0.000051,  0.086972),
+        #     ca.horzcat(0.000051,  3.300958, -0.000894),
+        #     ca.horzcat(0.086972, -0.000894,  0.516523),
+        # ) # inertia matrix about COM [kg*m^2]
+        self.I = ca.vertcat(
+            ca.horzcat(4.061963,  0.000039,  0.101482),
+            ca.horzcat(0.000039,  3.616058, -0.000628),
+            ca.horzcat(0.101482, -0.000628,  0.517193),
+        ) # inertia matrix about base frame [kg*m^2]
 
         # nominal G1 offset from base to foot
         self.hip_offset = 0.1185
@@ -225,8 +225,8 @@ class SRBDynamics2D(ABC):
         # system parameters (same robot, planar sagittal slice)
         self.m  = 33.34   # mass [kg]
         self.g  = 9.81    # gravity [m/s^2]
-        self.I = 3.300958  # planar inertia about COM y-axis [kg*m^2]
-        # self.I = 3.616058  # planar inertia about base frame y-axis [kg*m^2]
+        # self.I = 3.300958  # planar inertia about COM y-axis [kg*m^2]
+        self.I = 3.616058  # planar inertia about base frame y-axis [kg*m^2]
 
 
     ###############################################################
