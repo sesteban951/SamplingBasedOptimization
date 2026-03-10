@@ -33,6 +33,7 @@ class SRB_Twist(SRBDynamics):
 
         # foot placement cost weights
         self.Q_foot = 100.0
+        self.Q_foot_world = 100.0
 
         # penalize forces and moments
         self.Q_force = 1e-4
@@ -100,14 +101,25 @@ class SRB_Twist(SRBDynamics):
     # Foot placement cost
     def foot_placement_cost(self, p_L, p_R, p_L_des, p_R_des):
         """Cost on foot placement tracking"""
-        
+
         cost =(
             0.5 * self.Q_foot * ca.sumsqr(p_L - p_L_des)
           + 0.5 * self.Q_foot * ca.sumsqr(p_R - p_R_des)
         )
-        
+
         return cost
-    
+
+    # World-frame foot placement cost
+    def world_foot_placement_cost(self, p_L_W, p_R_W, p_L_des_W, p_R_des_W):
+        """Cost on world-frame foot placement, informed by desired goal COM state"""
+
+        cost = (
+            0.5 * self.Q_foot_world * ca.sumsqr(p_L_W - p_L_des_W)
+          + 0.5 * self.Q_foot_world * ca.sumsqr(p_R_W - p_R_des_W)
+        )
+
+        return cost
+
     # Terminal cost (UNCHANGED)
     def terminal_cost(self, x, x_goal):
         
@@ -241,6 +253,13 @@ p_L_land_xy_W = p_com_touchdown_xy + Rz_touchdown @ p_L_land
 p_R_land_xy_W = p_com_touchdown_xy + Rz_touchdown @ p_R_land
 p_L_land_W = ca.vertcat(p_L_land_xy_W, 0)
 p_R_land_W = ca.vertcat(p_R_land_xy_W, 0)
+
+# World-frame foot goals derived from desired goal COM state.
+# Feet are offset from goal COM position by hip_offset along the goal body-frame y-axis.
+Rz_goal = kin.yaw_to_rot_matrix(yaw_goal)
+p_com_goal_xy = np.array([px_goal, 0.0])
+p_L_goal_W = ca.DM(p_com_goal_xy + (Rz_goal @ np.array([0.0,  srb.hip_offset, 0.0]))[:2])
+p_R_goal_W = ca.DM(p_com_goal_xy + (Rz_goal @ np.array([0.0, -srb.hip_offset, 0.0]))[:2])
 
 # ----------------------------------------------------------
 # Dynamics Constraints
@@ -465,8 +484,11 @@ for k in range(N):
                                  F_L[:, k+1], F_R[:, k+1], M_L[:, k+1], M_R[:, k+1], 
                                  dt)
 
-# foot placement cost
+# foot placement cost (body frame)
 J += srb.foot_placement_cost(p_L_land, p_R_land, p_L_goal, p_R_goal)
+
+# foot placement cost (world frame, informed by goal COM state)
+J += srb.world_foot_placement_cost(p_L_land_xy_W, p_R_land_xy_W, p_L_goal_W, p_R_goal_W)
 
 # Terminal cost (optional since we have a terminal constraint, but can help convergence)
 J += srb.terminal_cost(X[:, N], x_goal_ca)
