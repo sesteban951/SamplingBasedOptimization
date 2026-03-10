@@ -32,8 +32,8 @@ class SRB_Twist(SRBDynamics):
         ))
 
         # foot placement cost weights
-        self.Q_foot = 100.0
-        self.Q_foot_world = 100.0
+        self.Q_foot = 50.0
+        self.Q_foot_world = 150.0
 
         # penalize forces and moments
         self.Q_force = 1e-4
@@ -157,18 +157,18 @@ nv = srb.nv
 nx = nq + nv
 nu = srb.nu
 
-# fix timings
-dt = 0.02        # time step
-T_stance = 0.7   # stance duration
-T_flight = 0.5   # flight duration
-T_land = 0.5     # landing duration
-T = T_stance + T_flight + T_land  # total trajectory duration
+# nominal timings used to define the fixed node allocation and initialize the solver
+dt_nom = 0.02          # nominal time step
+T_stance_nom = 0.5     # nominal stance duration
+T_flight_nom = 0.5     # nominal flight duration
+T_land_nom = 0.5       # nominal landing duration
+T_nom = T_stance_nom + T_flight_nom + T_land_nom  # nominal total trajectory duration
 
 # number of steps
-N_stance = int(T_stance / dt)
-N_flight = int(T_flight / dt)
-N_land = int(T_land / dt)
-N = int(T / dt) 
+N_stance = int(T_stance_nom / dt_nom)
+N_flight = int(T_flight_nom / dt_nom)
+N_land = int(T_land_nom / dt_nom)
+N = int(T_nom / dt_nom)
 
 # phase boundaries
 stance_end = N_stance
@@ -186,6 +186,16 @@ opti = ca.Opti()
 
 # horizon variables
 X = opti.variable(nx, N + 1)  # states over the horizon
+
+# phase duration decision variables
+T_stance = opti.variable()
+T_flight = opti.variable()
+T_land = opti.variable()
+
+# phase-specific time steps
+dt_stance = T_stance / N_stance
+dt_flight = T_flight / N_flight
+dt_land = T_land / N_land
 
 # decision variables
 p_L_land = opti.variable(2)  # single landing position
@@ -268,6 +278,14 @@ p_R_goal_W = ca.DM(p_com_goal_xy + (Rz_goal @ np.array([0.0, -srb.hip_offset, 0.
 # set the initial condition 
 opti.subject_to(X[:, 0] == x0_ca)
 
+# bound the phase durations
+T_stance_min, T_stance_max = 0.4, 1.0
+T_flight_min, T_flight_max = 0.2, 1.0
+T_land_min, T_land_max = 0.2, 1.0
+opti.subject_to(opti.bounded(T_stance_min, T_stance, T_stance_max))
+opti.subject_to(opti.bounded(T_flight_min, T_flight, T_flight_max))
+opti.subject_to(opti.bounded(T_land_min, T_land, T_land_max))
+
 # set box constraint on terminal condition
 epsilon = 0.01
 x_terminal_lb = x_goal_ca - epsilon
@@ -281,6 +299,12 @@ L_min = 0.45   # [m] min leg length
 
 # compute the dynamics constraints
 for k in range(N):
+    if k < stance_end:
+        dt_k = dt_stance
+    elif k < flight_end:
+        dt_k = dt_flight
+    else:
+        dt_k = dt_land
 
     # STANCE
     if k < stance_end:
@@ -354,7 +378,7 @@ for k in range(N):
     u = ca.vertcat(F_total, M_total)
     
     # Dynamics
-    x_next = f(X[:, k], u, dt)
+    x_next = f(X[:, k], u, dt_k)
     opti.subject_to(X[:, k + 1] == x_next)
 
 # add z_com constraints
@@ -442,6 +466,15 @@ W_stance_yaw = 200.0
 # total cost
 J = 0
 for k in range(N):
+    if k < stance_end:
+        dt_k = dt_stance
+        phase_k = "stance"
+    elif k < flight_end:
+        dt_k = dt_flight
+        phase_k = "flight"
+    else:
+        dt_k = dt_land
+        phase_k = "landing"
 
     # phase-aware state objective:
     # no state tracking in stance; twist in flight; track final state in landing
@@ -459,30 +492,53 @@ for k in range(N):
     elif k < flight_end:
         alpha = (k - stance_end + 1) / N_flight
         quat_k = kin.sample_piecewise_slerp(alpha, quat_slerp_keyframes)
-        x_ref_k = x0.copy()
-        x_ref_k[0] = alpha * px_goal
-        x_ref_k[1] = 0.0
-        x_ref_k[2] = x_goal[2]
-        x_ref_k[3:7] = quat_k
-        x_ref_k[7:13] = 0.0
-        # Encourage in-flight yaw rate consistent with completing yaw_goal over T_flight.
-        x_ref_k[12] = yaw_goal / T_flight
+        # Encourage in-flight yaw rate consistent with completing yaw_goal over the
+        # optimized flight duration.
+        x_ref_k = ca.vertcat(
+            alpha * px_goal,
+            0.0,
+            x_goal[2],
+            quat_k[0],
+            quat_k[1],
+            quat_k[2],
+            quat_k[3],
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            yaw_goal / T_flight
+        )
     else:
-        x_ref_k = x_goal
+        x_ref_k = x_goal_ca
 
     # state cost only during flight + landing
     if x_ref_k is not None:
-        J += srb.state_cost(X[:, k], ca.DM(x_ref_k))
+        J += dt_k * srb.state_cost(X[:, k], x_ref_k)
 
     # contact cost
-    if k < stance_end or k >= flight_end:
-        J += srb.contact_cost(F_L[:, k], F_R[:, k], M_L[:, k], M_R[:, k])
+    if phase_k in ("stance", "landing"):
+        J += dt_k * srb.contact_cost(F_L[:, k], F_R[:, k], M_L[:, k], M_R[:, k])
 
     # force rate cost
     if k < N - 1:
-        J += srb.force_rate_cost(F_L[:, k], F_R[:, k], M_L[:, k], M_R[:, k], 
-                                 F_L[:, k+1], F_R[:, k+1], M_L[:, k+1], M_R[:, k+1], 
-                                 dt)
+        if k + 1 < stance_end:
+            phase_k1 = "stance"
+        elif k + 1 < flight_end:
+            phase_k1 = "flight"
+        else:
+            phase_k1 = "landing"
+
+        # Skip rate penalties across hybrid phase boundaries.
+        if phase_k1 == phase_k:
+            J += dt_k * srb.force_rate_cost(F_L[:, k], F_R[:, k], M_L[:, k], M_R[:, k], 
+                                            F_L[:, k+1], F_R[:, k+1], M_L[:, k+1], M_R[:, k+1], 
+                                            dt_k)
+
+    # if k < N - 1:
+    #     J += srb.force_rate_cost(F_L[:, k], F_R[:, k], M_L[:, k], M_R[:, k], 
+    #                              F_L[:, k+1], F_R[:, k+1], M_L[:, k+1], M_R[:, k+1], 
+    #                              dt_k)
 
 # foot placement cost (body frame)
 J += srb.foot_placement_cost(p_L_land, p_R_land, p_L_goal, p_R_goal)
@@ -525,6 +581,9 @@ for k in range(N + 1):
 # # landing foot positions
 opti.set_initial(p_L_land, p_L_goal)
 opti.set_initial(p_R_land, p_R_goal)
+opti.set_initial(T_stance, T_stance_nom)
+opti.set_initial(T_flight, T_flight_nom)
+opti.set_initial(T_land, T_land_nom)
 
 # wrenches: phase-aware
 for k in range(N):
@@ -560,6 +619,13 @@ FL_sol   = sol.value(F_L)       # (3, N)
 FR_sol   = sol.value(F_R)       # (3, N)
 ML_sol   = sol.value(M_L)       # (3, N)
 MR_sol   = sol.value(M_R)       # (3, N)
+T_stance_sol = float(sol.value(T_stance))
+T_flight_sol = float(sol.value(T_flight))
+T_land_sol = float(sol.value(T_land))
+T_sol = T_stance_sol + T_flight_sol + T_land_sol
+dt_stance_sol = T_stance_sol / N_stance
+dt_flight_sol = T_flight_sol / N_flight
+dt_land_sol = T_land_sol / N_land
 
 # ----------------------------------------------------------
 # Reconstruct wrench trajectory
@@ -634,10 +700,16 @@ print(f"  Right foot (body): x={pR_land[0]:.3f}, y={pR_land[1]:.3f}")
 print(f"  Left  foot (world): x={pL_land_world_xy[0]:.3f}, y={pL_land_world_xy[1]:.3f}")
 print(f"  Right foot (world): x={pR_land_world_xy[0]:.3f}, y={pR_land_world_xy[1]:.3f}")
 
+print(f"\nOptimal phase durations:")
+print(f"  Stance:  {T_stance_sol:.3f}s (dt={dt_stance_sol:.4f}s, nodes={N_stance})")
+print(f"  Flight:  {T_flight_sol:.3f}s (dt={dt_flight_sol:.4f}s, nodes={N_flight})")
+print(f"  Landing: {T_land_sol:.3f}s (dt={dt_land_sol:.4f}s, nodes={N_land})")
+print(f"  Total:   {T_sol:.3f}s")
+
 print(f"\nPhase summary:")
-print(f"  Stance:  k=0  -> {stance_end-1}   (t=0.00 -> {stance_end*dt:.2f}s)")
-print(f"  Flight:  k={stance_end} -> {flight_end-1}  (t={stance_end*dt:.2f} -> {flight_end*dt:.2f}s)")
-print(f"  Landing: k={flight_end} -> {N-1}  (t={flight_end*dt:.2f} -> {N*dt:.2f}s)")
+print(f"  Stance:  k=0  -> {stance_end-1}   (t=0.00 -> {T_stance_sol:.2f}s)")
+print(f"  Flight:  k={stance_end} -> {flight_end-1}  (t={T_stance_sol:.2f} -> {T_stance_sol + T_flight_sol:.2f}s)")
+print(f"  Landing: k={flight_end} -> {N-1}  (t={T_stance_sol + T_flight_sol:.2f} -> {T_sol:.2f}s)")
 
 print(f"\nTerminal state:")
 print(f"  p_com = {X_sol[N, 0:3]}")
@@ -647,7 +719,13 @@ print(f"  v_com = {X_sol[N, 7:10]}")
 # ----------------------------------------------------------
 # Save
 # ----------------------------------------------------------
-time = np.linspace(0, T, N+1)
+dt_schedule = np.concatenate((
+    np.full(N_stance, dt_stance_sol),
+    np.full(N_flight, dt_flight_sol),
+    np.full(N_land, dt_land_sol),
+))
+time = np.zeros(N + 1)
+time[1:] = np.cumsum(dt_schedule)
 
 # feet trajectory for each control step k:
 # columns = [pL_x, pL_y, pR_x, pR_y]
