@@ -13,6 +13,7 @@ import casadi as ca
 
 # custom imports
 from utils.kinematics import kin
+from utils.interpolation import interp
 from srb.srb import SRBDynamics
 
 
@@ -241,7 +242,7 @@ x_goal_ca = ca.DM(x_goal)
 
 # Build automated yaw keyframes for flight quaternion references.
 yaw_start = kin.quat_to_yaw(quat0)
-quat_slerp_keyframes = kin.build_yaw_slerp_keyframes(yaw_start, yaw_goal)
+quat_slerp_keyframes = interp.build_yaw_slerp_keyframes(yaw_start, yaw_goal)
 
 # Desired landing foot positions in body-frame XY (COM-centered)
 p_L_goal = ca.DM([0.0,  srb.hip_offset])
@@ -460,9 +461,6 @@ opti.subject_to(ca.sumsqr(p_R_land - p_R_goal) <= landing_tol**2)
 # Objective Function
 # ----------------------------------------------------------
 
-# stance yaw-overrun penalty settings (encourage twist to happen in flight)
-W_stance_yaw = 200.0
-
 # total cost
 J = 0
 for k in range(N):
@@ -479,19 +477,10 @@ for k in range(N):
     # phase-aware state objective:
     # no state tracking in stance; twist in flight; track final state in landing
     if k < stance_end:
-        # # Penalize only excess yaw progress toward the desired twist direction.
-        # qk = X[3:7, k]  # [qw, qx, qy, qz]
-        # yaw_k = ca.atan2(
-        #     2.0 * (qk[0] * qk[3] + qk[1] * qk[2]),
-        #     1.0 - 2.0 * (qk[2] * qk[2] + qk[3] * qk[3])
-        # )
-        # yaw_progress = ca.sign(yaw_goal) * yaw_k
-        # yaw_excess = ca.fmax(0.0, yaw_progress - yaw_allow)
-        # J += 0.5 * W_stance_yaw * yaw_excess**2
         x_ref_k = None
     elif k < flight_end:
         alpha = (k - stance_end + 1) / N_flight
-        quat_k = kin.sample_piecewise_slerp(alpha, quat_slerp_keyframes)
+        quat_k = interp.sample_piecewise_slerp(alpha, quat_slerp_keyframes)
         # Encourage in-flight yaw rate consistent with completing yaw_goal over the
         # optimized flight duration.
         x_ref_k = ca.vertcat(
@@ -572,7 +561,7 @@ for k in range(N + 1):
         quat_guess = kin.yaw_to_quat(yaw_k)
     elif k < flight_end:
         alpha_f = (k - stance_end + 1) / N_flight
-        quat_guess = kin.sample_piecewise_slerp(alpha_f, quat_slerp_keyframes)
+        quat_guess = interp.sample_piecewise_slerp(alpha_f, quat_slerp_keyframes)
     else:
         yaw_k = yaw_goal
         quat_guess = kin.yaw_to_quat(yaw_k)

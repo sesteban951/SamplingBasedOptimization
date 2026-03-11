@@ -78,6 +78,68 @@ def slerp(q1, q2, alpha):
     return q
 
 
+def build_yaw_slerp_keyframes(yaw_start, yaw_goal, max_step=0.95 * np.pi):
+    """
+    Build yaw-only quaternion keyframes with <= max_step angular increments.
+    """
+    dyaw = yaw_goal - yaw_start
+    n_seg = max(1, int(np.ceil(abs(dyaw) / max_step)))
+    yaw_keyframes = yaw_start + np.linspace(0.0, dyaw, n_seg + 1)
+    quat_keyframes = np.array([kin.yaw_to_quat(yaw) for yaw in yaw_keyframes], dtype=float)
+
+    # Keep a continuous quaternion sign convention across segments.
+    for i in range(1, quat_keyframes.shape[0]):
+        if np.dot(quat_keyframes[i - 1], quat_keyframes[i]) < 0.0:
+            quat_keyframes[i] = -quat_keyframes[i]
+
+    return quat_keyframes
+
+
+def build_general_slerp_keyframes(quat_start, roll_total, pitch_total, yaw_total, max_step=0.95 * np.pi):
+    """
+    Build quaternion keyframes for an arbitrary in-air rotation maneuver.
+
+    Args:
+        quat_start: (np.array) Starting quaternion [qw, qx, qy, qz].
+        roll_total, pitch_total, yaw_total: (float) Total relative rotation in radians.
+        max_step: (float) Maximum angular step per segment.
+    Returns:
+        quat_keyframes: (np.array) Shape (n_seg+1, 4) quaternion keyframes.
+    """
+    total_angle = np.sqrt(roll_total**2 + pitch_total**2 + yaw_total**2)
+    n_seg = max(1, int(np.ceil(total_angle / max_step)))
+
+    quat_keyframes = np.zeros((n_seg + 1, 4))
+    quat_keyframes[0] = quat_start / np.linalg.norm(quat_start)
+
+    for i in range(1, n_seg + 1):
+        frac = i / n_seg
+        q_rel = kin.euler_ZYX_to_quat(frac * roll_total, frac * pitch_total, frac * yaw_total)
+        quat_keyframes[i] = kin.quat_mult(q_rel, quat_start)
+        quat_keyframes[i] /= np.linalg.norm(quat_keyframes[i])
+
+    # Enforce continuous sign convention across keyframes
+    for i in range(1, quat_keyframes.shape[0]):
+        if np.dot(quat_keyframes[i - 1], quat_keyframes[i]) < 0.0:
+            quat_keyframes[i] = -quat_keyframes[i]
+
+    return quat_keyframes
+
+
+def sample_piecewise_slerp(alpha, quat_keyframes):
+    """
+    Sample piecewise SLERP over keyframes for alpha in [0, 1].
+    """
+    alpha = float(np.clip(alpha, 0.0, 1.0))
+    if alpha >= 1.0:
+        return quat_keyframes[-1]
+
+    s = alpha * (quat_keyframes.shape[0] - 1)
+    i = min(int(np.floor(s)), quat_keyframes.shape[0] - 2)
+    alpha_local = s - i
+    return slerp(quat_keyframes[i], quat_keyframes[i + 1], alpha_local)
+
+
 def vec_finite_diff(v1, v2, dt):
     """
     Compute the finite difference between two vectors.

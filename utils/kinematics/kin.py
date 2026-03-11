@@ -238,6 +238,17 @@ def quat_to_yaw_ca(q):
     )
 
 
+def euler_ZYX_to_quat(roll, pitch, yaw):
+    """
+    Convert (roll, pitch, yaw) in radians to quaternion [qw, qx, qy, qz].
+    ZYX intrinsic composition: q = qz(yaw) * qy(pitch) * qx(roll).
+    """
+    qx = np.array([np.cos(roll / 2), np.sin(roll / 2), 0.0, 0.0])
+    qy = np.array([np.cos(pitch / 2), 0.0, np.sin(pitch / 2), 0.0])
+    qz = np.array([np.cos(yaw / 2), 0.0, 0.0, np.sin(yaw / 2)])
+    return quat_mult(qz, quat_mult(qy, qx))
+
+
 def yaw_to_quat(yaw):
     """
     Construct yaw-only quaternion [qw, qx, qy, qz].
@@ -257,64 +268,6 @@ def yaw_to_rot_matrix(yaw):
         [0.0, 0.0, 1.0],
     ], dtype=float)
 
-
-def build_yaw_slerp_keyframes(yaw_start, yaw_goal, max_step=0.95 * np.pi):
-    """
-    Build yaw-only quaternion keyframes with <= max_step angular increments.
-    """
-    dyaw = yaw_goal - yaw_start
-    n_seg = max(1, int(np.ceil(abs(dyaw) / max_step)))
-    yaw_keyframes = yaw_start + np.linspace(0.0, dyaw, n_seg + 1)
-    quat_keyframes = np.array([yaw_to_quat(yaw) for yaw in yaw_keyframes], dtype=float)
-
-    # Keep a continuous quaternion sign convention across segments.
-    for i in range(1, quat_keyframes.shape[0]):
-        if np.dot(quat_keyframes[i - 1], quat_keyframes[i]) < 0.0:
-            quat_keyframes[i] = -quat_keyframes[i]
-
-    return quat_keyframes
-
-
-def _slerp_quat(q1, q2, alpha):
-    """
-    Minimal standalone SLERP to avoid cross-module import cycles.
-    """
-    q1 = np.asarray(q1, dtype=float)
-    q2 = np.asarray(q2, dtype=float)
-    q1 = q1 / np.linalg.norm(q1)
-    q2 = q2 / np.linalg.norm(q2)
-
-    dot = np.dot(q1, q2)
-    if dot < 0.0:
-        q2 = -q2
-        dot = -dot
-    dot = np.clip(dot, -1.0, 1.0)
-
-    theta = np.arccos(dot)
-    if theta < 1e-6:
-        q = (1.0 - alpha) * q1 + alpha * q2
-        return q / np.linalg.norm(q)
-
-    sin_theta = np.sin(theta)
-    term1 = np.sin((1.0 - alpha) * theta) / sin_theta
-    term2 = np.sin(alpha * theta) / sin_theta
-    q = term1 * q1 + term2 * q2
-    return q / np.linalg.norm(q)
-
-
-def sample_piecewise_slerp(alpha, quat_keyframes):
-    """
-    Sample piecewise SLERP over keyframes for alpha in [0, 1].
-    """
-    alpha = float(np.clip(alpha, 0.0, 1.0))
-    if alpha >= 1.0:
-        return quat_keyframes[-1]
-
-    s = alpha * (quat_keyframes.shape[0] - 1)
-    i = min(int(np.floor(s)), quat_keyframes.shape[0] - 2)
-    alpha_local = s - i
-    return _slerp_quat(quat_keyframes[i], quat_keyframes[i + 1], alpha_local)
-    
 
 def quat_rotate(q, v):
     """
