@@ -17,13 +17,13 @@ config = AerialConfig(
         w_body=[0.0, 0.0, 0.0],
     ),
     goal=GoalStateConfig(
-        p_com=[-0.2, 0, 0.77],
-        rpy_deg=[0.0, -360.0, 0.0],
+        p_com=[0.0, -0.5, 0.77],
+        rpy_deg=[360.0, 0.0, 0.0],
         v_com=[0.0, 0.0, 0.0],
         w_body=[0.0, 0.0, 0.0],
     ),
     maneuver=ManeuverConfig(
-        rpy_deg=[0.0, -360.0, 0.0],
+        rpy_deg=[360.0, 0.0, 0.0],
     ),
     timing=TimingConfig(
         dt_nom=0.02,
