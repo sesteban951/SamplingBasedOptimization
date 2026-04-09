@@ -7,6 +7,7 @@
 # standard imports
 import numpy as np
 import matplotlib.pyplot as plt
+import sys
 import time
 import os
 
@@ -22,12 +23,11 @@ from utils.kinematics import kin
 # LOAD DATA
 #################################################################
 
-# which data to load
-# experiment = "srb/srb_free_wrench"
-# experiment = "srb/srb_jump"
-# experiment = "srb/srb_jump_2d"
-# experiment = "srb/srb_twist"
-experiment = "srb/srb_aerial"
+# which data to load — pass subfolder as CLI arg, e.g.: python view_srb_results.py srb_aerial
+if len(sys.argv) > 1:
+    experiment = f"srb/{sys.argv[1]}"
+else:
+    experiment = "srb/srb_aerial"
 
 # which data to load
 time_file = f"./results/{experiment}/time.csv"

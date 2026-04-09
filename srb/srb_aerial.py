@@ -167,7 +167,7 @@ T_nom = T_stance_nom + T_flight_nom + T_land_nom
 N_stance = int(T_stance_nom / dt_nom)
 N_flight = int(T_flight_nom / dt_nom)
 N_land = int(T_land_nom / dt_nom)
-N = int(T_nom / dt_nom)
+N = N_stance + N_flight + N_land
 
 # phase boundaries
 stance_end = N_stance
