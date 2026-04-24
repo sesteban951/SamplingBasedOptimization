@@ -28,6 +28,13 @@ instead of:
 python scripts/cartpole/cartpole_cem.py
 ```
 
+
+srb stuff: 
+```bash
+python -m srb.srb_jump
+python -m results.view_srb_results srb_jump
+```
+
 ## Viewing Results
 ### Optimization Results
 Optimization results are saved in `results/`. To view, run `view_results.py` which will load the data, visualize it, and plot. Just change the `experiment` and `xml_path` at the top of the file to view different results. Similarly, you can use `view_results_srb.py` to view results from the SRB optimization.
