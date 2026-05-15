@@ -92,7 +92,7 @@ p_com_goal = [0.0, 0.0, 0.693]
 rpy_deg_goal = [0.0, 0.0, 0.0]
 
 # squat depth: minimum COM z the trajectory should reach
-squat_depth_z = 0.45
+squat_depth_z = 0.15
 
 # timing
 dt_nom = 0.02
@@ -109,7 +109,7 @@ Q_force_dot = 1e-6
 Q_moment_dot = 1e-6
 
 # constraints
-L_min = 0.35
+L_min = 0.15
 L_max = 0.80
 mu = 1.0
 M_ankle_x_max = 50.0

@@ -23,9 +23,11 @@ from utils.kinematics import kin
 # LOAD DATA
 #################################################################
 
-# which data to load — pass subfolder as CLI arg, e.g.: python view_srb_results.py srb_aerial
+# which data to load — pass subfolder as CLI arg, e.g.:
+#   python view_srb_results.py srb/srb_aerial
+#   python view_srb_results.py srb_walker/jump
 if len(sys.argv) > 1:
-    experiment = f"srb/{sys.argv[1]}"
+    experiment = sys.argv[1]
 else:
     experiment = "srb/srb_aerial"
 
@@ -185,8 +187,9 @@ def _add_segment_geom(scene, p_from, p_to, radius, rgba):
     geom.category = int(mujoco.mjtCatBit.mjCAT_DECOR)
     scene.ngeom += 1
 
-# decide if 2D or 3D trajectory
-if "2d" in experiment.lower():
+# decide if 2D or 3D trajectory based on data shape (3D SRB q has 7 cols: [p,quat]; 2D has 3: [px,pz,theta])
+is_2d = (q_opt.shape[1] < 7)
+if is_2d:
     q_replay = srb_2D_to_3D(q_opt)
 else:
     q_replay = q_opt
@@ -331,7 +334,7 @@ viewer.close()
 #################################################################
 
 # 2D SRB Trajectory
-if "2d" in experiment.lower():
+if is_2d:
 
     # ----------------------- POS / VEL / ACC -----------------------
     plt.figure(num="State")

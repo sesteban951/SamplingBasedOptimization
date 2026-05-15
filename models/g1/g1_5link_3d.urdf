@@ -1,0 +1,150 @@
+<?xml version="1.0"?>
+<!--
+  3D 5-link walker for the G1 robot.
+  Links: pelvis, l_thigh, l_shank, r_thigh, r_shank.
+  Joints per leg: hip_roll (x) → hip_pitch (y) → knee_pitch (y).
+  Massless hip_roll intermediate links keep the 5-link body count intact.
+  Parameters from g1_5link_params.py and srb.py.
+-->
+<robot name="g1_5link_3d">
+
+  <!-- ============================================================ -->
+  <!-- PELVIS (floating base, origin = COM)                         -->
+  <!-- ============================================================ -->
+  <link name="pelvis">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="22.34"/>
+      <!-- scaled from full-body SRB inertia (srb.py) × 22.34/33.34 -->
+      <inertia ixx="2.510" ixy="0.000" ixz="0.058"
+               iyy="2.209" iyz="-0.001"
+               izz="0.346"/>
+    </inertial>
+  </link>
+
+  <!-- ============================================================ -->
+  <!-- LEFT LEG                                                      -->
+  <!-- ============================================================ -->
+
+  <!-- massless roll link so hip has 2 DOF while staying 5-link     -->
+  <link name="l_hip_roll_link">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.001"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
+    </inertial>
+  </link>
+
+  <joint name="l_hip_roll" type="revolute">
+    <parent link="pelvis"/>
+    <child  link="l_hip_roll_link"/>
+    <!-- hip offset from g1_5link_params: (0, +0.1185, -0.006) -->
+    <origin xyz="0.0 0.1185 -0.006" rpy="0 0 0"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-0.5" upper="0.5" effort="88.0" velocity="10.0"/>
+  </joint>
+
+  <link name="l_thigh">
+    <inertial>
+      <!-- COM at midpoint of thigh along -z -->
+      <origin xyz="0 0 -0.1675" rpy="0 0 0"/>
+      <mass value="3.0"/>
+      <!-- cylinder r=0.05m, L=0.335m along z -->
+      <inertia ixx="0.0300" ixy="0" ixz="0" iyy="0.0300" iyz="0" izz="0.00375"/>
+    </inertial>
+  </link>
+
+  <joint name="l_hip_pitch" type="revolute">
+    <parent link="l_hip_roll_link"/>
+    <child  link="l_thigh"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-2.5307" upper="2.8798" effort="88.0" velocity="10.0"/>
+  </joint>
+
+  <link name="l_shank">
+    <inertial>
+      <!-- COM at midpoint of shank+foot length along -z -->
+      <origin xyz="0 0 -0.174" rpy="0 0 0"/>
+      <mass value="2.5"/>
+      <!-- cylinder r=0.04m, L=0.348m along z -->
+      <inertia ixx="0.0262" ixy="0" ixz="0" iyy="0.0262" iyz="0" izz="0.00200"/>
+    </inertial>
+  </link>
+
+  <joint name="l_knee_pitch" type="revolute">
+    <parent link="l_thigh"/>
+    <child  link="l_shank"/>
+    <origin xyz="0 0 -0.335" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-0.0873" upper="2.8798" effort="139.0" velocity="10.0"/>
+  </joint>
+
+  <!-- foot contact site: fixed frame at bottom of shank -->
+  <link name="l_foot"/>
+  <joint name="l_foot_joint" type="fixed">
+    <parent link="l_shank"/>
+    <child  link="l_foot"/>
+    <origin xyz="0 0 -0.348" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ============================================================ -->
+  <!-- RIGHT LEG                                                     -->
+  <!-- ============================================================ -->
+
+  <link name="r_hip_roll_link">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.001"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
+    </inertial>
+  </link>
+
+  <joint name="r_hip_roll" type="revolute">
+    <parent link="pelvis"/>
+    <child  link="r_hip_roll_link"/>
+    <origin xyz="0.0 -0.1185 -0.006" rpy="0 0 0"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-0.5" upper="0.5" effort="88.0" velocity="10.0"/>
+  </joint>
+
+  <link name="r_thigh">
+    <inertial>
+      <origin xyz="0 0 -0.1675" rpy="0 0 0"/>
+      <mass value="3.0"/>
+      <inertia ixx="0.0300" ixy="0" ixz="0" iyy="0.0300" iyz="0" izz="0.00375"/>
+    </inertial>
+  </link>
+
+  <joint name="r_hip_pitch" type="revolute">
+    <parent link="r_hip_roll_link"/>
+    <child  link="r_thigh"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-2.5307" upper="2.8798" effort="88.0" velocity="10.0"/>
+  </joint>
+
+  <link name="r_shank">
+    <inertial>
+      <origin xyz="0 0 -0.174" rpy="0 0 0"/>
+      <mass value="2.5"/>
+      <inertia ixx="0.0262" ixy="0" ixz="0" iyy="0.0262" iyz="0" izz="0.00200"/>
+    </inertial>
+  </link>
+
+  <joint name="r_knee_pitch" type="revolute">
+    <parent link="r_thigh"/>
+    <child  link="r_shank"/>
+    <origin xyz="0 0 -0.335" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-0.0873" upper="2.8798" effort="139.0" velocity="10.0"/>
+  </joint>
+
+  <link name="r_foot"/>
+  <joint name="r_foot_joint" type="fixed">
+    <parent link="r_shank"/>
+    <child  link="r_foot"/>
+    <origin xyz="0 0 -0.348" rpy="0 0 0"/>
+  </joint>
+
+</robot>

@@ -71,6 +71,7 @@ class ConstraintConfig:
     landing_tol: float = 0.1
     stance_rotation_allow: float = 0.15
     touchdown_rp_max: float = 0.15
+    
 
 
 @dataclass
