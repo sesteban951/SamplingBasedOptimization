@@ -24,19 +24,26 @@ from srb_walker.g1_5link_params import (
 dyn = FiveLinkDynamics()
 nq, nv, nj = dyn.nq, dyn.nv, dyn.nj   # 13, 12, 6
 
-dt       = 0.02
-T_stance = 0.5
-T_flight = 0.4
-T_land   = 0.5
-T        = T_stance + T_flight + T_land
-
-N_stance = int(T_stance / dt)   # 25
-N_flight = int(T_flight / dt)   # 20
-N_land   = int(T_land   / dt)   # 25
-N        = N_stance + N_flight + N_land  # 70
+# Fixed node counts per phase — NLP structure stays constant.
+# Time steps dt_s / dt_f / dt_l become decision variables so that
+# T_phase = N_phase * dt_phase is optimized within the bounds below.
+N_stance = 30
+N_flight = 20
+N_land   = 30
+N        = N_stance + N_flight + N_land   # 70
 
 stance_end = N_stance
 flight_end = N_stance + N_flight
+
+# Phase duration bounds [s] — edit these to taste
+T_STANCE_MIN, T_STANCE_MAX = 0.2, 2.5
+T_FLIGHT_MIN, T_FLIGHT_MAX = 0.5, 1.5
+T_LAND_MIN,   T_LAND_MAX   = 0.2, 2.5
+
+# Initial guesses for phase durations [s]
+T_stance_guess = 0.5
+T_flight_guess = 0.7
+T_land_guess   = 0.5
 
 print(f"N={N}  stance=[0,{stance_end})  flight=[{stance_end},{flight_end})  land=[{flight_end},{N})")
 
@@ -57,13 +64,13 @@ q_crouch[11] = 0.5   # r_hip_pitch
 q_crouch[12] = 1.0   # r_knee_pitch
 q_crouch[2]  = 0.55  # lower base height when crouching
 
-# Mid-flight leg swing (hips forward, knees up)
+# Mid-flight tuck pose (knees pulled up, body upright)
 q_swing = q0.copy()
-q_swing[8]  = -0.5   # l_hip_pitch (leg forward)
-q_swing[9]  =  0.3   # l_knee_pitch
-q_swing[11] = -0.5   # r_hip_pitch
-q_swing[12] =  0.3   # r_knee_pitch
-q_swing[2]  =  0.85  # apex height
+q_swing[8]  =  0.4   # l_hip_pitch (slight forward flex)
+q_swing[9]  =  0.8   # l_knee_pitch (knees bent/tucked)
+q_swing[11] =  0.4   # r_hip_pitch
+q_swing[12] =  0.8   # r_knee_pitch
+q_swing[2]  =  0.95  # apex height above standing (0.689m)
 
 ##############################################################
 # NLP
@@ -76,6 +83,15 @@ V  = opti.variable(nv, N + 1)   # velocity at each node
 U  = opti.variable(nj, N)       # joint torques per interval
 LL = opti.variable(3, N)        # left  contact force
 LR = opti.variable(3, N)        # right contact force
+
+# Phase time steps (seconds per interval within each phase)
+dt_s = opti.variable()   # stance
+dt_f = opti.variable()   # flight
+dt_l = opti.variable()   # landing
+
+opti.subject_to(opti.bounded(T_STANCE_MIN / N_stance, dt_s, T_STANCE_MAX / N_stance))
+opti.subject_to(opti.bounded(T_FLIGHT_MIN / N_flight, dt_f, T_FLIGHT_MAX / N_flight))
+opti.subject_to(opti.bounded(T_LAND_MIN   / N_land,   dt_l, T_LAND_MAX   / N_land))
 
 ##############################################################
 # Boundary conditions
@@ -99,18 +115,26 @@ opti.subject_to(V[:, N] == v0_ca)
 
 for k in range(N):
 
-    q_k = Q[:, k]
-    v_k = V[:, k]
-    u_k = U[:, k]
+    q_k  = Q[:, k]
+    v_k  = V[:, k]
+    u_k  = U[:, k]
     lL_k = LL[:, k]
     lR_k = LR[:, k]
+
+    # time step for this interval
+    if k < stance_end:
+        dt_k = dt_s
+    elif k < flight_end:
+        dt_k = dt_f
+    else:
+        dt_k = dt_l
 
     # acceleration from ABA
     a_k = dyn.aba_fn(q_k, v_k, u_k, lL_k, lR_k)
 
     # Euler integration
-    v_next = v_k + dt * a_k
-    q_next = dyn.integrate_fn(q_k, v_k, dt)
+    v_next = v_k + dt_k * a_k
+    q_next = dyn.integrate_fn(q_k, v_k, dt_k)
 
     opti.subject_to(V[:, k + 1] == v_next)
     opti.subject_to(Q[:, k + 1] == q_next)
@@ -123,7 +147,7 @@ for k in range(N + 1):
 # Contact / phase constraints
 ##############################################################
 
-mu = 0.7
+mu = 0.5
 A_fc = ca.DM([[ 1,  0, -mu],
               [-1,  0, -mu],
               [ 0,  1, -mu],
@@ -162,26 +186,58 @@ for k in range(N):
         opti.subject_to(A_fc @ LL[:, k] <= b_fc)
         opti.subject_to(A_fc @ LR[:, k] <= b_fc)
 
-# base height (COM stays above min during flight)
-pz_min = 0.55
+# base height: general floor + must actually be airborne during flight
+pz_min = 0.45
+# L_MAX=0.72m → max COM height with feet on ground is ~0.73m.
+# Only enforce flight floor on interior flight nodes (not at phase boundaries
+# where foot contact forces transition and the kinematic limit kicks in).
+pz_flight_min = 0.71
 for k in range(N + 1):
     opti.subject_to(Q[2, k] >= pz_min)
+for k in range(stance_end + 1, flight_end):
+    opti.subject_to(Q[2, k] >= pz_flight_min)
+
+# enforce left-right leg symmetry during flight (prevents yaw spin from asymmetric leg motion)
+for k in range(stance_end, flight_end + 1):
+    opti.subject_to(Q[8,  k] == Q[11, k])   # hip pitch L == R
+    opti.subject_to(Q[9,  k] == Q[12, k])   # knee L == R
+    opti.subject_to(Q[7,  k] == -Q[10, k])  # hip roll antisymmetric (mirror)
+
+# limit body pitch: relaxed on ground, tight in the air (~10 deg during flight)
+PITCH_MAX_GROUND = 0.35
+PITCH_MAX_FLIGHT = 0.18
+for k in range(N + 1):
+    if stance_end <= k <= flight_end:
+        opti.subject_to(opti.bounded(-PITCH_MAX_FLIGHT, Q[4, k], PITCH_MAX_FLIGHT))
+    else:
+        opti.subject_to(opti.bounded(-PITCH_MAX_GROUND, Q[4, k], PITCH_MAX_GROUND))
 
 ##############################################################
 # Joint & torque limits
 ##############################################################
 
 HIP_ROLL_MAX = 0.5
+# tighter bounds during flight to prevent legs clipping through the body
+HIP_PITCH_FLIGHT_MIN = -0.3   # don't let legs swing far backward
+HIP_PITCH_FLIGHT_MAX =  1.8   # allow tuck but not extreme fold
+KNEE_FLIGHT_MAX      =  2.2   # knees can bend for tuck but not fold into body
+HIP_ROLL_FLIGHT_MAX  =  0.2   # keep legs close to sagittal plane in the air
+
 for k in range(N + 1):
-    # hip roll ±
-    opti.subject_to(opti.bounded(-HIP_ROLL_MAX, Q[7,  k], HIP_ROLL_MAX))
-    opti.subject_to(opti.bounded(-HIP_ROLL_MAX, Q[10, k], HIP_ROLL_MAX))
-    # hip pitch
-    opti.subject_to(opti.bounded(HIP_PITCH_MIN, Q[8,  k], HIP_PITCH_MAX))
-    opti.subject_to(opti.bounded(HIP_PITCH_MIN, Q[11, k], HIP_PITCH_MAX))
-    # knee
-    opti.subject_to(opti.bounded(KNEE_MIN, Q[9,  k], KNEE_MAX))
-    opti.subject_to(opti.bounded(KNEE_MIN, Q[12, k], KNEE_MAX))
+    if stance_end <= k <= flight_end:
+        opti.subject_to(opti.bounded(-HIP_ROLL_FLIGHT_MAX, Q[7,  k], HIP_ROLL_FLIGHT_MAX))
+        opti.subject_to(opti.bounded(-HIP_ROLL_FLIGHT_MAX, Q[10, k], HIP_ROLL_FLIGHT_MAX))
+        opti.subject_to(opti.bounded(HIP_PITCH_FLIGHT_MIN, Q[8,  k], HIP_PITCH_FLIGHT_MAX))
+        opti.subject_to(opti.bounded(HIP_PITCH_FLIGHT_MIN, Q[11, k], HIP_PITCH_FLIGHT_MAX))
+        opti.subject_to(opti.bounded(KNEE_MIN, Q[9,  k], KNEE_FLIGHT_MAX))
+        opti.subject_to(opti.bounded(KNEE_MIN, Q[12, k], KNEE_FLIGHT_MAX))
+    else:
+        opti.subject_to(opti.bounded(-HIP_ROLL_MAX, Q[7,  k], HIP_ROLL_MAX))
+        opti.subject_to(opti.bounded(-HIP_ROLL_MAX, Q[10, k], HIP_ROLL_MAX))
+        opti.subject_to(opti.bounded(HIP_PITCH_MIN, Q[8,  k], HIP_PITCH_MAX))
+        opti.subject_to(opti.bounded(HIP_PITCH_MIN, Q[11, k], HIP_PITCH_MAX))
+        opti.subject_to(opti.bounded(KNEE_MIN, Q[9,  k], KNEE_MAX))
+        opti.subject_to(opti.bounded(KNEE_MIN, Q[12, k], KNEE_MAX))
 
 for k in range(N):
     # hip roll/pitch torque
@@ -197,22 +253,44 @@ for k in range(N):
 # Objective
 ##############################################################
 
-w_tau   = 1e-3
-w_lam   = 1e-5
-w_state = 1.0
-w_vel   = 0.5
-w_term  = 20.0
+# Pinocchio quat: Q[3]=qx (roll), Q[4]=qy (pitch), Q[5]=qz (yaw)
+w_no_twist        = 50.0    # roll + yaw throughout
+w_no_twist_flight = 300.0   # extra pitch/roll/yaw penalty during flight
+
+w_tau      = 1e-3
+w_lam      = 5e-4    # higher than before to discourage force spikes
+w_lam_rate = 1e-4    # penalise sudden changes in contact force
+w_state    = 1.0
+w_vel      = 0.5
+w_term     = 20.0
+w_height   = 2.0     # reward flight height to avoid split degenerate solution
 
 J = 0
 for k in range(N):
-    # joint tracking cost (keep upright)
-    q_err = Q[7:, k] - q0_ca[7:]    # joint angle deviation
-    J += w_state * ca.sumsqr(q_err)
-    J += w_vel   * ca.sumsqr(V[:, k])
-    J += w_tau   * ca.sumsqr(U[:, k])
+    J += w_tau      * ca.sumsqr(U[:, k])
+    J += w_vel      * ca.sumsqr(V[:, k])
+    # penalise roll, pitch, and yaw to keep body upright
+    J += w_no_twist * (Q[3, k]**2 + Q[4, k]**2 + Q[5, k]**2)
+    if stance_end <= k < flight_end:
+        # penalise all rotations strongly during flight
+        J += w_no_twist_flight * (Q[3, k]**2 + Q[4, k]**2 + Q[5, k]**2)
 
-    if k < stance_end or k >= flight_end:
+    if k < stance_end:
         J += w_lam * (ca.sumsqr(LL[:, k]) + ca.sumsqr(LR[:, k]))
+        if k > 0:
+            J += w_lam_rate * (ca.sumsqr(LL[:, k] - LL[:, k-1])
+                             + ca.sumsqr(LR[:, k] - LR[:, k-1]))
+    elif k >= flight_end:
+        q_err = Q[7:, k] - q0_ca[7:]
+        J += w_state * ca.sumsqr(q_err)
+        J += w_lam * (ca.sumsqr(LL[:, k]) + ca.sumsqr(LR[:, k]))
+        if k > flight_end:
+            J += w_lam_rate * (ca.sumsqr(LL[:, k] - LL[:, k-1])
+                             + ca.sumsqr(LR[:, k] - LR[:, k-1]))
+    else:
+        q_err = Q[7:, k] - q0_ca[7:]
+        J += w_state * ca.sumsqr(q_err)
+        J -= w_height * Q[2, k]   # maximize height during flight
 
 # terminal
 q_err_f = Q[7:, N] - q0_ca[7:]
@@ -246,6 +324,10 @@ for k in range(N + 1):
 
     opti.set_initial(Q[:, k], q_g)
     opti.set_initial(V[:, k], 0.0)
+
+opti.set_initial(dt_s, T_stance_guess / N_stance)
+opti.set_initial(dt_f, T_flight_guess / N_flight)
+opti.set_initial(dt_l, T_land_guess   / N_land)
 
 for k in range(N):
     opti.set_initial(U[:, k], 0.0)
@@ -282,7 +364,20 @@ U_sol  = np.array(sol.value(U)).T    # (N,   nj)
 LL_sol = np.array(sol.value(LL)).T   # (N,   3)
 LR_sol = np.array(sol.value(LR)).T   # (N,   3)
 
-time_arr = np.linspace(0, T, N + 1)
+dt_s_val = float(sol.value(dt_s))
+dt_f_val = float(sol.value(dt_f))
+dt_l_val = float(sol.value(dt_l))
+
+T_s = N_stance * dt_s_val
+T_f = N_flight * dt_f_val
+T_l = N_land   * dt_l_val
+print(f"\nOptimized phase durations:  stance={T_s:.3f}s  flight={T_f:.3f}s  land={T_l:.3f}s  total={T_s+T_f+T_l:.3f}s")
+
+time_arr = np.concatenate([
+    np.arange(N_stance + 1) * dt_s_val,
+    T_s + np.arange(1, N_flight + 1) * dt_f_val,
+    T_s + T_f + np.arange(1, N_land + 1) * dt_l_val,
+])
 
 # foot positions at each node
 p_feet = np.zeros((N + 1, 6))
