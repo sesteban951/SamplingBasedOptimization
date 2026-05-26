@@ -5,7 +5,7 @@
 ##
 
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional
 
 
 @dataclass
@@ -55,6 +55,8 @@ class CostWeights:
     Q_moment: float = 1e-4
     Q_force_dot: float = 1e-4
     Q_moment_dot: float = 1e-4
+    Q_stance_px: float = 0.0
+    Q_stance_align: float = 0.0  # penalises pitch + k*px misalignment during stance
 
 
 @dataclass
@@ -70,7 +72,18 @@ class ConstraintConfig:
     F_leg_max: float = 500.0
     landing_tol: float = 0.1
     stance_rotation_allow: float = 0.15
+    stance_yaw_max: float = 0.0   # yaw limit during stance (rad)
     touchdown_rp_max: float = 0.15
+    landing_rp_alpha: float = 1.0  # extra orientation budget per metre of CoM error during landing
+    # Coupling between CoM pitch and minimum CoM height (m/rad).
+    # Enforces pz >= pz_min + pitch_pz_coupling * |pitch| during contact phases,
+    # reflecting that ankle ROM is shared between squat depth and forward tilt.
+    pitch_pz_coupling: float = 0.0
+    px_stance_max: Optional[float] = None
+    # If True, replace the flat pz_min floor during contact phases with the
+    # IK-derived x-dependent boundary pz >= poly(px) from squat_workspace.py.
+    # The flat pz_min still applies during flight.
+    workspace_pz: bool = False
     
 
 

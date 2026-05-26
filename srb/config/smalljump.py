@@ -59,6 +59,7 @@ config = AerialConfig(
         Qx_terminal_scale=100.0,
         Q_foot=50.0,
         Q_foot_world=150.0,
+        Q_stance_align=30.0,
         Q_force=1e-4,
         Q_moment=1e-4,
         Q_force_dot=1e-4,
@@ -80,6 +81,7 @@ config = AerialConfig(
         stance_rotation_allow=0.4,
         # Keep landing upright; the in-flight maneuver above handles the un-tilt.
         touchdown_rp_max=0.15,
+        workspace_pz=True,
     ),
     solver=SolverConfig(
         max_iter=5000,

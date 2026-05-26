@@ -21,6 +21,11 @@ from utils.kinematics import kin
 from utils.interpolation import interp
 from srb.srb import SRBDynamics
 
+_WORKSPACE_COEFFS = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "ik", "results", "workspace_poly_coeffs.csv",
+)
+
 
 class SRB_Aerial(SRBDynamics):
 
@@ -291,6 +296,7 @@ opti.subject_to(ca.sumsqr(log_err_terminal) <= epsilon**2)
 # kinematic limits
 L_max = cfg.constraints.L_max
 L_min = cfg.constraints.L_min
+pz_min = cfg.constraints.pz_min
 
 # contact parameters
 mu = cfg.constraints.mu
@@ -300,6 +306,21 @@ M_ankle_z_max = cfg.constraints.M_ankle_z_max
 F_leg_max = cfg.constraints.F_leg_max
 
 A_friction, b_friction = srb.friction_cone_matrix(mu)
+
+# workspace pz boundary function (defined here so it's available in the loop below)
+if cfg.constraints.workspace_pz:
+    if not os.path.exists(_WORKSPACE_COEFFS):
+        raise FileNotFoundError(
+            f"workspace_pz=True but coeffs not found: {_WORKSPACE_COEFFS}\n"
+            "Run: conda run -n env_sbo python ik/squat_workspace.py"
+        )
+    _poly = np.loadtxt(_WORKSPACE_COEFFS, delimiter=",")
+
+    def _pz_boundary(px_sym):
+        val = float(_poly[0])
+        for c in _poly[1:]:
+            val = val * px_sym + float(c)
+        return val
 
 # dynamics and phase constraints
 for k in range(N):
@@ -327,6 +348,7 @@ for k in range(N):
 
         opti.subject_to(ca.sumsqr(r_L) <= L_max**2)
         opti.subject_to(ca.sumsqr(r_R) <= L_max**2)
+
         opti.subject_to(ca.sumsqr(r_L) >= L_min**2)
         opti.subject_to(ca.sumsqr(r_R) >= L_min**2)
 
@@ -334,6 +356,13 @@ for k in range(N):
         q_rel = kin.quat_diff_ca(ca.DM(quat0), X[3:7, k])
         log_rel = kin.quat_log_ca(q_rel)
         opti.subject_to(ca.sumsqr(log_rel) <= cfg.constraints.stance_rotation_allow**2)
+
+        # yaw-specific constraint to prevent twisting during stance
+        yaw_k = kin.quat_to_yaw_ca(X[3:7, k])
+        opti.subject_to(opti.bounded(-cfg.constraints.stance_yaw_max, yaw_k, cfg.constraints.stance_yaw_max))
+
+        if cfg.constraints.px_stance_max is not None:
+            opti.subject_to(X[0, k] <= cfg.constraints.px_stance_max)
 
     # FLIGHT
     elif (k >= stance_end) and (k < flight_end):
@@ -368,9 +397,17 @@ for k in range(N):
     opti.subject_to(X[:, k + 1] == x_next)
 
 # z_com constraint
-pz_min = cfg.constraints.pz_min
-for k in range(N + 1):
-    opti.subject_to(X[2, k] >= pz_min)
+if cfg.constraints.workspace_pz:
+    for k in range(N + 1):
+        if k < stance_end or k >= flight_end:
+            # contact phase: IK-derived boundary only
+            opti.subject_to(X[2, k] >= _pz_boundary(X[0, k]))
+        else:
+            # flight phase: flat floor
+            opti.subject_to(X[2, k] >= pz_min)
+else:
+    for k in range(N + 1):
+        opti.subject_to(X[2, k] >= pz_min)
 
 # contact constraints
 for k in range(N):
@@ -412,14 +449,19 @@ landing_tol = cfg.constraints.landing_tol
 opti.subject_to(ca.sumsqr(p_L_land - p_L_goal) <= landing_tol**2)
 opti.subject_to(ca.sumsqr(p_R_land - p_R_goal) <= landing_tol**2)
 
-# touchdown uprightness constraint (enforce small roll/pitch at touchdown)
-q_td = X[3:7, flight_end]
-roll_td = ca.atan2(2.0 * (q_td[0] * q_td[1] + q_td[2] * q_td[3]),
-                   1.0 - 2.0 * (q_td[1]**2 + q_td[2]**2))
-sinp = 2.0 * (q_td[0] * q_td[2] - q_td[3] * q_td[1])
-pitch_td = ca.asin(ca.fmin(ca.fmax(sinp, -1.0), 1.0))
-opti.subject_to(opti.bounded(-cfg.constraints.touchdown_rp_max, roll_td, cfg.constraints.touchdown_rp_max))
-opti.subject_to(opti.bounded(-cfg.constraints.touchdown_rp_max, pitch_td, cfg.constraints.touchdown_rp_max))
+# landing orientation constraint: roll²+pitch² <= rp_max² + alpha*||p_err||²
+# allows more tilt when CoM still has position error; tightens as it settles
+rp_max   = cfg.constraints.touchdown_rp_max
+alpha_rp = cfg.constraints.landing_rp_alpha
+for k in range(flight_end, N + 1):
+    q_k = X[3:7, k]
+    roll_k = ca.atan2(2.0 * (q_k[0] * q_k[1] + q_k[2] * q_k[3]),
+                      1.0 - 2.0 * (q_k[1]**2 + q_k[2]**2))
+    sinp_k  = 2.0 * (q_k[0] * q_k[2] - q_k[3] * q_k[1])
+    pitch_k = ca.asin(ca.fmin(ca.fmax(sinp_k, -1.0), 1.0))
+    p_err_sq = ca.sumsqr(X[0:3, k] - x_goal_ca[0:3])
+    rp_sq_allowed = rp_max**2 + alpha_rp * p_err_sq
+    opti.subject_to(roll_k**2 + pitch_k**2 <= rp_sq_allowed)
 
 ##############################################################
 # Objective Function
@@ -436,6 +478,18 @@ for k in range(N):
     else:
         dt_k = dt_land
         phase_k = "landing"
+
+    # stance stability: penalise CoM x deviation from feet (x=0)
+    if k < stance_end and cfg.costs.Q_stance_px > 0:
+        J += dt_k * 0.5 * cfg.costs.Q_stance_px * X[0, k]**2
+
+    # stance alignment: penalise pitch/CoM-x misalignment (pitch should oppose px)
+    if k < stance_end and cfg.costs.Q_stance_align > 0:
+        q_k  = X[3:7, k]
+        sinp = 2.0 * (q_k[0] * q_k[2] - q_k[3] * q_k[1])
+        pitch_k = ca.asin(ca.fmin(ca.fmax(sinp, -1.0), 1.0))
+        k_align = 1.0 / x0[2]   # 1/z_nom ≈ 1.3 rad/m
+        J += dt_k * 0.5 * cfg.costs.Q_stance_align * (pitch_k + k_align * X[0, k])**2
 
     # phase-aware state objective
     if k < stance_end:

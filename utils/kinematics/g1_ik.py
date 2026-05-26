@@ -197,11 +197,13 @@ class G1IK:
         q = pin.neutral(self.model)
         q[2] = com_height
 
-        # Approximate squat angles: scale with pelvis drop
+        # Approximate squat angles: scale with pelvis drop.
+        # Minimum knee bias keeps NR on the correct branch even when pelvis is
+        # above nominal (e.g. with the CoM→pelvis offset in the pipeline).
         drop = max(0.0, NOMINAL_H - com_height)
-        hip_p  =  drop * 1.5    # hip pitches forward
-        knee   =  drop * 3.0    # knee bends (positive = correct direction)
-        ankle_p = -drop * 1.5   # ankle dorsiflexes to keep foot flat
+        hip_p  =  drop * 1.5
+        knee   =  max(0.05, drop * 3.0)   # never zero — lower limit is -0.087 rad
+        ankle_p = -drop * 1.5
 
         for name, angle in [
             ("left_hip_pitch_joint",   hip_p),
