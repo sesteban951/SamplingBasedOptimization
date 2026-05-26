@@ -25,6 +25,10 @@ _WORKSPACE_COEFFS = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "ik", "results", "workspace_poly_coeffs.csv",
 )
+_WORKSPACE_COEFFS_2D = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "ik", "results", "workspace_poly_coeffs_2d.csv",
+)
 
 
 class SRB_Aerial(SRBDynamics):
@@ -307,7 +311,23 @@ F_leg_max = cfg.constraints.F_leg_max
 
 A_friction, b_friction = srb.friction_cone_matrix(mu)
 
-# workspace pz boundary function (defined here so it's available in the loop below)
+# workspace pz boundary functions (defined here so available inside the loop)
+if cfg.constraints.workspace_pz_2d:
+    if not os.path.exists(_WORKSPACE_COEFFS_2D):
+        raise FileNotFoundError(
+            f"workspace_pz_2d=True but coeffs not found: {_WORKSPACE_COEFFS_2D}\n"
+            "Run: conda run -n env_sbo python ik/squat_workspace.py"
+        )
+    _raw2d = np.loadtxt(_WORKSPACE_COEFFS_2D, delimiter=",", comments="#")
+    _mono2d = [(int(r[0]), int(r[1])) for r in _raw2d]
+    _c2d    = [float(r[2]) for r in _raw2d]
+
+    def _pz_boundary_2d(px_sym, pitch_sym):
+        val = 0.0
+        for (i, j), c in zip(_mono2d, _c2d):
+            val = val + c * px_sym**i * pitch_sym**j
+        return val
+
 if cfg.constraints.workspace_pz:
     if not os.path.exists(_WORKSPACE_COEFFS):
         raise FileNotFoundError(
@@ -397,17 +417,51 @@ for k in range(N):
     opti.subject_to(X[:, k + 1] == x_next)
 
 # z_com constraint
-if cfg.constraints.workspace_pz:
+_c_pz = cfg.constraints.pitch_pz_coupling
+
+def _pitch_from_quat(k):
+    q_k  = X[3:7, k]
+    sinp = 2.0 * (q_k[0] * q_k[2] - q_k[3] * q_k[1])
+    return ca.asin(ca.fmin(ca.fmax(sinp, -1.0), 1.0))
+
+if cfg.constraints.workspace_pz_2d:
+    # 2D surface: z >= poly(x_rel, pitch) where x_rel = CoM_x - foot_center_x.
+    # The workspace was swept with feet at x=0, so we use the CoM x relative to
+    # the contact feet to keep the boundary function in the correct reference frame.
+    x_stance_center = float(p0_L[0])   # p0_L is [0, hip_offset]; x=0
+    x_land_center   = (p_L_land_W[0] + p_R_land_W[0]) / 2.0  # symbolic
     for k in range(N + 1):
-        if k < stance_end or k >= flight_end:
-            # contact phase: IK-derived boundary only
-            opti.subject_to(X[2, k] >= _pz_boundary(X[0, k]))
+        if k < stance_end:
+            x_rel = X[0, k] - x_stance_center
+            opti.subject_to(X[2, k] >= _pz_boundary_2d(x_rel, _pitch_from_quat(k)))
+        elif k >= flight_end:
+            x_rel = X[0, k] - x_land_center
+            opti.subject_to(X[2, k] >= _pz_boundary_2d(x_rel, _pitch_from_quat(k)))
         else:
-            # flight phase: flat floor
+            opti.subject_to(X[2, k] >= pz_min)
+elif cfg.constraints.workspace_pz:
+    # 1D surface with optional heuristic pitch coupling
+    x_stance_center = float(p0_L[0])
+    x_land_center   = (p_L_land_W[0] + p_R_land_W[0]) / 2.0
+    for k in range(N + 1):
+        if k < stance_end:
+            floor_k = _pz_boundary(X[0, k] - x_stance_center)
+            if _c_pz > 0.0:
+                floor_k = floor_k - _c_pz * _pitch_from_quat(k)
+            opti.subject_to(X[2, k] >= floor_k)
+        elif k >= flight_end:
+            floor_k = _pz_boundary(X[0, k] - x_land_center)
+            if _c_pz > 0.0:
+                floor_k = floor_k - _c_pz * _pitch_from_quat(k)
+            opti.subject_to(X[2, k] >= floor_k)
+        else:
             opti.subject_to(X[2, k] >= pz_min)
 else:
     for k in range(N + 1):
-        opti.subject_to(X[2, k] >= pz_min)
+        if _c_pz > 0.0 and (k < stance_end or k >= flight_end):
+            opti.subject_to(X[2, k] >= pz_min - _c_pz * _pitch_from_quat(k))
+        else:
+            opti.subject_to(X[2, k] >= pz_min)
 
 # contact constraints
 for k in range(N):
@@ -449,19 +503,23 @@ landing_tol = cfg.constraints.landing_tol
 opti.subject_to(ca.sumsqr(p_L_land - p_L_goal) <= landing_tol**2)
 opti.subject_to(ca.sumsqr(p_R_land - p_R_goal) <= landing_tol**2)
 
-# landing orientation constraint: roll²+pitch² <= rp_max² + alpha*||p_err||²
-# allows more tilt when CoM still has position error; tightens as it settles
-rp_max   = cfg.constraints.touchdown_rp_max
-alpha_rp = cfg.constraints.landing_rp_alpha
-for k in range(flight_end, N + 1):
-    q_k = X[3:7, k]
-    roll_k = ca.atan2(2.0 * (q_k[0] * q_k[1] + q_k[2] * q_k[3]),
-                      1.0 - 2.0 * (q_k[1]**2 + q_k[2]**2))
-    sinp_k  = 2.0 * (q_k[0] * q_k[2] - q_k[3] * q_k[1])
-    pitch_k = ca.asin(ca.fmin(ca.fmax(sinp_k, -1.0), 1.0))
-    p_err_sq = ca.sumsqr(X[0:3, k] - x_goal_ca[0:3])
-    rp_sq_allowed = rp_max**2 + alpha_rp * p_err_sq
-    opti.subject_to(roll_k**2 + pitch_k**2 <= rp_sq_allowed)
+# landing orientation constraint
+# Three modes (mutually exclusive, in priority order):
+#   workspace_pz_2d=True   → 2D surface handles it, no explicit orientation needed
+#   pitch_pz_coupling > 0  → 1D surface + heuristic coupling handles it
+#   otherwise              → explicit roll²+pitch² <= rp_max² + alpha*||p_err||²
+if _c_pz == 0.0 and not cfg.constraints.workspace_pz_2d:
+    rp_max   = cfg.constraints.touchdown_rp_max
+    alpha_rp = cfg.constraints.landing_rp_alpha
+    for k in range(flight_end, N + 1):
+        q_k = X[3:7, k]
+        roll_k = ca.atan2(2.0 * (q_k[0] * q_k[1] + q_k[2] * q_k[3]),
+                          1.0 - 2.0 * (q_k[1]**2 + q_k[2]**2))
+        sinp_k  = 2.0 * (q_k[0] * q_k[2] - q_k[3] * q_k[1])
+        pitch_k = ca.asin(ca.fmin(ca.fmax(sinp_k, -1.0), 1.0))
+        p_err_sq = ca.sumsqr(X[0:3, k] - x_goal_ca[0:3])
+        rp_sq_allowed = rp_max**2 + alpha_rp * p_err_sq
+        opti.subject_to(roll_k**2 + pitch_k**2 <= rp_sq_allowed)
 
 ##############################################################
 # Objective Function

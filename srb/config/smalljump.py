@@ -79,9 +79,10 @@ config = AerialConfig(
         # Relaxed from 0.15 → 0.4 rad to allow ~23 deg forward pitch wind-up
         # during stance.  The optimizer is free to use less if it doesn't help.
         stance_rotation_allow=0.4,
-        # Keep landing upright; the in-flight maneuver above handles the un-tilt.
-        touchdown_rp_max=0.15,
+        # 2D workspace surface z >= poly(x, pitch) replaces both rp_max and the
+        # heuristic pitch_pz_coupling.  Run ik/squat_workspace.py first.
         workspace_pz=True,
+        workspace_pz_2d=True,
     ),
     solver=SolverConfig(
         max_iter=5000,

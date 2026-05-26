@@ -84,7 +84,10 @@ class ConstraintConfig:
     # IK-derived x-dependent boundary pz >= poly(px) from squat_workspace.py.
     # The flat pz_min still applies during flight.
     workspace_pz: bool = False
-    
+    # If True, use the 2D IK-derived surface pz >= poly(x, pitch) from squat_workspace.py.
+    # Supersedes workspace_pz and pitch_pz_coupling when active.
+    workspace_pz_2d: bool = False
+
 
 
 @dataclass
