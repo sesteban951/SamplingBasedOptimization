@@ -416,6 +416,24 @@ for k in range(N):
     x_next = f(X[:, k], u, dt_k)
     opti.subject_to(X[:, k + 1] == x_next)
 
+# Leg extension at liftoff (last stance node) and touchdown (first landing node)
+if cfg.constraints.L_extension_min > 0:
+    L_ext2 = cfg.constraints.L_extension_min ** 2
+
+    k = stance_end - 1
+    p_com_k = X[0:3, k]
+    r_L_lo = ca.vertcat(p0_L_ca[0], p0_L_ca[1], 0) - p_com_k
+    r_R_lo = ca.vertcat(p0_R_ca[0], p0_R_ca[1], 0) - p_com_k
+    opti.subject_to(ca.sumsqr(r_L_lo) >= L_ext2)
+    opti.subject_to(ca.sumsqr(r_R_lo) >= L_ext2)
+
+    k = flight_end
+    p_com_k = X[0:3, k]
+    r_L_td = p_L_land_W - p_com_k
+    r_R_td = p_R_land_W - p_com_k
+    opti.subject_to(ca.sumsqr(r_L_td) >= L_ext2)
+    opti.subject_to(ca.sumsqr(r_R_td) >= L_ext2)
+
 # z_com constraint
 _c_pz = cfg.constraints.pitch_pz_coupling
 
@@ -503,6 +521,7 @@ landing_tol = cfg.constraints.landing_tol
 opti.subject_to(ca.sumsqr(p_L_land - p_L_goal) <= landing_tol**2)
 opti.subject_to(ca.sumsqr(p_R_land - p_R_goal) <= landing_tol**2)
 
+
 # landing orientation constraint
 # Three modes (mutually exclusive, in priority order):
 #   workspace_pz_2d=True   → 2D surface handles it, no explicit orientation needed
@@ -578,6 +597,13 @@ for k in range(N):
     # contact cost
     if phase_k in ("stance", "landing"):
         J += dt_k * srb.contact_cost(F_L[:, k], F_R[:, k], M_L[:, k], M_R[:, k])
+
+    # landing velocity cost
+    if phase_k == "landing" and cfg.costs.Q_landing_vel > 0:
+        J += 0.5 * cfg.costs.Q_landing_vel * (
+            ca.sumsqr(X[7:10, k]) + ca.sumsqr(X[10:13, k])
+        )
+
 
     # force rate cost (skip across phase boundaries)
     if k < N - 1:
@@ -775,11 +801,15 @@ feet[flight_end:, 2:4] = np.array([float(pR_land_world_xy[0]), float(pR_land_wor
 save_dir = cfg.save_dir
 os.makedirs(save_dir, exist_ok=True)
 
-np.savetxt(save_dir + "time.csv",    time,  delimiter=",")
-np.savetxt(save_dir + "q_opt.csv",   q_opt, delimiter=",")
-np.savetxt(save_dir + "v_opt.csv",   v_opt, delimiter=",")
-np.savetxt(save_dir + "a_opt.csv",   a_opt, delimiter=",")
-np.savetxt(save_dir + "tau_opt.csv", U,     delimiter=",")
-np.savetxt(save_dir + "feet.csv",    feet,  delimiter=",")
+np.savetxt(save_dir + "time.csv",         time,          delimiter=",")
+np.savetxt(save_dir + "q_opt.csv",        q_opt,         delimiter=",")
+np.savetxt(save_dir + "v_opt.csv",        v_opt,         delimiter=",")
+np.savetxt(save_dir + "a_opt.csv",        a_opt,         delimiter=",")
+np.savetxt(save_dir + "tau_opt.csv",      U,             delimiter=",")
+np.savetxt(save_dir + "feet.csv",         feet,          delimiter=",")
+np.savetxt(save_dir + "force_left.csv",   FL_sol.T,      delimiter=",")
+np.savetxt(save_dir + "force_right.csv",  FR_sol.T,      delimiter=",")
+np.savetxt(save_dir + "moment_left.csv",  ML_sol.T,      delimiter=",")
+np.savetxt(save_dir + "moment_right.csv", MR_sol.T,      delimiter=",")
 
 print(f"\nSaved results to {save_dir}")

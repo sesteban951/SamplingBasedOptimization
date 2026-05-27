@@ -60,6 +60,7 @@ config = AerialConfig(
         Q_foot=50.0,
         Q_foot_world=150.0,
         Q_stance_align=30.0,
+        Q_landing_vel=0.02,
         Q_force=1e-4,
         Q_moment=1e-4,
         Q_force_dot=1e-4,
@@ -83,6 +84,7 @@ config = AerialConfig(
         # heuristic pitch_pz_coupling.  Run ik/squat_workspace.py first.
         workspace_pz=True,
         workspace_pz_2d=True,
+        L_extension_min=0.69,
     ),
     solver=SolverConfig(
         max_iter=5000,

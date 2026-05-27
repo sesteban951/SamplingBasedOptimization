@@ -57,6 +57,7 @@ class CostWeights:
     Q_moment_dot: float = 1e-4
     Q_stance_px: float = 0.0
     Q_stance_align: float = 0.0  # penalises pitch + k*px misalignment during stance
+    Q_landing_vel: float = 0.0   # penalises ||v_com|| and ||w_body|| during landing
 
 
 @dataclass
@@ -87,6 +88,10 @@ class ConstraintConfig:
     # If True, use the 2D IK-derived surface pz >= poly(x, pitch) from squat_workspace.py.
     # Supersedes workspace_pz and pitch_pz_coupling when active.
     workspace_pz_2d: bool = False
+    # Minimum leg length (m) enforced at the last stance node (liftoff) and first
+    # landing node (touchdown). 0 = disabled. Ensures near-full extension at
+    # phase boundaries for physical realism and IK smoothness.
+    L_extension_min: float = 0.0
 
 
 
