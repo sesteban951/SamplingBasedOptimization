@@ -89,10 +89,17 @@ class ConstraintConfig:
     # If True, use the 2D IK-derived surface pz >= poly(x, pitch) from squat_workspace.py.
     # Supersedes workspace_pz and pitch_pz_coupling when active.
     workspace_pz_2d: bool = False
+    # If True, add upper bound pz <= pz_max_poly(x, pitch) from squat_workspace_upper.py.
+    # Prevents planning CoM heights the real robot cannot achieve at the given foot offset.
+    workspace_pz_2d_upper: bool = False
     # Minimum leg length (m) enforced at the last stance node (liftoff) and first
     # landing node (touchdown). 0 = disabled. Ensures near-full extension at
     # phase boundaries for physical realism and IK smoothness.
     L_extension_min: float = 0.0
+    # Upper bound on CoM z at the touchdown frame only (k=flight_end).
+    # Prevents planning near-full-extension landings where IK fails.
+    # None = unconstrained.
+    pz_touchdown_max: Optional[float] = None
 
 
 

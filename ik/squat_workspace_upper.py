@@ -29,16 +29,24 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from utils.kinematics.g1_ik import G1IK
+from utils.kinematics.g1_ipopt_ik import G1IPOPTIK
 
 _OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
 os.makedirs(_OUT_DIR, exist_ok=True)
 
-ik = G1IK()
+# Use IPOPTIK so the sweep measures pz_max in CoM-height units, matching the SRB
+# constraint.  G1IK fixes the pelvis height which is ~0.089 m above the CoM —
+# using it would over-estimate pz_max and leave a blind spot at near-full extension.
+ik = G1IPOPTIK()
 
 R_flat  = np.eye(3)
-oMl_des = pin.SE3(R_flat, np.array([0.0,  G1IK.HIP_WIDTH, G1IK.ANKLE_HEIGHT]))
-oMr_des = pin.SE3(R_flat, np.array([0.0, -G1IK.HIP_WIDTH, G1IK.ANKLE_HEIGHT]))
+oMl_des = pin.SE3(R_flat, np.array([0.0,  G1IPOPTIK.HIP_WIDTH, G1IPOPTIK.ANKLE_HEIGHT]))
+oMr_des = pin.SE3(R_flat, np.array([0.0, -G1IPOPTIK.HIP_WIDTH, G1IPOPTIK.ANKLE_HEIGHT]))
+
+# CoM-to-pelvis vertical offset for a near-standing G1 configuration.
+# Used to seed the pelvis initial-guess higher than the CoM target so IPOPT
+# starts near the feasible region rather than from below.
+_COM_PELVIS_OFFSET = 0.089
 
 PITCHES_SWEEP = np.linspace(-0.40, 0.40, 9)   # rad
 
@@ -51,66 +59,64 @@ def _set_pitch(q, pitch_rad):
     return q
 
 
-def _guesses(x, z, pitch):
-    NOMINAL_H = 0.79
-    drop = max(0.0, NOMINAL_H - z)
-
-    qA = ik.standing_config(com_height=z)
-    qA[0] = x
-
-    qB = pin.neutral(ik.model)
-    qB[0] = x; qB[2] = z
-    for name, angle in [
-        ("left_hip_pitch_joint",    np.clip(drop * 1.5, 0, np.radians(90))),
-        ("right_hip_pitch_joint",   np.clip(drop * 1.5, 0, np.radians(90))),
-        ("left_knee_joint",         np.clip(drop * 3.0, 0.05, np.radians(155))),
-        ("right_knee_joint",        np.clip(drop * 3.0, 0.05, np.radians(155))),
-        ("left_ankle_pitch_joint",  np.clip(-drop * 1.5, np.radians(-45), 0)),
-        ("right_ankle_pitch_joint", np.clip(-drop * 1.5, np.radians(-45), 0)),
-    ]:
-        jid = ik.model.getJointId(name)
-        qB[ik.model.joints[jid].idx_q] = angle
-
-    # near-full-extension guess (relevant for upper bound search)
-    qC = ik.standing_config(com_height=z)
-    qC[0] = x
-    for name, angle in [
-        ("left_hip_pitch_joint",   0.05),
-        ("right_hip_pitch_joint",  0.05),
-        ("left_knee_joint",        0.10),
-        ("right_knee_joint",       0.10),
-        ("left_ankle_pitch_joint", -0.05),
-        ("right_ankle_pitch_joint",-0.05),
-    ]:
-        jid = ik.model.getJointId(name)
-        qC[ik.model.joints[jid].idx_q] = angle
-
-    return [_set_pitch(q.copy(), pitch) for q in (qA, qB, qC)]
+def _make_q0(x, z_com, pitch, warm=None):
+    """
+    Build initial guess for IPOPTIK.
+    q0[0:3] = p_com_des = (x, 0, z_com).
+    Pelvis seeded at z_com + COM_PELVIS_OFFSET so IPOPT starts near the
+    feasible region for near-full-extension configurations.
+    """
+    # standing_config sets pelvis at the given height; using z_com+offset
+    # gives IPOPT a better starting pelvis position.
+    q0 = ik.standing_config(z_com + _COM_PELVIS_OFFSET)
+    q0[0] = x
+    q0[2] = z_com          # p_com_des for IPOPTIK
+    _set_pitch(q0, pitch)
+    return q0
 
 
-def is_reachable(x, z, pitch, warm=None):
+def _guesses(x, z_com, pitch, warm=None):
     candidates = []
     if warm is not None:
-        w = warm.copy(); w[0] = x; w[2] = z
+        w = warm.copy()
+        w[0] = x
+        w[2] = z_com
         _set_pitch(w, pitch)
         candidates.append(w)
-    candidates.extend(_guesses(x, z, pitch))
-    for q0 in candidates:
-        q_sol, ok, _ = ik.solve(q0, oMl_des, oMr_des, max_iter=200, tol=1e-5)
-        if ok:
+
+    # near-extension guess (primary for upper-bound search)
+    qA = _make_q0(x, z_com, pitch)
+    candidates.append(qA)
+
+    # slightly more bent — helps when the near-extension guess doesn't converge
+    qB = ik.standing_config(z_com + _COM_PELVIS_OFFSET - 0.05)
+    qB[0] = x; qB[2] = z_com
+    _set_pitch(qB, pitch)
+    candidates.append(qB)
+
+    return candidates
+
+
+def is_reachable(x, z_com, pitch, warm=None):
+    """Returns (reachable: bool, q_sol or None) for CoM at (x, 0, z_com)."""
+    for q0 in _guesses(x, z_com, pitch, warm=warm):
+        q_sol, ok, errs = ik.solve(q0, oMl_des, oMr_des)
+        if ok and errs[0] < 2e-3:   # foot error < 2 mm
             return True, q_sol
     return False, None
 
 
-# geometric upper bound on z given leg reach L_REACH
+# Geometric upper bound on CoM z given reach.
+# At max extension: dist(CoM, foot) ≈ dist(pelvis, foot) - COM_PELVIS_OFFSET
+# pelvis-to-foot = L_REACH  →  CoM-to-foot_z = L_REACH - COM_PELVIS_OFFSET
 L_REACH = 0.78
 def z_geom_max(x):
-    inner = L_REACH**2 - x**2 - G1IK.HIP_WIDTH**2
+    inner = (L_REACH - _COM_PELVIS_OFFSET)**2 - x**2 - G1IPOPTIK.HIP_WIDTH**2
     if inner <= 0:
         return None
-    return np.sqrt(inner) + G1IK.ANKLE_HEIGHT
+    return np.sqrt(inner) + G1IPOPTIK.ANKLE_HEIGHT
 
-# A safe low height where IK always succeeds (used as bisection lower anchor)
+# A safe low CoM height where IK always succeeds (bisection lower anchor)
 Z_LOW_ANCHOR = 0.55
 
 x_vals  = np.linspace(-0.20, 0.30, 75)

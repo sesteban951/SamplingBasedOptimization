@@ -29,6 +29,10 @@ _WORKSPACE_COEFFS_2D = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "ik", "results", "workspace_poly_coeffs_2d.csv",
 )
+_WORKSPACE_COEFFS_2D_UPPER = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "ik", "results", "workspace_poly_coeffs_2d_upper.csv",
+)
 
 
 class SRB_Aerial(SRBDynamics):
@@ -342,6 +346,22 @@ if cfg.constraints.workspace_pz:
             val = val * px_sym + float(c)
         return val
 
+if cfg.constraints.workspace_pz_2d_upper:
+    if not os.path.exists(_WORKSPACE_COEFFS_2D_UPPER):
+        raise FileNotFoundError(
+            f"workspace_pz_2d_upper=True but coeffs not found: {_WORKSPACE_COEFFS_2D_UPPER}\n"
+            "Run: conda run -n env_sbo python ik/squat_workspace_upper.py"
+        )
+    _raw2d_upper = np.loadtxt(_WORKSPACE_COEFFS_2D_UPPER, delimiter=",", comments="#")
+    _mono2d_upper = [(int(r[0]), int(r[1])) for r in _raw2d_upper]
+    _c2d_upper    = [float(r[2]) for r in _raw2d_upper]
+
+    def _pz_ceiling_2d(px_sym, pitch_sym):
+        val = 0.0
+        for (i, j), c in zip(_mono2d_upper, _c2d_upper):
+            val = val + c * px_sym**i * pitch_sym**j
+        return val
+
 # dynamics and phase constraints
 for k in range(N):
     if k < stance_end:
@@ -490,13 +510,28 @@ else:
         else:
             opti.subject_to(X[2, k] >= pz_min)
 
-# pz_max — upper bound on CoM height during contact phases only.
-# Ensures IPOPT IK always has a feasible solution: at the max CoM height the
-# G1 legs are at full extension, so any lower CoM can always reach the floor.
+# pz_max — scalar upper bound on CoM height during contact phases.
 if cfg.constraints.pz_max is not None:
     for k in range(N + 1):
         if k < stance_end or k >= flight_end:
             opti.subject_to(X[2, k] <= cfg.constraints.pz_max)
+
+# pz_touchdown_max — scalar upper bound on CoM z at the touchdown frame only.
+if cfg.constraints.pz_touchdown_max is not None:
+    opti.subject_to(X[2, flight_end] <= cfg.constraints.pz_touchdown_max)
+
+# workspace_pz_2d_upper — IK-derived upper bound pz <= pz_max_poly(x_rel, pitch).
+# Applied only at the liftoff and touchdown boundary frames where the IK is most
+# constrained (near-full leg extension).  Later landing frames can have higher CoM
+# as the robot stands up — IPOPTIK warm-starts fine from the previous frame there.
+if cfg.constraints.workspace_pz_2d_upper:
+    k = stance_end - 1   # liftoff
+    x_rel = X[0, k] - x_stance_center
+    opti.subject_to(X[2, k] <= _pz_ceiling_2d(x_rel, _pitch_from_quat(k)))
+
+    k = flight_end        # touchdown
+    x_rel = X[0, k] - x_land_center
+    opti.subject_to(X[2, k] <= _pz_ceiling_2d(x_rel, _pitch_from_quat(k)))
 
 # contact constraints
 for k in range(N):
