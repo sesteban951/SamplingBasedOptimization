@@ -66,6 +66,7 @@ class ConstraintConfig:
     L_min: float = 0.45
     L_max: float = 0.8
     pz_min: float = 0.45
+    pz_max: float = None  # upper bound on CoM z during contact phases; None = unconstrained
     mu: float = 1.0
     M_ankle_x_max: float = 50.0
     M_ankle_y_max: float = 50.0

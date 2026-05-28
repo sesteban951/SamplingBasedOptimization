@@ -4,14 +4,21 @@
 #
 # Formulation:
 #   min  w_foot    * (||p_l - p_l_des||² + ||R_l - R_l_des||²_F + right foot)
-#      + w_inertia * ||q_legs - q_legs_ref||²   ← identity placeholder;
-#                                                   replace with I_ik(q)-I_des(q)
-#   s.t. q_leg_lo <= q_legs <= q_leg_hi           (box constraints via lbx/ubx)
+#      + w_inertia * ||I_G(q) - R @ I_srb @ R^T||²_F   (commented out until enabled)
+#   s.t. q_leg_lo <= q_legs <= q_leg_hi     (box)
 #
-# Base pose is a parameter (held fixed during optimisation), matching the
-# Newton-Raphson strategy in g1_ik.py.  The NLP is compiled once in __init__
-# and re-solved with different parameters each call, amortising CasADi/IPOPT
-# compilation overhead across the full trajectory.
+# Base pose (pelvis position + orientation) is a fixed parameter each call,
+# matching the NR solver strategy.  The CoM equality constraint is intentionally
+# omitted: the SRB trajectory was optimised with CoM ≈ pelvis, so enforcing
+# com(q) = p_srb_com forces the pelvis ~0.085 m higher than the SRB intended,
+# making the legs kinematically unable to reach the floor at near-standing heights.
+# The correct fix is to bake the CoM–pelvis offset into the SRB trajectory itself.
+#
+# Decision variables: leg joints (12)
+# Two cdata objects are kept for when the inertia cost is re-enabled.
+#
+# The NLP is compiled once in __init__ and re-solved with different parameters,
+# amortising CasADi/IPOPT compilation cost across the full trajectory.
 #
 # Interface is compatible with G1IK.solve():
 #   q_sol, ok, errs = ik.solve(q0, oMl_des, oMr_des)
@@ -26,6 +33,13 @@ import pinocchio.casadi as cpin
 
 _REPO_ROOT    = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _DEFAULT_URDF = os.path.join(_REPO_ROOT, "models", "g1", "g1_29dof_rev_1_0.urdf")
+
+# SRB inertia tensor from models/srb/srb.xml  (fullinertia: Ixx Iyy Izz Ixy Ixz Iyz)
+_SRB_INERTIA_DEFAULT = np.array([
+    [3.7475,  0.0001,  0.087 ],
+    [0.0001,  3.301,  -0.0009],
+    [0.087,  -0.0009,  0.5165],
+])
 
 
 class G1IPOPTIK:
@@ -44,14 +58,21 @@ class G1IPOPTIK:
     HIP_WIDTH    = 0.11851
 
     def __init__(self, urdf_path: str = _DEFAULT_URDF,
-                 w_foot: float = 1.0,
-                 w_inertia: float = 1e-4,
-                 ipopt_opts: dict = None):
+                 w_foot: float     = 1.0,
+                 w_inertia: float  = 1e-4,
+                 I_srb: np.ndarray = None,
+                 ipopt_opts: dict  = None):
+        """
+        Args:
+            I_srb: 3×3 SRB inertia tensor [kg·m²].  Defaults to the G1 SRB model values.
+                   Used as I_des in the inertia cost ||I_G(q) - I_srb||²_F.
+        """
         self.model = pin.buildModelFromUrdf(urdf_path, pin.JointModelFreeFlyer())
         self.data  = self.model.createData()
 
-        self.cmodel = cpin.Model(self.model)
-        self.cdata  = self.cmodel.createData()
+        self.cmodel    = cpin.Model(self.model)
+        self.cdata_fk  = self.cmodel.createData()   # for framesForwardKinematics (feet)
+        self.cdata_dyn = self.cmodel.createData()   # for ccrba (CoM + centroidal inertia)
 
         self.l_foot_id = self.model.getFrameId(self.L_FOOT)
         self.r_foot_id = self.model.getFrameId(self.R_FOOT)
@@ -69,6 +90,9 @@ class G1IPOPTIK:
         self.w_foot    = w_foot
         self.w_inertia = w_inertia
 
+        I_srb = _SRB_INERTIA_DEFAULT if I_srb is None else np.asarray(I_srb)
+        self._I_srb_flat = I_srb.flatten('F')   # column-major for ca.reshape(,3,3)
+
         self._solver = self._build_solver(ipopt_opts)
 
     # ------------------------------------------------------------------
@@ -77,43 +101,79 @@ class G1IPOPTIK:
 
     def _build_solver(self, ipopt_opts: dict = None) -> ca.Function:
         nq    = self.model.nq
+        nv    = self.model.nv
         n_leg = len(self._leg_qidx)
 
-        # Decision variables: 12 leg joint angles
-        q_legs = ca.SX.sym("q_legs", n_leg)
+        # ── Decision variables ───────────────────────────────────────────
+        # pelvis xyz (3) + leg joints (12) = 15
+        p_pelvis = ca.SX.sym("p_pelvis", 3)
+        q_legs   = ca.SX.sym("q_legs",   n_leg)
+        x        = ca.vertcat(p_pelvis, q_legs)
 
-        # Parameters packed as one vector:
-        #   [q_base(7), p_l_des(3), R_l_flat(9), p_r_des(3), R_r_flat(9), q_legs_ref(12)]
-        # R_*_flat uses column-major (Fortran) order to match ca.reshape(,3,3).
-        q_base     = ca.SX.sym("q_base",      7)
-        p_l_des    = ca.SX.sym("p_l_des",     3)
-        R_l_flat   = ca.SX.sym("R_l_flat",    9)
-        p_r_des    = ca.SX.sym("p_r_des",     3)
-        R_r_flat   = ca.SX.sym("R_r_flat",    9)
-        q_legs_ref = ca.SX.sym("q_legs_ref", n_leg)
-        params = ca.vertcat(q_base, p_l_des, R_l_flat, p_r_des, R_r_flat, q_legs_ref)
+        # ── Parameters ───────────────────────────────────────────────────
+        # quat_pelvis(4) + p_com_des(3) +
+        # p_l_des(3) + R_l_flat(9) + p_r_des(3) + R_r_flat(9) + I_srb_flat(9)
+        # + q_prev_legs(n_leg) + w_reg(1)  = 40 + n_leg + 1
+        # R_*_flat and I_srb_flat use column-major (Fortran) order for ca.reshape(,3,3).
+        quat_pelvis  = ca.SX.sym("quat_pelvis",  4)
+        p_com_des    = ca.SX.sym("p_com_des",    3)
+        p_l_des      = ca.SX.sym("p_l_des",      3)
+        R_l_flat     = ca.SX.sym("R_l_flat",     9)
+        p_r_des      = ca.SX.sym("p_r_des",      3)
+        R_r_flat     = ca.SX.sym("R_r_flat",     9)
+        I_srb_flat   = ca.SX.sym("I_srb_flat",   9)
+        q_prev_legs  = ca.SX.sym("q_prev_legs",  n_leg)
+        w_reg_sym    = ca.SX.sym("w_reg",         1)
+        params = ca.vertcat(quat_pelvis, p_com_des,
+                            p_l_des, R_l_flat, p_r_des, R_r_flat, I_srb_flat,
+                            q_prev_legs, w_reg_sym)
 
-        # Assemble full q: base from parameter, leg joints from decision vars,
-        # upper-body DOFs zero (they don't appear in the ankle FK chain).
+        # ── Assemble full q ───────────────────────────────────────────────
+        # pelvis xyz from decision vars, orientation from parameter,
+        # leg joints from decision vars, upper body stays zero.
         q_full = ca.SX.zeros(nq)
-        for j in range(7):
-            q_full[j] = q_base[j]
+        for j in range(3):
+            q_full[j]     = p_pelvis[j]
+        for j in range(4):
+            q_full[3 + j] = quat_pelvis[j]
         for i, qi in enumerate(self._leg_qidx):
-            q_full[qi] = q_legs[i]
+            q_full[qi]    = q_legs[i]
 
-        # Symbolic FK: framesForwardKinematics runs FK + updates all frame placements
-        cpin.framesForwardKinematics(self.cmodel, self.cdata, q_full)
+        # ── Foot FK (cdata_fk) ────────────────────────────────────────────
+        cpin.framesForwardKinematics(self.cmodel, self.cdata_fk, q_full)
 
-        p_l = self.cdata.oMf[self.l_foot_id].translation
-        R_l = self.cdata.oMf[self.l_foot_id].rotation
-        p_r = self.cdata.oMf[self.r_foot_id].translation
-        R_r = self.cdata.oMf[self.r_foot_id].rotation
+        p_l = self.cdata_fk.oMf[self.l_foot_id].translation
+        R_l = self.cdata_fk.oMf[self.l_foot_id].rotation
+        p_r = self.cdata_fk.oMf[self.r_foot_id].translation
+        R_r = self.cdata_fk.oMf[self.r_foot_id].rotation
 
-        # Desired rotation matrices (column-major reshape matches flatten('F'))
+        # ── CoM + centroidal inertia (cdata_dyn) ──────────────────────────
+        # ccrba computes centroidal momentum matrix, CoM, and centroidal inertia I_G.
+        # Velocity is zero here — I_G depends only on q, not v.
+        v_zeros = ca.SX.zeros(nv)
+        cpin.ccrba(self.cmodel, self.cdata_dyn, q_full, v_zeros)
+
+        com = self.cdata_dyn.com[0]          # (3,)  CoM position
+        I_G = self.cdata_dyn.Ig.inertia      # (3,3) centroidal rotational inertia (world frame)
+
+        # ── Rotate I_srb from body frame → world frame ────────────────────
+        # I_srb is defined in the SRB body frame.  I_G(q) from ccrba is in the
+        # world frame.  Rotate: I_des = R_body @ I_srb @ R_body^T so the
+        # comparison is frame-consistent at every pose along the trajectory.
+        # R_body is derived from quat_pelvis [qx, qy, qz, qw] (pinocchio convention).
+        qx = quat_pelvis[0]; qy = quat_pelvis[1]; qz = quat_pelvis[2]; qw = quat_pelvis[3]
+        R_body = ca.vertcat(
+            ca.horzcat(1-2*(qy**2+qz**2),   2*(qx*qy-qz*qw),   2*(qx*qz+qy*qw)),
+            ca.horzcat(  2*(qx*qy+qz*qw), 1-2*(qx**2+qz**2),   2*(qy*qz-qx*qw)),
+            ca.horzcat(  2*(qx*qz-qy*qw),   2*(qy*qz+qx*qw), 1-2*(qx**2+qy**2)),
+        )  # (3,3)
+        I_srb_3x3 = ca.reshape(I_srb_flat, 3, 3)
+        I_des     = R_body @ I_srb_3x3 @ R_body.T
+
+        # ── Cost ─────────────────────────────────────────────────────────
         R_l_des = ca.reshape(R_l_flat, 3, 3)
         R_r_des = ca.reshape(R_r_flat, 3, 3)
 
-        # Foot cost: position L2² + rotation Frobenius²
         e_lp = p_l - p_l_des
         e_rp = p_r - p_r_des
         e_lR = ca.reshape(R_l - R_l_des, 9, 1)
@@ -121,14 +181,17 @@ class G1IPOPTIK:
         cost_foot = (ca.dot(e_lp, e_lp) + ca.dot(e_rp, e_rp) +
                      ca.dot(e_lR, e_lR) + ca.dot(e_rR, e_rR))
 
-        # Inertia cost placeholder: identity regularisation toward q_legs_ref.
-        # Swap in cpin.crba-based inertia residual here when ready.
-        e_reg = q_legs - q_legs_ref
-        cost_inertia = ca.dot(e_reg, e_reg)
+        # e_I = ca.reshape(I_G - I_des, 9, 1)
+        # cost_inertia = ca.dot(e_I, e_I)
 
-        cost = self.w_foot * cost_foot + self.w_inertia * cost_inertia
+        e_reg    = q_legs - q_prev_legs
+        cost_reg = ca.dot(e_reg, e_reg)
+        cost = self.w_foot * cost_foot + w_reg_sym * cost_reg
 
-        nlp = {"x": q_legs, "f": cost, "p": params}
+        # ── CoM equality constraint ───────────────────────────────────────
+        g = com - p_com_des   # (3,) enforced == 0
+
+        nlp = {"x": x, "f": cost, "g": g, "p": params}
 
         opts = {
             "ipopt.max_iter":                   300,
@@ -147,51 +210,70 @@ class G1IPOPTIK:
     # Main solver interface (drop-in compatible with G1IK.solve)
     # ------------------------------------------------------------------
 
-    def solve(self, q0: np.ndarray, oMl_des: pin.SE3, oMr_des: pin.SE3):
+    def solve(self, q0: np.ndarray, oMl_des: pin.SE3, oMr_des: pin.SE3,
+              q_prev: np.ndarray = None, w_reg: float = 0.0):
         """
         Solve IK via IPOPT.
 
         Args:
-            q0:      Initial configuration (nq=36).  q0[0:7] is held fixed as the
-                     base pose; q0[7:19] seeds the leg-joint warm-start.
+            q0:      Initial configuration (nq=36).
+                     q0[0:3] is used as the target CoM position (p_com_des) — this
+                     matches _build_q0 which copies the SRB CoM into q0[0:3].
+                     q0[3:7] is the fixed pelvis orientation (from SRB quaternion).
+                     q0[7:19] seeds the leg-joint warm-start.
             oMl_des: Desired left-foot pose (pin.SE3).
             oMr_des: Desired right-foot pose (pin.SE3).
+            q_prev:  Previous frame's full configuration (nq=36), used for joint
+                     continuity regularisation.  None → uses q0 (no regularisation effect).
+            w_reg:   Weight on ||q_legs - q_prev_legs||² regularisation term.
+                     0.0 (default) disables it.  A value ~1e-2 to 0.1 discourages
+                     the solver from jumping to a distant joint-space branch.
 
         Returns:
-            q_sol:   Full configuration (nq=36) with solved leg joints.
+            q_sol:   Full configuration (nq=36) — pelvis xyz solved by IPOPT to
+                     satisfy the CoM constraint; leg joints from optimisation.
             success: True if IPOPT returned Solve_Succeeded or Solved_To_Acceptable_Level.
-            errs:    [pos_err_m] — summed L2 foot position error at the solution,
-                     matches the errs[-1] interface used by run_ik_trajectory.
+            errs:    [pos_err_m] — summed L2 foot position error at the solution.
         """
-        q_legs_0 = np.array([q0[qi] for qi in self._leg_qidx])
+        n_leg        = len(self._leg_qidx)
+        q_legs_0     = np.array([q0[qi] for qi in self._leg_qidx])
+        p_com_des    = q0[0:3].copy()   # SRB CoM stored in q0[0:3] by _build_q0
+        q_ref        = q_prev if q_prev is not None else q0
+        q_prev_legs  = np.array([q_ref[qi] for qi in self._leg_qidx])
 
-        # Column-major flatten so ca.reshape(R_flat, 3, 3) reconstructs correctly
         p_val = np.concatenate([
-            q0[0:7],
-            oMl_des.translation,
-            oMl_des.rotation.flatten('F'),
-            oMr_des.translation,
-            oMr_des.rotation.flatten('F'),
-            q_legs_0,               # regularisation reference = warm-start
+            q0[3:7],                           # quat_pelvis (fixed orientation)
+            p_com_des,                         # CoM equality target
+            oMl_des.translation,               # p_l_des
+            oMl_des.rotation.flatten('F'),     # R_l_flat (col-major)
+            oMr_des.translation,               # p_r_des
+            oMr_des.rotation.flatten('F'),     # R_r_flat
+            self._I_srb_flat,                  # I_srb_flat
+            q_prev_legs,                       # joint regularisation reference
+            [w_reg],                           # regularisation weight
         ])
 
+        x0  = np.concatenate([p_com_des, q_legs_0])
+        lbx = np.concatenate([[-np.inf, -np.inf, 0.2], self._leg_lo])
+        ubx = np.concatenate([[ np.inf,  np.inf, 1.2], self._leg_hi])
+
         sol = self._solver(
-            x0=q_legs_0,
-            lbx=self._leg_lo,
-            ubx=self._leg_hi,
+            x0=x0, lbx=lbx, ubx=ubx,
+            lbg=np.zeros(3), ubg=np.zeros(3),
             p=p_val,
         )
 
-        q_legs_sol = np.array(sol["x"]).flatten()
+        x_sol      = np.array(sol["x"]).flatten()
+        q_legs_sol = x_sol[3:]
 
-        q_sol = q0.copy()
+        q_sol      = q0.copy()
+        q_sol[0:3] = x_sol[0:3]     # pelvis xyz solved by IPOPT
         for i, qi in enumerate(self._leg_qidx):
             q_sol[qi] = q_legs_sol[i]
 
         status  = self._solver.stats()["return_status"]
         success = status in ("Solve_Succeeded", "Solved_To_Acceptable_Level")
 
-        # Evaluate final foot position error via standard pinocchio (cheap post-check)
         pin.framesForwardKinematics(self.model, self.data, q_sol)
         p_l_curr = self.data.oMf[self.l_foot_id].translation
         p_r_curr = self.data.oMf[self.r_foot_id].translation

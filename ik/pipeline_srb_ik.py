@@ -24,6 +24,7 @@ import mujoco
 import mujoco.viewer
 import xml.etree.ElementTree as ET
 from utils.kinematics.g1_ik import G1IK
+from utils.kinematics.g1_ipopt_ik import G1IPOPTIK
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -33,8 +34,8 @@ _REPO_ROOT  = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _G1_XML     = os.path.join(_REPO_ROOT, "models", "g1", "g1_29dof_rev_1_0.xml")
 _SRB_XML    = os.path.join(_REPO_ROOT, "models", "srb", "srb.xml")
 _COMBINED   = os.path.join(_REPO_ROOT, "models", "g1", "g1_srb_combined.xml")
-_RESULTS    = os.path.join(_REPO_ROOT, "results", "srb", "srb_aerial")
-_EXPORT_DIR = os.path.join(_REPO_ROOT, "ik", "results")
+_RESULTS_DEFAULT = os.path.join(_REPO_ROOT, "results", "srb", "srb_aerial")
+_EXPORT_DIR      = os.path.join(_REPO_ROOT, "ik", "results")
 
 # ---------------------------------------------------------------------------
 # Step 1 — run SRB solver
@@ -132,12 +133,17 @@ def _mj_to_pin_quat(qw, qx, qy, qz):
     return np.array([qx, qy, qz, qw])
 
 
-def _build_q0(ik: G1IK, q_srb_row: np.ndarray, q_warm=None,
+def _build_q0(ik, q_srb_row: np.ndarray, q_warm=None,
               warmstart_min_drop: float = 0.03):
     """
     Build a pinocchio initial guess from the SRB state row.
     Base pose comes from the SRB trajectory; leg joints are either warm-started
     or set from standing_config's squat-biased heuristic.
+
+    For IPOPT IK: q0[0:3] is used as p_com_des.  The SRB approximates CoM ≈ pelvis,
+    but the actual G1 CoM is ~0.089 m below the pelvis.  We correct q0[2] to the
+    actual robot CoM (evaluated at the warm-start config) so IPOPT targets a feasible
+    height.  The solver will set pelvis_z ≈ SRB height to satisfy com(q) = corrected.
     """
     h = q_srb_row[2]
     q0 = ik.standing_config(h)
@@ -147,6 +153,11 @@ def _build_q0(ik: G1IK, q_srb_row: np.ndarray, q_warm=None,
     drop = max(0.0, 0.79 - h)
     if q_warm is not None and drop > warmstart_min_drop:
         q0[7:] = q_warm[7:]
+    if isinstance(ik, G1IPOPTIK):
+        # Correct the CoM target: compute actual robot CoM at this warm-start config
+        # and use that as p_com_des instead of the raw SRB CoM height.
+        pin.centerOfMass(ik.model, ik.data, q0)
+        q0[2] = ik.data.com[0][2]
     return q0
 
 
@@ -180,25 +191,52 @@ def run_ik_trajectory(ik: G1IK, q_srb: np.ndarray, feet_ext: np.ndarray,
         q_ik[i] = q_sol
         q_warm = q_sol
 
-    # ---- FLIGHT — interpolate leg joints; hold arm defaults throughout ----
+    # ---- FLIGHT — interpolate leg joints toward touchdown pose ----
+    # Pre-compute IK at the first landing frame so flight interpolation ends exactly
+    # at the touchdown configuration, eliminating the stance-width snap.
     print("[pipeline] Interpolating flight joints ...")
-    joints_takeoff  = q_ik[stance_end - 1, 7:].copy()
-    # Target: standing leg config + arm defaults (already in q_ik rows via pre-fill)
-    q_standing      = ik.standing_config(0.79)
+    joints_takeoff = q_ik[stance_end - 1, 7:].copy()
+    # Warm-start touchdown IK from liftoff config — same standing-like pose, avoids cold-start
+    q0_td = _build_q0(ik, q_srb[flight_end], q_warm=q_ik[stance_end - 1])
     if arm_defaults is not None:
-        q_standing[19:] = arm_defaults[19:]   # keep upper-body from defaults
-    joints_standing = q_standing[7:]
+        q0_td[19:] = arm_defaults[19:]
+    oMl_td = pin.SE3(np.eye(3), np.array([feet_ext[flight_end, 0], feet_ext[flight_end, 1], ik.ANKLE_HEIGHT]))
+    oMr_td = pin.SE3(np.eye(3), np.array([feet_ext[flight_end, 2], feet_ext[flight_end, 3], ik.ANKLE_HEIGHT]))
+    q_td, ok_td, errs_td = ik.solve(q0_td, oMl_td, oMr_td)
+    if not ok_td and errs_td[-1] > 1e-3:
+        print(f"  [warn] touchdown frame {flight_end}: IK did not converge (err={errs_td[-1]:.2e})")
+    joints_touchdown = q_td[7:].copy()
+
+    # Pelvis position during flight — interpolate per-axis CoM→pelvis offsets so
+    # the pelvis trajectory is C0-continuous at both phase boundaries.
+    # IPOPT can place the pelvis offset from the SRB CoM in all three axes (not
+    # just z) when the robot is pitched or the feet are spread asymmetrically.
+    # Interpolating all three offsets from liftoff to touchdown values makes the
+    # transition smooth without hardcoding any specific CoM–pelvis geometry.
+    liftoff_x_offset   = q_ik[stance_end - 1, 0] - q_srb[stance_end - 1, 0]
+    liftoff_y_offset   = q_ik[stance_end - 1, 1] - q_srb[stance_end - 1, 1]
+    liftoff_z_offset   = q_ik[stance_end - 1, 2] - q_srb[stance_end - 1, 2]
+    touchdown_x_offset = q_td[0] - q_srb[flight_end, 0]
+    touchdown_y_offset = q_td[1] - q_srb[flight_end, 1]
+    touchdown_z_offset = q_td[2] - q_srb[flight_end, 2]
     n_flight = flight_end - stance_end
     for idx, i in enumerate(range(stance_end, flight_end)):
         t = idx / max(1, n_flight - 1)
-        q_ik[i, 0:3] = q_srb[i, 0:3]
+        q_ik[i, 0]   = q_srb[i, 0] + (1 - t) * liftoff_x_offset + t * touchdown_x_offset
+        q_ik[i, 1]   = q_srb[i, 1] + (1 - t) * liftoff_y_offset + t * touchdown_y_offset
+        q_ik[i, 2]   = q_srb[i, 2] + (1 - t) * liftoff_z_offset + t * touchdown_z_offset
         q_ik[i, 3:7] = _mj_to_pin_quat(q_srb[i,3], q_srb[i,4], q_srb[i,5], q_srb[i,6])
-        q_ik[i, 7:]  = (1 - t) * joints_takeoff + t * joints_standing
+        q_ik[i, 7:]  = (1 - t) * joints_takeoff + t * joints_touchdown
 
     # ---- LANDING ----
+    # w_reg penalises ||q_legs - q_prev_legs||² to keep the solver on the same
+    # joint-space branch across consecutive frames.  A small weight (0.05) is
+    # enough to break ties between equivalent solutions without fighting the
+    # foot-placement objective (w_foot=1, foot errors are ~mm²).
     print("[pipeline] Running landing IK ...")
-    q_warm = None
-    for i in range(flight_end, N + 1):
+    q_ik[flight_end] = q_td   # already solved above
+    q_warm = q_td
+    for i in range(flight_end + 1, N + 1):
         q0 = _build_q0(ik, q_srb[i], q_warm)
         if arm_defaults is not None:
             q0[19:] = arm_defaults[19:]
@@ -242,6 +280,39 @@ _TARGET_JOINTS = [
 ]
 _BASE_COLS  = ['com_x', 'com_y', 'com_z', 'quat_x', 'quat_y', 'quat_z', 'quat_w']
 _OUT_HEADER = ['time'] + _BASE_COLS + _TARGET_JOINTS
+
+
+def _resample_and_save(out: np.ndarray, export_dir: str, hz: float = 50.0):
+    """
+    Resample the full-robot trajectory (variable dt) to a uniform grid at `hz`.
+    Column layout: [time, com_xyz, quat_xyzw, 29 joints]  — same as ik_fullrobot.csv.
+    Quaternion columns (4:8) are resampled via Slerp; all others via linear interp.
+    """
+    from scipy.spatial.transform import Rotation, Slerp
+
+    t_orig = out[:, 0]
+    dt_out = 1.0 / hz
+    t_new  = np.arange(t_orig[0], t_orig[-1] + 1e-9, dt_out)
+
+    n_new  = len(t_new)
+    n_cols = out.shape[1]
+    resampled = np.zeros((n_new, n_cols))
+
+    # time column
+    resampled[:, 0] = t_new
+
+    # position + joints: linear interp
+    for col in list(range(1, 4)) + list(range(8, n_cols)):
+        resampled[:, col] = np.interp(t_new, t_orig, out[:, col])
+
+    # quaternion: Slerp (columns 4:8 are xyzw)
+    rots  = Rotation.from_quat(out[:, 4:8])   # scipy expects xyzw
+    slerp = Slerp(t_orig, rots)
+    resampled[:, 4:8] = slerp(t_new).as_quat()
+
+    path = os.path.join(export_dir, f"ik_fullrobot_{int(hz)}hz.csv")
+    np.savetxt(path, resampled, delimiter=",")
+    print(f"[pipeline] Resampled {int(hz)} Hz CSV → {path}  ({n_new} frames)")
 
 
 def _build_joint_remap(model: pin.Model):
@@ -298,7 +369,54 @@ def export_ik_solution(q_ik: np.ndarray, times: np.ndarray, export_dir: str,
         print(f"[pipeline] Full-robot CSV → {csv_path}  "
               f"({n_frames} frames, {len(_TARGET_JOINTS)} joints)")
 
+        # Resample to uniform 50 Hz for downstream use
+        _resample_and_save(out, export_dir, hz=50)
+
     print(f"[pipeline] Exported IK solution ({q_ik.shape[0]} frames) → {export_dir}")
+
+# ---------------------------------------------------------------------------
+# Step 4b — IK error report
+# ---------------------------------------------------------------------------
+
+def check_ik_errors(q_ik: np.ndarray, times: np.ndarray,
+                    feet_ext: np.ndarray, stance_end: int, flight_end: int,
+                    ik_model) -> None:
+    """
+    Print per-frame foot position errors for stance and landing phases.
+    Flags any frame where either foot exceeds 1 mm from its target.
+    """
+    ANKLE_H  = ik_model.ANKLE_HEIGHT
+    n_frames = q_ik.shape[0]
+    N        = n_frames - 1
+
+    contact_frames = list(range(stance_end)) + list(range(flight_end, N + 1))
+
+    max_err   = 0.0
+    bad_frames = []
+
+    print("\n[pipeline] IK error report (stance + landing frames):")
+    print(f"  {'frame':>5}  {'time':>6}  {'phase':<7}  {'err_L (m)':>10}  {'err_R (m)':>10}")
+
+    for i in contact_frames:
+        q = q_ik[i]
+        pin.framesForwardKinematics(ik_model.model, ik_model.data, q)
+        p_l = ik_model.data.oMf[ik_model.l_foot_id].translation
+        p_r = ik_model.data.oMf[ik_model.r_foot_id].translation
+        des_l = np.array([feet_ext[i, 0], feet_ext[i, 1], ANKLE_H])
+        des_r = np.array([feet_ext[i, 2], feet_ext[i, 3], ANKLE_H])
+        el = np.linalg.norm(p_l - des_l)
+        er = np.linalg.norm(p_r - des_r)
+        phase = "stance" if i < stance_end else "landing"
+        max_err = max(max_err, el, er)
+        if el > 1e-3 or er > 1e-3:
+            bad_frames.append(i)
+            print(f"  {i:>5}  {times[i]:>6.3f}  {phase:<7}  {el:>10.4e}  {er:>10.4e}  ← !")
+        elif i % max(1, len(contact_frames) // 10) == 0:
+            print(f"  {i:>5}  {times[i]:>6.3f}  {phase:<7}  {el:>10.4e}  {er:>10.4e}")
+
+    status = "OK" if not bad_frames else f"{len(bad_frames)} frame(s) > 1 mm"
+    print(f"\n  max foot error: {max_err*1e3:.3f} mm  —  {status}\n")
+
 
 # ---------------------------------------------------------------------------
 # Step 5 — build combined MuJoCo XML
@@ -493,19 +611,27 @@ if __name__ == "__main__":
     if not args.skip_solve:
         run_srb_solver(args.config)
 
-    # 2. Load results
-    times, q_srb, feet_ext, stance_end, flight_end = load_srb_results(_RESULTS)
+    # 2. Load results — derive path from config's save_dir if available
+    try:
+        import importlib
+        _cfg_mod = importlib.import_module(args.config)
+        _results_dir = os.path.join(_REPO_ROOT, _cfg_mod.config.save_dir.lstrip("./"))
+    except Exception:
+        _results_dir = _RESULTS_DEFAULT
+    times, q_srb, feet_ext, stance_end, flight_end = load_srb_results(_results_dir)
 
-    # 3. IK
-    ik = G1IK()
+    # 3. IK — export into a config-specific subdirectory so configs don't overwrite each other
+    export_dir = os.path.join(_results_dir, "ik")
+    os.makedirs(export_dir, exist_ok=True)
+    ik = G1IPOPTIK()
     arm_defaults = load_arm_defaults(ik.model)
     if not args.skip_ik:
         q_ik = run_ik_trajectory(ik, q_srb, feet_ext, stance_end, flight_end,
                                   arm_defaults=arm_defaults)
         # 4. Export
-        export_ik_solution(q_ik, times, _EXPORT_DIR, model=ik.model)
+        export_ik_solution(q_ik, times, export_dir, model=ik.model)
     else:
-        q_ik_mj = np.loadtxt(os.path.join(_EXPORT_DIR, "ik_q_mujoco.csv"),
+        q_ik_mj = np.loadtxt(os.path.join(export_dir, "ik_q_mujoco.csv"),
                               delimiter=",", comments="#")
         # Convert back to pinocchio for internal use (just flip quat)
         q_ik = np.array([np.concatenate([r[:3],
@@ -513,8 +639,11 @@ if __name__ == "__main__":
                                           r[7:]]) for r in q_ik_mj])
         print(f"[pipeline] Loaded cached IK solution ({q_ik.shape[0]} frames)")
 
+    # 4b. IK error report
+    check_ik_errors(q_ik, times, feet_ext, stance_end, flight_end, ik)
+
     # 5. Wrench plot
-    plot_srb_wrenches(_RESULTS, times, stance_end, flight_end)
+    plot_srb_wrenches(_results_dir, times, stance_end, flight_end)
 
     # 5b. Build combined XML
     build_combined_xml(_G1_XML, _SRB_XML, _COMBINED)

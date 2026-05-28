@@ -438,9 +438,18 @@ if cfg.constraints.L_extension_min > 0:
 _c_pz = cfg.constraints.pitch_pz_coupling
 
 def _pitch_from_quat(k):
+    # Use atan2 instead of asin to avoid infinite gradient at sinp = ±1.
+    # asin'(x) = 1/sqrt(1-x²) → ∞ at x=±1; fmin/fmax clamp produces 0*∞ → NaN
+    # in the Jacobian when IPOPT perturbs denormalized quaternions.
+    # atan2(y, x) has finite gradient everywhere except (0,0), which can't occur.
+    # X[3:7] = [qw, qx, qy, qz] (pinocchio scalar-first convention).
     q_k  = X[3:7, k]
-    sinp = 2.0 * (q_k[0] * q_k[2] - q_k[3] * q_k[1])
-    return ca.asin(ca.fmin(ca.fmax(sinp, -1.0), 1.0))
+    qw, qx, qy, qz = q_k[0], q_k[1], q_k[2], q_k[3]
+    sinp = 2.0 * (qw * qy - qz * qx)   # sin(pitch) for ZYX Euler
+    R00  = 1 - 2*(qy**2 + qz**2)        # cos(pitch)*cos(yaw)
+    R10  = 2*(qx*qy + qw*qz)            # cos(pitch)*sin(yaw)
+    cosp = ca.sqrt(R00**2 + R10**2)     # |cos(pitch)|
+    return ca.atan2(sinp, cosp)
 
 if cfg.constraints.workspace_pz_2d:
     # 2D surface: z >= poly(x_rel, pitch) where x_rel = CoM_x - foot_center_x.
@@ -480,6 +489,14 @@ else:
             opti.subject_to(X[2, k] >= pz_min - _c_pz * _pitch_from_quat(k))
         else:
             opti.subject_to(X[2, k] >= pz_min)
+
+# pz_max — upper bound on CoM height during contact phases only.
+# Ensures IPOPT IK always has a feasible solution: at the max CoM height the
+# G1 legs are at full extension, so any lower CoM can always reach the floor.
+if cfg.constraints.pz_max is not None:
+    for k in range(N + 1):
+        if k < stance_end or k >= flight_end:
+            opti.subject_to(X[2, k] <= cfg.constraints.pz_max)
 
 # contact constraints
 for k in range(N):
