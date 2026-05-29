@@ -254,8 +254,12 @@ class G1IPOPTIK:
         ])
 
         x0  = np.concatenate([p_com_des, q_legs_0])
-        lbx = np.concatenate([[-np.inf, -np.inf, 0.2], self._leg_lo])
-        ubx = np.concatenate([[ np.inf,  np.inf, 1.2], self._leg_hi])
+        # Pelvis z bounds derived from the initial guess so the solver works at any
+        # height (e.g. robot standing on an elevated box).  A fixed margin of 0.3 m
+        # above and below the initial pelvis z keeps the search well-bounded.
+        _pz_margin = 0.3
+        lbx = np.concatenate([[-np.inf, -np.inf, max(0.2, p_com_des[2] - _pz_margin)], self._leg_lo])
+        ubx = np.concatenate([[ np.inf,  np.inf,               p_com_des[2] + _pz_margin], self._leg_hi])
 
         sol = self._solver(
             x0=x0, lbx=lbx, ubx=ubx,

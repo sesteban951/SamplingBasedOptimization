@@ -129,6 +129,13 @@ if len(sys.argv) < 2:
 
 config_module = importlib.import_module(sys.argv[1])
 cfg = config_module.config
+print(f"[dbg] config loaded: {sys.argv[1]}", flush=True)
+
+# World-frame ground heights for each contact phase.
+# Config values for p_com z and pz_min are relative to these surfaces;
+# we add the offsets here so the rest of the file works in world frame.
+_stance_gz  = cfg.constraints.stance_ground_z
+_landing_gz = cfg.constraints.landing_ground_z
 
 ##############################################################
 # Build initial and goal states from config
@@ -154,6 +161,10 @@ x_goal = np.array([
     *cfg.goal.w_body,
 ])
 
+# Lift config-relative heights into world frame.
+x0[2]     += _stance_gz   # p_com z was above stance surface
+x_goal[2] += _landing_gz  # goal  z was above landing surface
+
 x0_ca = ca.DM(x0)
 x_goal_ca = ca.DM(x_goal)
 
@@ -161,7 +172,7 @@ x_goal_ca = ca.DM(x_goal)
 # Trajectory Optimization
 ##############################################################
 
-# create the dynamics object
+print("[dbg] creating SRB_Aerial...", flush=True)
 srb = SRB_Aerial(cfg.costs)
 f = srb.f_disc
 nq = srb.nq
@@ -233,6 +244,7 @@ p_R_goal_W = ca.DM(p_com_goal_xy + (Rz_goal @ np.array([0.0, -srb.hip_offset, 0.
 # Setup the optimization problem
 ##############################################################
 
+print("[dbg] building opti...", flush=True)
 opti = ca.Opti()
 
 # horizon variables
@@ -271,8 +283,8 @@ Rz_touchdown = ca.vertcat(
 p_com_touchdown_xy = X[0:2, flight_end]
 p_L_land_xy_W = p_com_touchdown_xy + Rz_touchdown @ p_L_land
 p_R_land_xy_W = p_com_touchdown_xy + Rz_touchdown @ p_R_land
-p_L_land_W = ca.vertcat(p_L_land_xy_W, 0)
-p_R_land_W = ca.vertcat(p_R_land_xy_W, 0)
+p_L_land_W = ca.vertcat(p_L_land_xy_W, _landing_gz)
+p_R_land_W = ca.vertcat(p_R_land_xy_W, _landing_gz)
 
 ##############################################################
 # Constraints
@@ -362,7 +374,7 @@ if cfg.constraints.workspace_pz_2d_upper:
             val = val + c * px_sym**i * pitch_sym**j
         return val
 
-# dynamics and phase constraints
+print("[dbg] dynamics loop...", flush=True)
 for k in range(N):
     if k < stance_end:
         dt_k = dt_stance
@@ -374,8 +386,8 @@ for k in range(N):
     # STANCE
     if k < stance_end:
         p_com = X[0:3, k]
-        p_L = ca.vertcat(p0_L_ca, 0)
-        p_R = ca.vertcat(p0_R_ca, 0)
+        p_L = ca.vertcat(p0_L_ca, cfg.constraints.stance_ground_z)
+        p_R = ca.vertcat(p0_R_ca, cfg.constraints.stance_ground_z)
         r_L = p_L - p_com
         r_R = p_R - p_com
 
@@ -442,8 +454,8 @@ if cfg.constraints.L_extension_min > 0:
 
     k = stance_end - 1
     p_com_k = X[0:3, k]
-    r_L_lo = ca.vertcat(p0_L_ca[0], p0_L_ca[1], 0) - p_com_k
-    r_R_lo = ca.vertcat(p0_R_ca[0], p0_R_ca[1], 0) - p_com_k
+    r_L_lo = ca.vertcat(p0_L_ca[0], p0_L_ca[1], cfg.constraints.stance_ground_z) - p_com_k
+    r_R_lo = ca.vertcat(p0_R_ca[0], p0_R_ca[1], cfg.constraints.stance_ground_z) - p_com_k
     opti.subject_to(ca.sumsqr(r_L_lo) >= L_ext2)
     opti.subject_to(ca.sumsqr(r_R_lo) >= L_ext2)
 
@@ -454,7 +466,7 @@ if cfg.constraints.L_extension_min > 0:
     opti.subject_to(ca.sumsqr(r_L_td) >= L_ext2)
     opti.subject_to(ca.sumsqr(r_R_td) >= L_ext2)
 
-# z_com constraint
+print("[dbg] pz constraints...", flush=True)
 _c_pz = cfg.constraints.pitch_pz_coupling
 
 def _pitch_from_quat(k):
@@ -472,43 +484,47 @@ def _pitch_from_quat(k):
     return ca.atan2(sinp, cosp)
 
 if cfg.constraints.workspace_pz_2d:
-    # 2D surface: z >= poly(x_rel, pitch) where x_rel = CoM_x - foot_center_x.
-    # The workspace was swept with feet at x=0, so we use the CoM x relative to
-    # the contact feet to keep the boundary function in the correct reference frame.
+    # 2D surface: z >= poly(x_rel, pitch) + surface_z
+    # Polynomial is fit with feet at z=0, so outputs height above the contact surface.
+    # We add the world-frame surface height (_stance_gz or _landing_gz) to get world z.
+    # During flight there is no contact surface, so we use pz_min (above stance surface).
     x_stance_center = float(p0_L[0])   # p0_L is [0, hip_offset]; x=0
     x_land_center   = (p_L_land_W[0] + p_R_land_W[0]) / 2.0  # symbolic
     for k in range(N + 1):
         if k < stance_end:
             x_rel = X[0, k] - x_stance_center
-            opti.subject_to(X[2, k] >= _pz_boundary_2d(x_rel, _pitch_from_quat(k)))
+            opti.subject_to(X[2, k] >= _pz_boundary_2d(x_rel, _pitch_from_quat(k)) + _stance_gz)
         elif k >= flight_end:
             x_rel = X[0, k] - x_land_center
-            opti.subject_to(X[2, k] >= _pz_boundary_2d(x_rel, _pitch_from_quat(k)))
+            opti.subject_to(X[2, k] >= _pz_boundary_2d(x_rel, _pitch_from_quat(k)) + _landing_gz)
         else:
-            opti.subject_to(X[2, k] >= pz_min)
+            opti.subject_to(X[2, k] >= pz_min + _stance_gz)
 elif cfg.constraints.workspace_pz:
     # 1D surface with optional heuristic pitch coupling
     x_stance_center = float(p0_L[0])
     x_land_center   = (p_L_land_W[0] + p_R_land_W[0]) / 2.0
     for k in range(N + 1):
         if k < stance_end:
-            floor_k = _pz_boundary(X[0, k] - x_stance_center)
+            floor_k = _pz_boundary(X[0, k] - x_stance_center) + _stance_gz
             if _c_pz > 0.0:
                 floor_k = floor_k - _c_pz * _pitch_from_quat(k)
             opti.subject_to(X[2, k] >= floor_k)
         elif k >= flight_end:
-            floor_k = _pz_boundary(X[0, k] - x_land_center)
+            floor_k = _pz_boundary(X[0, k] - x_land_center) + _landing_gz
             if _c_pz > 0.0:
                 floor_k = floor_k - _c_pz * _pitch_from_quat(k)
             opti.subject_to(X[2, k] >= floor_k)
         else:
-            opti.subject_to(X[2, k] >= pz_min)
+            opti.subject_to(X[2, k] >= pz_min + _stance_gz)
 else:
     for k in range(N + 1):
+        # pz_min is relative to the stance surface; flight must stay above the box/platform.
+        # Landing uses the landing surface as the reference.
+        gz_k = _stance_gz if k < flight_end else _landing_gz
         if _c_pz > 0.0 and (k < stance_end or k >= flight_end):
-            opti.subject_to(X[2, k] >= pz_min - _c_pz * _pitch_from_quat(k))
+            opti.subject_to(X[2, k] >= pz_min + gz_k - _c_pz * _pitch_from_quat(k))
         else:
-            opti.subject_to(X[2, k] >= pz_min)
+            opti.subject_to(X[2, k] >= pz_min + gz_k)
 
 # pz_max — scalar upper bound on CoM height during contact phases.
 if cfg.constraints.pz_max is not None:
@@ -527,13 +543,13 @@ if cfg.constraints.pz_touchdown_max is not None:
 if cfg.constraints.workspace_pz_2d_upper:
     k = stance_end - 1   # liftoff
     x_rel = X[0, k] - x_stance_center
-    opti.subject_to(X[2, k] <= _pz_ceiling_2d(x_rel, _pitch_from_quat(k)))
+    opti.subject_to(X[2, k] <= _pz_ceiling_2d(x_rel, _pitch_from_quat(k)) + _stance_gz)
 
     k = flight_end        # touchdown
     x_rel = X[0, k] - x_land_center
-    opti.subject_to(X[2, k] <= _pz_ceiling_2d(x_rel, _pitch_from_quat(k)))
+    opti.subject_to(X[2, k] <= _pz_ceiling_2d(x_rel, _pitch_from_quat(k)) + _landing_gz)
 
-# contact constraints
+print("[dbg] contact constraints...", flush=True)
 for k in range(N):
     # STANCE
     if k < stance_end:
@@ -592,6 +608,7 @@ if _c_pz == 0.0 and not cfg.constraints.workspace_pz_2d:
         rp_sq_allowed = rp_max**2 + alpha_rp * p_err_sq
         opti.subject_to(roll_k**2 + pitch_k**2 <= rp_sq_allowed)
 
+print("[dbg] objective...", flush=True)
 ##############################################################
 # Objective Function
 ##############################################################
@@ -691,8 +708,26 @@ opti.minimize(J)
 for k in range(N + 1):
     alpha = k / N
 
-    # com position
-    p_com_guess = (1 - alpha) * x0[:3] + alpha * x_goal[:3]
+    # com xy: always linear
+    p_xy_guess = (1 - alpha) * x0[:2] + alpha * x_goal[:2]
+
+    if cfg.solver.smart_z_init:
+        # Stance: hold at initial height (forces already balance there, zero dynamics violation).
+        # Flight: linear descent from liftoff z to landing z (avoids large velocity
+        #         discontinuity that a parabolic arc would introduce at the flight→landing
+        #         boundary when there is a large height difference).
+        # Landing: hold at goal z.
+        if k < stance_end:
+            p_z_guess = x0[2]
+        elif k <= flight_end:
+            alpha_fl = (k - stance_end) / N_flight
+            p_z_guess = (1 - alpha_fl) * x0[2] + alpha_fl * x_goal[2]
+        else:
+            p_z_guess = x_goal[2]
+        p_com_guess = np.array([p_xy_guess[0], p_xy_guess[1], p_z_guess])
+    else:
+        p_com_guess = (1 - alpha) * x0[:3] + alpha * x_goal[:3]
+
     opti.set_initial(X[0:3, k], p_com_guess)
 
     # quaternion initial guess aligned with phase
@@ -728,6 +763,7 @@ opti.set_initial(M_R, 0)
 # Solve
 ##############################################################
 
+print("[dbg] calling opti.solve()...", flush=True)
 opti.solver("ipopt", {"ipopt": {"max_iter": cfg.solver.max_iter}})
 sol = opti.solve()
 
@@ -772,15 +808,15 @@ M = np.zeros((N, 3))
 for k in range(N):
     if k < stance_end:
         p_com = X_sol[0:3, k]
-        p_L = np.array([float(p0_L_ca[0]), float(p0_L_ca[1]), 0.0])
-        p_R = np.array([float(p0_R_ca[0]), float(p0_R_ca[1]), 0.0])
+        p_L = np.array([float(p0_L_ca[0]), float(p0_L_ca[1]), float(cfg.constraints.stance_ground_z)])
+        p_R = np.array([float(p0_R_ca[0]), float(p0_R_ca[1]), float(cfg.constraints.stance_ground_z)])
     elif k < flight_end:
         M[k, :] = 0.0
         continue
     else:
         p_com = X_sol[0:3, k]
-        p_L = np.array([pL_land_world_xy[0], pL_land_world_xy[1], 0.0])
-        p_R = np.array([pR_land_world_xy[0], pR_land_world_xy[1], 0.0])
+        p_L = np.array([pL_land_world_xy[0], pL_land_world_xy[1], _landing_gz])
+        p_R = np.array([pR_land_world_xy[0], pR_land_world_xy[1], _landing_gz])
 
     r_L = p_L - p_com
     r_R = p_R - p_com

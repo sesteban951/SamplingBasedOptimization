@@ -96,6 +96,13 @@ class ConstraintConfig:
     # landing node (touchdown). 0 = disabled. Ensures near-full extension at
     # phase boundaries for physical realism and IK smoothness.
     L_extension_min: float = 0.0
+    # Height of the stance / landing ground surfaces above world z=0 (m).
+    # Config values p_com[2] and pz_min are expressed RELATIVE to these surfaces;
+    # srb_aerial.py adds the offsets when building world-frame states and constraints.
+    # Example: box backflip with stance on 0.61m box, landing on ground →
+    #   stance_ground_z=0.6096, landing_ground_z=0.0
+    stance_ground_z: float = 0.0
+    landing_ground_z: float = 0.0
     # Upper bound on CoM z at the touchdown frame only (k=flight_end).
     # Prevents planning near-full-extension landings where IK fails.
     # None = unconstrained.
@@ -106,6 +113,10 @@ class ConstraintConfig:
 @dataclass
 class SolverConfig:
     max_iter: int = 5000
+    # When True: stance z held at x0[2], flight z follows a ballistic parabolic arc,
+    # landing z held at goal[2].  Better for elevated-surface configs where the linear
+    # guess creates large dynamics violations.
+    smart_z_init: bool = False
 
 
 @dataclass

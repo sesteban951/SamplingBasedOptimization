@@ -1,0 +1,50 @@
+<mujoco model="box_20x30x24in">
+  <!--
+    Plywood platform: 20 x 30 x 24 inches
+      width  (Y) = 20 in = 0.508  m
+      depth  (X) = 30 in = 0.762  m
+      height (Z) = 24 in = 0.6096 m
+
+    MuJoCo box geom uses half-extents:
+      size = "0.381 0.254 0.3048"
+    Center placed at z = 0.3048 so top surface is at z = 0.6096 m.
+  -->
+
+  <compiler angle="radian"/>
+
+  <option timestep="0.01" gravity="0 0 -9.81"/>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.4 0.6 0.8" rgb2="0.1 0.2 0.3"
+             width="512" height="512"/>
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge"
+             rgb1="0.25 0.30 0.35" rgb2="0.15 0.20 0.25" markrgb="0.9 0.9 0.9"
+             width="300" height="300"/>
+    <material name="groundplane" texture="groundplane" texuniform="true"
+              texrepeat="6 6" reflectance="0.15"/>
+    <material name="box_wood" rgba="0.72 0.52 0.26 1" reflectance="0.05"/>
+    <material name="box_edge" rgba="0.45 0.30 0.12 1"/>
+  </asset>
+
+  <worldbody>
+    <light pos="2 1 4" dir="-1 -0.5 -2" directional="true" diffuse="0.8 0.8 0.8"/>
+    <light pos="-1 -1 3" dir="0.5 0.5 -1" directional="true" diffuse="0.3 0.3 0.3"/>
+
+    <!-- Floor -->
+    <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"
+          contype="1" conaffinity="1"/>
+
+    <!-- Platform box: 20 x 30 x 24 inches -->
+    <geom name="platform" type="box"
+          pos="0 0 0.3048"
+          size="0.381 0.254 0.3048"
+          material="box_wood"
+          contype="1" conaffinity="1"
+          friction="1.0 0.005 0.0001"/>
+  </worldbody>
+
+  <keyframe>
+    <key name="default" qpos=""/>
+  </keyframe>
+
+</mujoco>
