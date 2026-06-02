@@ -59,7 +59,7 @@ class G1IPOPTIK:
 
     def __init__(self, urdf_path: str = _DEFAULT_URDF,
                  w_foot: float     = 1.0,
-                 w_inertia: float  = 1e-4,
+                 w_inertia: float  = 0.0,
                  I_srb: np.ndarray = None,
                  ipopt_opts: dict  = None):
         """
@@ -112,21 +112,23 @@ class G1IPOPTIK:
 
         # ── Parameters ───────────────────────────────────────────────────
         # quat_pelvis(4) + p_com_des(3) +
-        # p_l_des(3) + R_l_flat(9) + p_r_des(3) + R_r_flat(9) + I_srb_flat(9)
-        # + q_prev_legs(n_leg) + w_reg(1)  = 40 + n_leg + 1
-        # R_*_flat and I_srb_flat use column-major (Fortran) order for ca.reshape(,3,3).
+        # p_l_des(3) + R_l_flat(9) + p_r_des(3) + R_r_flat(9) + I_des_flat(9)
+        # + q_prev_legs(n_leg) + w_reg(1) + w_inertia(1) + w_foot(1)
+        # R_*_flat and I_des_flat use column-major (Fortran) order for ca.reshape(,3,3).
         quat_pelvis  = ca.SX.sym("quat_pelvis",  4)
         p_com_des    = ca.SX.sym("p_com_des",    3)
         p_l_des      = ca.SX.sym("p_l_des",      3)
         R_l_flat     = ca.SX.sym("R_l_flat",     9)
         p_r_des      = ca.SX.sym("p_r_des",      3)
         R_r_flat     = ca.SX.sym("R_r_flat",     9)
-        I_srb_flat   = ca.SX.sym("I_srb_flat",   9)
+        I_des_flat   = ca.SX.sym("I_des_flat",   9)
         q_prev_legs  = ca.SX.sym("q_prev_legs",  n_leg)
         w_reg_sym    = ca.SX.sym("w_reg",         1)
+        w_inertia_sym = ca.SX.sym("w_inertia",    1)
+        w_foot_sym   = ca.SX.sym("w_foot",        1)
         params = ca.vertcat(quat_pelvis, p_com_des,
-                            p_l_des, R_l_flat, p_r_des, R_r_flat, I_srb_flat,
-                            q_prev_legs, w_reg_sym)
+                            p_l_des, R_l_flat, p_r_des, R_r_flat, I_des_flat,
+                            q_prev_legs, w_reg_sym, w_inertia_sym, w_foot_sym)
 
         # ── Assemble full q ───────────────────────────────────────────────
         # pelvis xyz from decision vars, orientation from parameter,
@@ -167,8 +169,8 @@ class G1IPOPTIK:
             ca.horzcat(  2*(qx*qy+qz*qw), 1-2*(qx**2+qz**2),   2*(qy*qz-qx*qw)),
             ca.horzcat(  2*(qx*qz-qy*qw),   2*(qy*qz+qx*qw), 1-2*(qx**2+qy**2)),
         )  # (3,3)
-        I_srb_3x3 = ca.reshape(I_srb_flat, 3, 3)
-        I_des     = R_body @ I_srb_3x3 @ R_body.T
+        I_srb_3x3 = ca.reshape(I_des_flat, 3, 3)
+        I_des     = R_body @ I_srb_3x3 @ R_body.T   # rotate body-frame I_des to world frame
 
         # ── Cost ─────────────────────────────────────────────────────────
         R_l_des = ca.reshape(R_l_flat, 3, 3)
@@ -181,12 +183,12 @@ class G1IPOPTIK:
         cost_foot = (ca.dot(e_lp, e_lp) + ca.dot(e_rp, e_rp) +
                      ca.dot(e_lR, e_lR) + ca.dot(e_rR, e_rR))
 
-        # e_I = ca.reshape(I_G - I_des, 9, 1)
-        # cost_inertia = ca.dot(e_I, e_I)
+        e_I          = ca.reshape(I_G - I_des, 9, 1)
+        cost_inertia = ca.dot(e_I, e_I)
 
         e_reg    = q_legs - q_prev_legs
         cost_reg = ca.dot(e_reg, e_reg)
-        cost = self.w_foot * cost_foot + w_reg_sym * cost_reg
+        cost = w_foot_sym * cost_foot + w_inertia_sym * cost_inertia + w_reg_sym * cost_reg
 
         # ── CoM equality constraint ───────────────────────────────────────
         g = com - p_com_des   # (3,) enforced == 0
@@ -211,27 +213,36 @@ class G1IPOPTIK:
     # ------------------------------------------------------------------
 
     def solve(self, q0: np.ndarray, oMl_des: pin.SE3, oMr_des: pin.SE3,
-              q_prev: np.ndarray = None, w_reg: float = 0.0):
+              q_prev: np.ndarray = None, w_reg: float = 0.0,
+              I_des: np.ndarray = None, w_inertia: float = None,
+              w_foot: float = None):
         """
         Solve IK via IPOPT.
 
         Args:
-            q0:      Initial configuration (nq=36).
-                     q0[0:3] is used as the target CoM position (p_com_des) — this
-                     matches _build_q0 which copies the SRB CoM into q0[0:3].
-                     q0[3:7] is the fixed pelvis orientation (from SRB quaternion).
-                     q0[7:19] seeds the leg-joint warm-start.
-            oMl_des: Desired left-foot pose (pin.SE3).
-            oMr_des: Desired right-foot pose (pin.SE3).
-            q_prev:  Previous frame's full configuration (nq=36), used for joint
-                     continuity regularisation.  None → uses q0 (no regularisation effect).
-            w_reg:   Weight on ||q_legs - q_prev_legs||² regularisation term.
-                     0.0 (default) disables it.  A value ~1e-2 to 0.1 discourages
-                     the solver from jumping to a distant joint-space branch.
+            q0:        Initial configuration (nq=36).
+                       q0[0:3] is used as the target CoM position (p_com_des) — this
+                       matches _build_q0 which copies the SRB CoM into q0[0:3].
+                       q0[3:7] is the fixed pelvis orientation (from SRB quaternion).
+                       q0[7:19] seeds the leg-joint warm-start.
+            oMl_des:   Desired left-foot pose (pin.SE3).
+            oMr_des:   Desired right-foot pose (pin.SE3).
+            q_prev:    Previous frame's full configuration (nq=36), used for joint
+                       continuity regularisation.  None → uses q0.
+            w_reg:     Weight on ||q_legs - q_prev_legs||² regularisation.
+                       0.0 (default) disables it.
+            I_des:     3×3 desired centroidal inertia in body frame [kg·m²].
+                       None → uses the default SRB inertia (self._I_srb_flat).
+            w_inertia: Weight on ||I_G(q) - I_des||²_F cost.
+                       None → uses self.w_inertia.  Set > 0 to activate.
+                       For contact phases use a small value (e.g. 1e-3).
+                       For flight (w_foot=0) use a larger value (e.g. 0.5).
+            w_foot:    Weight on foot placement cost.
+                       None → uses self.w_foot (1.0).  Set 0.0 for flight-only
+                       inertia tracking where foot targets are irrelevant.
 
         Returns:
-            q_sol:   Full configuration (nq=36) — pelvis xyz solved by IPOPT to
-                     satisfy the CoM constraint; leg joints from optimisation.
+            q_sol:   Full configuration (nq=36).
             success: True if IPOPT returned Solve_Succeeded or Solved_To_Acceptable_Level.
             errs:    [pos_err_m] — summed L2 foot position error at the solution.
         """
@@ -241,6 +252,10 @@ class G1IPOPTIK:
         q_ref        = q_prev if q_prev is not None else q0
         q_prev_legs  = np.array([q_ref[qi] for qi in self._leg_qidx])
 
+        I_des_flat    = I_des.flatten('F') if I_des is not None else self._I_srb_flat
+        w_inertia_val = w_inertia if w_inertia is not None else self.w_inertia
+        w_foot_val    = w_foot    if w_foot    is not None else self.w_foot
+
         p_val = np.concatenate([
             q0[3:7],                           # quat_pelvis (fixed orientation)
             p_com_des,                         # CoM equality target
@@ -248,9 +263,11 @@ class G1IPOPTIK:
             oMl_des.rotation.flatten('F'),     # R_l_flat (col-major)
             oMr_des.translation,               # p_r_des
             oMr_des.rotation.flatten('F'),     # R_r_flat
-            self._I_srb_flat,                  # I_srb_flat
+            I_des_flat,                        # desired inertia (body frame, col-major)
             q_prev_legs,                       # joint regularisation reference
             [w_reg],                           # regularisation weight
+            [w_inertia_val],                   # inertia cost weight
+            [w_foot_val],                      # foot placement cost weight
         ])
 
         x0  = np.concatenate([p_com_des, q_legs_0])

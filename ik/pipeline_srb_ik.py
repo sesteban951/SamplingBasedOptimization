@@ -165,23 +165,40 @@ def _build_q0(ik, q_srb_row: np.ndarray, q_warm=None,
     return q0
 
 
+def _row_to_I_mat(row: np.ndarray) -> np.ndarray:
+    """[Ixx,Iyy,Izz,Ixy,Ixz,Iyz] → symmetric 3×3 numpy matrix."""
+    return np.array([
+        [row[0], row[3], row[4]],
+        [row[3], row[1], row[5]],
+        [row[4], row[5], row[2]],
+    ])
+
+
 def run_ik_trajectory(ik: G1IK, q_srb: np.ndarray, feet_ext: np.ndarray,
                       stance_end: int, flight_end: int,
                       arm_defaults: np.ndarray = None,
-                      stance_ground_z: float = 0.0):
+                      stance_ground_z: float = 0.0,
+                      I_opt: np.ndarray = None,
+                      w_inertia_contact: float = 1e-3,
+                      w_inertia_flight: float = 0.5):
     """
     Returns q_ik (N+1, 36) pinocchio configuration at every timestep.
+
     arm_defaults: full nq-length array with upper-body joint angles to hold
                   throughout (from load_arm_defaults).  None = zeros.
     stance_ground_z: height of the stance surface above z=0 (e.g. box top).
-                     Shifts the stance-phase foot IK target upward accordingly.
-                     Landing is always on the ground (z=0).
+    I_opt: (N+1, 6) SRB inertia trajectory [Ixx,Iyy,Izz,Ixy,Ixz,Iyz], body frame.
+           None → inertia cost disabled (uses solver default weight which is 0).
+    w_inertia_contact: inertia cost weight during stance/landing (low, foot cost dominates).
+    w_inertia_flight:  inertia cost weight during flight (higher, no foot constraint).
     """
     N = q_srb.shape[0] - 1
     q_ik = np.zeros((N + 1, ik.model.nq))
 
     stance_foot_z  = ik.ANKLE_HEIGHT + stance_ground_z
     landing_foot_z = ik.ANKLE_HEIGHT  # landing always on ground
+
+    use_inertia = (I_opt is not None) and isinstance(ik, G1IPOPTIK)
 
     # Pre-fill upper-body defaults on every frame — IK only overwrites leg joints
     if arm_defaults is not None:
@@ -196,13 +213,16 @@ def run_ik_trajectory(ik: G1IK, q_srb: np.ndarray, feet_ext: np.ndarray,
             q0[19:] = arm_defaults[19:]   # IK only updates leg joints; these survive
         oMl = pin.SE3(np.eye(3), np.array([feet_ext[i,0], feet_ext[i,1], stance_foot_z]))
         oMr = pin.SE3(np.eye(3), np.array([feet_ext[i,2], feet_ext[i,3], stance_foot_z]))
-        q_sol, ok, errs = ik.solve(q0, oMl, oMr)
+        I_des_i = _row_to_I_mat(I_opt[i]) if use_inertia else None
+        q_sol, ok, errs = ik.solve(q0, oMl, oMr,
+                                   I_des=I_des_i,
+                                   w_inertia=w_inertia_contact if use_inertia else None)
         if not ok and errs[-1] > 1e-3:
             print(f"  [warn] stance frame {i}: IK did not converge (err={errs[-1]:.2e})")
         q_ik[i] = q_sol
         q_warm = q_sol
 
-    # ---- FLIGHT — interpolate leg joints toward touchdown pose ----
+    # ---- FLIGHT — interpolate leg joints, then refine with inertia IK ----
     # Pre-compute IK at the first landing frame so flight interpolation ends exactly
     # at the touchdown configuration, eliminating the stance-width snap.
     print("[pipeline] Interpolating flight joints ...")
@@ -213,17 +233,16 @@ def run_ik_trajectory(ik: G1IK, q_srb: np.ndarray, feet_ext: np.ndarray,
         q0_td[19:] = arm_defaults[19:]
     oMl_td = pin.SE3(np.eye(3), np.array([feet_ext[flight_end, 0], feet_ext[flight_end, 1], landing_foot_z]))
     oMr_td = pin.SE3(np.eye(3), np.array([feet_ext[flight_end, 2], feet_ext[flight_end, 3], landing_foot_z]))
-    q_td, ok_td, errs_td = ik.solve(q0_td, oMl_td, oMr_td)
+    I_des_td = _row_to_I_mat(I_opt[flight_end]) if use_inertia else None
+    q_td, ok_td, errs_td = ik.solve(q0_td, oMl_td, oMr_td,
+                                     I_des=I_des_td,
+                                     w_inertia=w_inertia_contact if use_inertia else None)
     if not ok_td and errs_td[-1] > 1e-3:
         print(f"  [warn] touchdown frame {flight_end}: IK did not converge (err={errs_td[-1]:.2e})")
     joints_touchdown = q_td[7:].copy()
 
     # Pelvis position during flight — interpolate per-axis CoM→pelvis offsets so
     # the pelvis trajectory is C0-continuous at both phase boundaries.
-    # IPOPT can place the pelvis offset from the SRB CoM in all three axes (not
-    # just z) when the robot is pitched or the feet are spread asymmetrically.
-    # Interpolating all three offsets from liftoff to touchdown values makes the
-    # transition smooth without hardcoding any specific CoM–pelvis geometry.
     liftoff_x_offset   = q_ik[stance_end - 1, 0] - q_srb[stance_end - 1, 0]
     liftoff_y_offset   = q_ik[stance_end - 1, 1] - q_srb[stance_end - 1, 1]
     liftoff_z_offset   = q_ik[stance_end - 1, 2] - q_srb[stance_end - 1, 2]
@@ -239,11 +258,38 @@ def run_ik_trajectory(ik: G1IK, q_srb: np.ndarray, feet_ext: np.ndarray,
         q_ik[i, 3:7] = _mj_to_pin_quat(q_srb[i,3], q_srb[i,4], q_srb[i,5], q_srb[i,6])
         q_ik[i, 7:]  = (1 - t) * joints_takeoff + t * joints_touchdown
 
+    # Flight inertia refinement — if inertia tracking is active, run a lightweight
+    # IPOPT solve for each flight frame: CoM equality + inertia cost, no foot targets.
+    # The interpolated pose above is used as the warm-start.
+    if use_inertia:
+        print("[pipeline] Running flight inertia IK ...")
+        # Dummy foot targets — ignored when w_foot=0
+        oMl_dummy = pin.SE3(np.eye(3), np.array([0.0,  ik.HIP_WIDTH, ik.ANKLE_HEIGHT]))
+        oMr_dummy = pin.SE3(np.eye(3), np.array([0.0, -ik.HIP_WIDTH, ik.ANKLE_HEIGHT]))
+        q_flight_warm = q_ik[stance_end - 1]
+        for idx, i in enumerate(range(stance_end, flight_end)):
+            q0_fl = q_ik[i].copy()   # warm-start from interpolated pose
+            if arm_defaults is not None:
+                q0_fl[19:] = arm_defaults[19:]
+            q0_fl[0:3] = q_srb[i, 0:3]
+            q0_fl[3:7] = _mj_to_pin_quat(q_srb[i,3], q_srb[i,4], q_srb[i,5], q_srb[i,6])
+            # Correct CoM target the same way _build_q0 does for IPOPT
+            pin.centerOfMass(ik.model, ik.data, q0_fl)
+            q0_fl[2] = ik.data.com[0][2]
+            I_des_fl = _row_to_I_mat(I_opt[i])
+            q_fl, ok_fl, _ = ik.solve(q0_fl, oMl_dummy, oMr_dummy,
+                                       q_prev=q_flight_warm,
+                                       w_reg=0.05,
+                                       I_des=I_des_fl,
+                                       w_inertia=w_inertia_flight,
+                                       w_foot=0.0)
+            # Keep pelvis orientation and CoM; only update leg joints
+            q_ik[i, 7:19] = q_fl[7:19]
+            q_flight_warm = q_fl
+
     # ---- LANDING ----
     # w_reg penalises ||q_legs - q_prev_legs||² to keep the solver on the same
-    # joint-space branch across consecutive frames.  A small weight (0.05) is
-    # enough to break ties between equivalent solutions without fighting the
-    # foot-placement objective (w_foot=1, foot errors are ~mm²).
+    # joint-space branch across consecutive frames.
     print("[pipeline] Running landing IK ...")
     q_ik[flight_end] = q_td   # already solved above
     q_warm = q_td
@@ -253,7 +299,10 @@ def run_ik_trajectory(ik: G1IK, q_srb: np.ndarray, feet_ext: np.ndarray,
             q0[19:] = arm_defaults[19:]
         oMl = pin.SE3(np.eye(3), np.array([feet_ext[i,0], feet_ext[i,1], landing_foot_z]))
         oMr = pin.SE3(np.eye(3), np.array([feet_ext[i,2], feet_ext[i,3], landing_foot_z]))
-        q_sol, ok, errs = ik.solve(q0, oMl, oMr)
+        I_des_i = _row_to_I_mat(I_opt[i]) if use_inertia else None
+        q_sol, ok, errs = ik.solve(q0, oMl, oMr,
+                                   I_des=I_des_i,
+                                   w_inertia=w_inertia_contact if use_inertia else None)
         if not ok and errs[-1] > 1e-3:
             print(f"  [warn] landing frame {i}: IK did not converge (err={errs[-1]:.2e})")
         q_ik[i] = q_sol
@@ -292,6 +341,43 @@ _TARGET_JOINTS = [
 _BASE_COLS  = ['com_x', 'com_y', 'com_z', 'quat_x', 'quat_y', 'quat_z', 'quat_w']
 _OUT_HEADER = ['time'] + _BASE_COLS + _TARGET_JOINTS
 
+# Columns to drop when converting 29-DOF → 23-DOF output (0-indexed from the
+# no-time CSV, i.e. col 0 = com_x).  Corresponds to joint indices 13,14,20,21,27,28
+# inside _TARGET_JOINTS: waist_roll, waist_pitch, left_wrist_pitch, left_wrist_yaw,
+# right_wrist_pitch, right_wrist_yaw.
+_DROP_23DOF = [20, 21, 27, 28, 34, 35]
+_DROP_23DOF_NAMES = [_TARGET_JOINTS[c - 7] for c in _DROP_23DOF]
+
+
+def _check_and_save_23dof(data_29: np.ndarray, export_dir: str, hz: float) -> None:
+    """Drop 6 secondary joints, save 23-DOF CSV, and report whether dropped cols are zero."""
+    data_23 = np.delete(data_29, _DROP_23DOF, axis=1)
+    path = os.path.join(export_dir, f"ik_fullrobot_{int(hz)}hz_23dof.csv")
+    np.savetxt(path, data_23, delimiter=",")
+
+    dropped = data_29[:, _DROP_23DOF]
+    max_vals = np.abs(dropped).max(axis=0)
+    nonzero = [(col, name, val)
+               for col, name, val in zip(_DROP_23DOF, _DROP_23DOF_NAMES, max_vals)
+               if val > 1e-9]
+
+    _sep = "#" * 64
+    print(f"\n{_sep}")
+    print(f"#  23-DOF output  |  {int(hz)} Hz  |  {data_23.shape[0]} frames  |  {data_23.shape[1]} cols")
+    print(f"#  File : {path}")
+    print(f"#  Dropped cols {_DROP_23DOF}:")
+    for col, name in zip(_DROP_23DOF, _DROP_23DOF_NAMES):
+        print(f"#    col {col:2d}  {name}")
+    if nonzero:
+        print(f"#")
+        print(f"#  !! WARNING: dropped columns contain non-zero values !!")
+        for col, name, val in nonzero:
+            print(f"#    col {col:2d}  {name:<35s}  max|val| = {val:.4e}")
+        print(f"#  The 23-DOF CSV may silently discard motion — verify before use.")
+    else:
+        print(f"#  All dropped columns are zero — 23-DOF output is safe to use.")
+    print(f"{_sep}\n")
+
 
 def _resample_and_save(out: np.ndarray, export_dir: str, hz: float = 50.0):
     """
@@ -322,8 +408,17 @@ def _resample_and_save(out: np.ndarray, export_dir: str, hz: float = 50.0):
     resampled[:, 4:8] = slerp(t_new).as_quat()
 
     path = os.path.join(export_dir, f"ik_fullrobot_{int(hz)}hz.csv")
-    np.savetxt(path, resampled, delimiter=",")
-    print(f"[pipeline] Resampled {int(hz)} Hz CSV → {path}  ({n_new} frames)")
+    data_no_time = resampled[:, 1:]                        # drop time column; freq is fixed
+    np.savetxt(path, data_no_time, delimiter=",")
+
+    _sep = "#" * 64
+    print(f"\n{_sep}")
+    print(f"#  Resampled output: {int(hz)} Hz  |  dt = {dt_out*1000:.1f} ms  |  {n_new} frames")
+    print(f"#  File : {path}")
+    print(f"#  Cols : com_xyz (3)  quat_xyzw (4)  joints (29)  — NO time column")
+    print(f"{_sep}\n")
+
+    _check_and_save_23dof(data_no_time, export_dir, hz)
 
 
 def _build_joint_remap(model: pin.Model):
@@ -571,12 +666,16 @@ def plot_srb_wrenches(results_dir: str, times: np.ndarray,
 # ---------------------------------------------------------------------------
 
 def visualize(q_ik: np.ndarray, q_srb: np.ndarray, times: np.ndarray,
-              combined_xml: str, speed: float = 1.0):
+              combined_xml: str, speed: float = 1.0,
+              I_opt: np.ndarray = None):
     """
     Animate the combined model in real time.
     Each frame is displayed for its actual trajectory duration (times[i+1]-times[i])
     divided by speed, so playback is physically correct across variable-dt phases.
     speed < 1 → slow motion, speed > 1 → fast forward.
+
+    I_opt: (N+1, 6) inertia trajectory [Ixx,Iyy,Izz,Ixy,Ixz,Iyz].  When provided,
+           the SRB ellipsoid geom is rescaled each frame to reflect the current inertia.
     """
     mj_model = mujoco.MjModel.from_xml_path(combined_xml)
     mj_data  = mujoco.MjData(mj_model)
@@ -597,6 +696,33 @@ def visualize(q_ik: np.ndarray, q_srb: np.ndarray, times: np.ndarray,
 
     q_g1_mj = np.array([pin_q_to_mj(q_ik[i]) for i in range(q_ik.shape[0])])
 
+    # Inertia-scaled ellipsoid setup — geom_size is (ngeom, 3)
+    _srb_geom_id   = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_GEOM, "base_geom")
+    _scale_inertia = (I_opt is not None) and (_srb_geom_id >= 0)
+    if _scale_inertia:
+        # Nominal semi-axes from the XML (a=x-forward, b=y-lateral, c=z-up)
+        _nom_abc = mj_model.geom_size[_srb_geom_id].copy()   # shape (3,)
+        # Nominal inertia: standing pose values from srb.py (Ixx=3.747, Iyy=3.301 kg·m²).
+        # Using these as the reference keeps the ellipsoid at its XML size when the robot
+        # is in the nominal standing configuration.
+        _Ixx_nom = 3.747533
+        _Iyy_nom = 3.300958
+        print(f"[pipeline] SRB ellipsoid scaling active — nominal size: "
+              f"a={_nom_abc[0]:.3f}, b={_nom_abc[1]:.3f}, c={_nom_abc[2]:.3f}")
+
+    def _update_ellipsoid(i):
+        if not _scale_inertia:
+            return
+        Ixx = I_opt[i, 0]
+        Iyy = I_opt[i, 1]
+        # Iyy (pitch, around y) drives the forward (a) and vertical (c) extents.
+        # Ixx (roll,  around x) drives the lateral (b) extent.
+        scale_ac = np.sqrt(np.clip(Iyy / _Iyy_nom, 0.01, 4.0))
+        scale_b  = np.sqrt(np.clip(Ixx / _Ixx_nom, 0.01, 4.0))
+        mj_model.geom_size[_srb_geom_id, 0] = _nom_abc[0] * scale_ac  # x (forward)
+        mj_model.geom_size[_srb_geom_id, 1] = _nom_abc[1] * scale_b   # y (lateral)
+        mj_model.geom_size[_srb_geom_id, 2] = _nom_abc[2] * scale_ac  # z (height)
+
     with mujoco.viewer.launch_passive(mj_model, mj_data) as viewer:
         viewer.cam.lookat[:]  = [0.0, 0.0, 0.6]
         viewer.cam.distance   = 3.2
@@ -608,6 +734,7 @@ def visualize(q_ik: np.ndarray, q_srb: np.ndarray, times: np.ndarray,
                 if not viewer.is_running():
                     break
 
+                _update_ellipsoid(i)
                 mj_data.qpos[:g1_nq] = q_g1_mj[i]
                 mj_data.qpos[srb_qpos_adr : srb_qpos_adr + 7] = q_srb[i]
                 mj_data.qvel[:] = 0
@@ -634,6 +761,7 @@ if __name__ == "__main__":
     parser.add_argument("--box-xml",     default=None,
                         help="Path to box scene XML to include in the viewer "
                              "(e.g. models/box/box_20x30x24in.xml)")
+
     args = parser.parse_args()
 
     # 1. SRB solver
@@ -656,10 +784,22 @@ if __name__ == "__main__":
     os.makedirs(export_dir, exist_ok=True)
     ik = G1IPOPTIK()
     arm_defaults = load_arm_defaults(ik.model)
+
+    # Load SRB inertia trajectory if available (output of variable_inertia=True SRB run)
+    _I_opt_path = os.path.join(_results_dir, "I_opt.csv")
+    _I_opt = None
+    if os.path.exists(_I_opt_path):
+        _I_opt = np.loadtxt(_I_opt_path, delimiter=",", comments="#")
+        assert _I_opt.shape == (len(times), 6), \
+            f"I_opt.csv shape mismatch: expected ({len(times)}, 6), got {_I_opt.shape}"
+        print(f"[pipeline] Loaded SRB inertia trajectory → inertia tracking active")
+        print(f"  Iyy ∈ [{_I_opt[:,1].min():.3f}, {_I_opt[:,1].max():.3f}] kg·m²")
+
     if not args.skip_ik:
         q_ik = run_ik_trajectory(ik, q_srb, feet_ext, stance_end, flight_end,
                                   arm_defaults=arm_defaults,
-                                  stance_ground_z=_stance_ground_z)
+                                  stance_ground_z=_stance_ground_z,
+                                  I_opt=_I_opt)
         # 4. Export
         export_ik_solution(q_ik, times, export_dir, model=ik.model)
     else:
@@ -683,4 +823,4 @@ if __name__ == "__main__":
     build_combined_xml(_G1_XML, _SRB_XML, _COMBINED, box_xml=box_xml)
 
     # 6. Visualize
-    visualize(q_ik, q_srb, times, _COMBINED, speed=args.speed)
+    visualize(q_ik, q_srb, times, _COMBINED, speed=args.speed, I_opt=_I_opt)

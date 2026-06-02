@@ -58,6 +58,10 @@ class CostWeights:
     Q_stance_px: float = 0.0
     Q_stance_align: float = 0.0  # penalises pitch + k*px misalignment during stance
     Q_landing_vel: float = 0.0   # penalises ||v_com|| and ||w_body|| during landing
+    Q_foot_com_x: float = 0.0        # penalises x-offset of each landing foot from CoM x at touchdown
+    Q_stance_foot_com_x: float = 0.0 # penalises x-offset of CoM from stance feet (x=0) during pre-jump
+    Q_stance_feet_com_x: float = 0.0 # penalises CoM x vs actual stance foot positions (p0_L, p0_R) during pre-jump
+    Q_I_dot: float = 0.0         # rate penalty on inertia changes ||I(k+1)-I(k)||² / dt
 
 
 @dataclass
@@ -117,6 +121,15 @@ class SolverConfig:
     # landing z held at goal[2].  Better for elevated-surface configs where the linear
     # guess creates large dynamics violations.
     smart_z_init: bool = False
+    # When True: centroidal inertia I(k) is added as a per-timestep decision variable.
+    # Requires ik/results/inertia_bounds.csv (run ik/sample_inertia_workspace.py first).
+    # The rotational dynamics change to d(I·ω)/dt = M_ext (angular momentum form),
+    # so inertia variation during flight correctly alters angular velocity.
+    variable_inertia: bool = False
+    # When True (default): only the diagonal terms Ixx/Iyy/Izz vary; off-diagonals
+    # Ixy/Ixz/Iyz are fixed at zero.  Correct for bilaterally symmetric maneuvers
+    # (backflip, jump).  Set False only for asymmetric motions.
+    variable_inertia_diagonal_only: bool = True
 
 
 @dataclass

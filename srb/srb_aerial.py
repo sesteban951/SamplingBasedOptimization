@@ -137,6 +137,29 @@ print(f"[dbg] config loaded: {sys.argv[1]}", flush=True)
 _stance_gz  = cfg.constraints.stance_ground_z
 _landing_gz = cfg.constraints.landing_ground_z
 
+_var_inertia = cfg.solver.variable_inertia
+
+_INERTIA_BOUNDS_CSV = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "ik", "results", "inertia_bounds.csv",
+)
+
+if _var_inertia:
+    if not os.path.exists(_INERTIA_BOUNDS_CSV):
+        raise FileNotFoundError(
+            f"variable_inertia=True but bounds not found: {_INERTIA_BOUNDS_CSV}\n"
+            "Run: conda run -n env_sbo python ik/sample_inertia_workspace.py"
+        )
+    _raw_bounds = np.loadtxt(_INERTIA_BOUNDS_CSV, delimiter=",", comments="#",
+                             dtype=str)
+    _I_min = np.array([float(r[1]) for r in _raw_bounds])   # [Ixx,Iyy,Izz,Ixy,Ixz,Iyz] min
+    _I_max = np.array([float(r[2]) for r in _raw_bounds])   # max
+    if cfg.solver.variable_inertia_diagonal_only:
+        # Pin off-diagonal terms to zero — correct for bilaterally symmetric maneuvers.
+        _I_min[3:] = 0.0
+        _I_max[3:] = 0.0
+    print(f"[dbg] inertia bounds loaded: Iyy ∈ [{_I_min[1]:.3f}, {_I_max[1]:.3f}] kg·m²")
+
 ##############################################################
 # Build initial and goal states from config
 ##############################################################
@@ -244,6 +267,14 @@ p_R_goal_W = ca.DM(p_com_goal_xy + (Rz_goal @ np.array([0.0, -srb.hip_offset, 0.
 # Setup the optimization problem
 ##############################################################
 
+def _to_I_mat(i6):
+    """6-vector [Ixx,Iyy,Izz,Ixy,Ixz,Iyz] → symmetric 3×3 (CasADi or numpy)."""
+    return ca.vertcat(
+        ca.horzcat(i6[0], i6[3], i6[4]),
+        ca.horzcat(i6[3], i6[1], i6[5]),
+        ca.horzcat(i6[4], i6[5], i6[2]),
+    )
+
 print("[dbg] building opti...", flush=True)
 opti = ca.Opti()
 
@@ -267,6 +298,15 @@ F_L = opti.variable(3, N)
 F_R = opti.variable(3, N)
 M_L = opti.variable(3, N)
 M_R = opti.variable(3, N)
+
+# centroidal inertia trajectory [Ixx, Iyy, Izz, Ixy, Ixz, Iyz] at each node
+if _var_inertia:
+    I_var = opti.variable(6, N + 1)
+    opti.subject_to(opti.bounded(_I_min, I_var, _I_max))
+    # Angular momentum L = I·ω in body frame (auxiliary variable — avoids ca.solve).
+    # Dynamics: L_{k+1} = L_k + dt*M_net_B  (linear, enforced in dynamics loop).
+    # Coupling: I_mat_k @ w_k = L_k          (bilinear, enforced after loop).
+    L_var = opti.variable(3, N + 1)
 
 ##############################################################
 # Touchdown-to-world mapping for landing feet (yaw-only)
@@ -441,12 +481,36 @@ for k in range(N):
         opti.subject_to(ca.sumsqr(r_L) >= L_min**2)
         opti.subject_to(ca.sumsqr(r_R) >= L_min**2)
 
-    # combined wrench
-    u = ca.vertcat(F_total, M_total)
-
     # dynamics
-    x_next = f(X[:, k], u, dt_k)
-    opti.subject_to(X[:, k + 1] == x_next)
+    if _var_inertia:
+        # d(I·ω)/dt = M_ext using angular momentum L = I·ω as auxiliary variable.
+        # Avoids ca.solve (which creates a dense symbolic Hessian).
+        # L dynamics are LINEAR; coupling I@w=L is BILINEAR — much better for IPOPT.
+        q_k  = X[3:7, k]
+        v_k  = X[7:10, k]
+        w_k  = X[10:13, k]
+        R_BW = kin.quat_to_rot_matrix_ca(q_k)   # body-to-world rotation
+
+        F_net_W = F_total + ca.vertcat(0.0, 0.0, -srb.m * srb.g)
+        M_net_B = R_BW.T @ M_total
+
+        # L dynamics: L_{k+1} = L_k + dt * M_net_B  (angular momentum conservation)
+        opti.subject_to(L_var[:, k + 1] == L_var[:, k] + dt_k * M_net_B)
+
+        # Position / quaternion / velocity dynamics (unchanged from fixed-I formulation)
+        w_quat = ca.vertcat(0, w_k)
+        q_dot  = 0.5 * kin.quat_mult_ca(q_k, w_quat)
+        p_next = X[0:3, k] + dt_k * v_k
+        q_next = q_k + dt_k * q_dot
+        q_next = q_next / ca.norm_2(q_next)
+        v_next = v_k + dt_k * (F_net_W / srb.m)
+
+        # w_{k+1} is not explicitly stepped; it is pinned by the coupling L=I@w below.
+        opti.subject_to(X[0:10, k + 1] == ca.vertcat(p_next, q_next, v_next))
+    else:
+        u      = ca.vertcat(F_total, M_total)
+        x_next = f(X[:, k], u, dt_k)
+        opti.subject_to(X[:, k + 1] == x_next)
 
 # Leg extension at liftoff (last stance node) and touchdown (first landing node)
 if cfg.constraints.L_extension_min > 0:
@@ -465,6 +529,12 @@ if cfg.constraints.L_extension_min > 0:
     r_R_td = p_R_land_W - p_com_k
     opti.subject_to(ca.sumsqr(r_L_td) >= L_ext2)
     opti.subject_to(ca.sumsqr(r_R_td) >= L_ext2)
+
+# L = I·ω coupling: bilinear constraint tying angular momentum, inertia, and
+# angular velocity at every node.  Simpler than the ca.solve formulation.
+if _var_inertia:
+    for k in range(N + 1):
+        opti.subject_to(_to_I_mat(I_var[:, k]) @ X[10:13, k] == L_var[:, k])
 
 print("[dbg] pz constraints...", flush=True)
 _c_pz = cfg.constraints.pitch_pz_coupling
@@ -673,6 +743,15 @@ for k in range(N):
             ca.sumsqr(X[7:10, k]) + ca.sumsqr(X[10:13, k])
         )
 
+    # stance foot-com x alignment: keep CoM x close to stance foot x (= 0)
+    if phase_k == "stance" and cfg.costs.Q_stance_foot_com_x > 0:
+        J += dt_k * 0.5 * cfg.costs.Q_stance_foot_com_x * X[0, k]**2
+
+    # stance foot-com x alignment using actual foot positions
+    if phase_k == "stance" and cfg.costs.Q_stance_feet_com_x > 0:
+        foot_mid_x = (p0_L_ca[0] + p0_R_ca[0]) / 2
+        J += dt_k * 0.5 * cfg.costs.Q_stance_feet_com_x * (X[0, k] - foot_mid_x)**2
+
 
     # force rate cost (skip across phase boundaries)
     if k < N - 1:
@@ -689,11 +768,22 @@ for k in range(N):
                 F_L[:, k+1], F_R[:, k+1], M_L[:, k+1], M_R[:, k+1],
                 dt_k)
 
+    # inertia rate cost — penalise rapid configuration changes across all transitions
+    if _var_inertia and cfg.costs.Q_I_dot > 0:
+        J += dt_k * 0.5 * cfg.costs.Q_I_dot * ca.sumsqr(I_var[:, k + 1] - I_var[:, k])
+
 # foot placement cost (body frame)
 J += srb.foot_placement_cost(p_L_land, p_R_land, p_L_goal, p_R_goal)
 
 # foot placement cost (world frame)
 J += srb.world_foot_placement_cost(p_L_land_xy_W, p_R_land_xy_W, p_L_goal_W, p_R_goal_W)
+
+# foot-com x alignment: penalise x offset of each landing foot from CoM x at touchdown
+if cfg.costs.Q_foot_com_x > 0:
+    com_td_x = X[0, flight_end]
+    J += 0.5 * cfg.costs.Q_foot_com_x * (
+        (p_L_land_xy_W[0] - com_td_x)**2 + (p_R_land_xy_W[0] - com_td_x)**2
+    )
 
 # terminal cost
 J += srb.terminal_cost(X[:, N], x_goal_ca)
@@ -708,8 +798,12 @@ opti.minimize(J)
 for k in range(N + 1):
     alpha = k / N
 
-    # com xy: always linear
-    p_xy_guess = (1 - alpha) * x0[:2] + alpha * x_goal[:2]
+    # com xy: tanh S-curve — stays near start during stance, transitions during flight,
+    # settles at goal during landing (better than linear for phased trajectories)
+    _s = 2.5
+    _tanh_lo = np.tanh(-_s)
+    alpha_tanh = (np.tanh(_s * (2 * alpha - 1)) - _tanh_lo) / (np.tanh(_s) - _tanh_lo)
+    p_xy_guess = (1 - alpha_tanh) * x0[:2] + alpha_tanh * x_goal[:2]
 
     if cfg.solver.smart_z_init:
         # Stance: hold at initial height (forces already balance there, zero dynamics violation).
@@ -759,6 +853,26 @@ for k in range(N):
 opti.set_initial(M_L, 0)
 opti.set_initial(M_R, 0)
 
+# inertia: start at nominal (standing) value — within bounds, good initial feasibility
+if _var_inertia:
+    I_nom_mat = np.array(srb.I)   # 3×3 numpy from CasADi DM
+    I_nom = np.array([
+        I_nom_mat[0, 0], I_nom_mat[1, 1], I_nom_mat[2, 2],
+        I_nom_mat[0, 1], I_nom_mat[0, 2], I_nom_mat[1, 2],
+    ])
+    opti.set_initial(I_var, np.tile(I_nom[:, None], (1, N + 1)))
+
+    # L_var initial guess: I_nom @ ω_ref at each node.
+    # stance/landing: ω≈0 → L=0.  flight: use SLERP-derived angular velocity.
+    L_guess = np.zeros((3, N + 1))
+    for k in range(N + 1):
+        if stance_end <= k < flight_end:
+            j = k - stance_end          # index into omega_ref_body (length N_flight)
+            j = min(j, N_flight - 1)
+            w_ref = omega_ref_body[j] / float(T_flight_nom / N_flight)
+            L_guess[:, k] = I_nom_mat @ w_ref
+    opti.set_initial(L_var, L_guess)
+
 ##############################################################
 # Solve
 ##############################################################
@@ -778,6 +892,9 @@ FL_sol = sol.value(F_L)
 FR_sol = sol.value(F_R)
 ML_sol = sol.value(M_L)
 MR_sol = sol.value(M_R)
+if _var_inertia:
+    I_var_sol = np.array(sol.value(I_var))   # (6, N+1)
+    L_var_sol = np.array(sol.value(L_var))   # (3, N+1)
 T_stance_sol = float(sol.value(T_stance))
 T_flight_sol = float(sol.value(T_flight))
 T_land_sol = float(sol.value(T_land))
@@ -899,5 +1016,8 @@ np.savetxt(save_dir + "force_left.csv",   FL_sol.T,      delimiter=",")
 np.savetxt(save_dir + "force_right.csv",  FR_sol.T,      delimiter=",")
 np.savetxt(save_dir + "moment_left.csv",  ML_sol.T,      delimiter=",")
 np.savetxt(save_dir + "moment_right.csv", MR_sol.T,      delimiter=",")
+if _var_inertia:
+    np.savetxt(save_dir + "I_opt.csv", I_var_sol.T, delimiter=",",
+               header="Ixx,Iyy,Izz,Ixy,Ixz,Iyz (N+1 rows, body-frame kg·m²)")
 
 print(f"\nSaved results to {save_dir}")
