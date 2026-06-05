@@ -139,26 +139,37 @@ _landing_gz = cfg.constraints.landing_ground_z
 
 _var_inertia = cfg.solver.variable_inertia
 
-_INERTIA_BOUNDS_CSV = os.path.join(
+_TUCK_SYM_NPZ = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "ik", "results", "inertia_bounds.csv",
+    "ik", "results", "inertia_tuck_sym.npz",
 )
 
 if _var_inertia:
-    if not os.path.exists(_INERTIA_BOUNDS_CSV):
+    if not os.path.exists(_TUCK_SYM_NPZ):
         raise FileNotFoundError(
-            f"variable_inertia=True but bounds not found: {_INERTIA_BOUNDS_CSV}\n"
+            f"variable_inertia=True but symmetric tuck curve not found: {_TUCK_SYM_NPZ}\n"
             "Run: conda run -n env_sbo python ik/sample_inertia_workspace.py"
         )
-    _raw_bounds = np.loadtxt(_INERTIA_BOUNDS_CSV, delimiter=",", comments="#",
-                             dtype=str)
-    _I_min = np.array([float(r[1]) for r in _raw_bounds])   # [Ixx,Iyy,Izz,Ixy,Ixz,Iyz] min
-    _I_max = np.array([float(r[2]) for r in _raw_bounds])   # max
-    if cfg.solver.variable_inertia_diagonal_only:
-        # Pin off-diagonal terms to zero — correct for bilaterally symmetric maneuvers.
-        _I_min[3:] = 0.0
-        _I_max[3:] = 0.0
-    print(f"[dbg] inertia bounds loaded: Iyy ∈ [{_I_min[1]:.3f}, {_I_max[1]:.3f}] kg·m²")
+    _sym = np.load(_TUCK_SYM_NPZ)
+    _tuck_grid = _sym['tuck']                       # (N_TUCK,)
+
+    # Degree-3 polynomial fits from the symmetric sweep (secondary DOFs = 0).
+    # Symmetric sweep gives a clean monotone curve that matches the actual
+    # backflip leg configuration — no lateral spread noise from random DOF sampling.
+    # Delta formulation: I_full(t) = srb.I + (I_poly(t) - I_poly(0))
+    # ensures I_full(0) == srb.I exactly → no discontinuity at phase boundaries.
+    _poly_Ixx = np.polyfit(_tuck_grid, _sym['Ixx_sym'], 3)
+    _poly_Iyy = np.polyfit(_tuck_grid, _sym['Iyy_sym'], 3)
+    _poly_Izz = np.polyfit(_tuck_grid, _sym['Izz_sym'], 3)
+    _Ixx0 = float(np.polyval(_poly_Ixx, 0.0))
+    _Iyy0 = float(np.polyval(_poly_Iyy, 0.0))
+    _Izz0 = float(np.polyval(_poly_Izz, 0.0))
+
+    _poly_fL = [np.polyfit(_tuck_grid, _sym['foot_pos_L_sym'][:, i], 3) for i in range(3)]
+    _poly_fR = [np.polyfit(_tuck_grid, _sym['foot_pos_R_sym'][:, i], 3) for i in range(3)]
+
+    print(f"[dbg] tuck sym curve: Iyy ∈ [{_sym['Iyy_sym'].min():.3f}, {_sym['Iyy_sym'].max():.3f}] kg·m²")
+    print(f"[dbg] delta Iyy at full tuck: {float(np.polyval(_poly_Iyy, 1.0)) - _Iyy0:+.3f} kg·m²")
 
 ##############################################################
 # Build initial and goal states from config
@@ -275,6 +286,28 @@ def _to_I_mat(i6):
         ca.horzcat(i6[4], i6[5], i6[2]),
     )
 
+def _polyval_ca(coeffs, t_sym):
+    """Horner's method polynomial evaluation — works with CasADi symbolics."""
+    result = ca.DM(float(coeffs[0]))
+    for c in coeffs[1:]:
+        result = result * t_sym + float(c)
+    return result
+
+def _I_mat_from_tuck(t_sym):
+    """Full robot inertia = srb.I + delta_I(tuck).  delta=0 at tuck=0 by construction.
+    All three diagonals vary: Ixx/Iyy decrease with tuck (sagittal leg tuck),
+    Izz increases slightly (mass moves forward in sagittal plane).
+    Twist-axis (Izz) control via arm configuration is a separate future extension."""
+    I_np = np.array(srb.I)
+    Ixx = float(I_np[0, 0]) + _polyval_ca(_poly_Ixx, t_sym) - _Ixx0
+    Iyy = float(I_np[1, 1]) + _polyval_ca(_poly_Iyy, t_sym) - _Iyy0
+    Izz = float(I_np[2, 2]) + _polyval_ca(_poly_Izz, t_sym) - _Izz0
+    return ca.vertcat(
+        ca.horzcat(Ixx, 0.0, 0.0),
+        ca.horzcat(0.0, Iyy, 0.0),
+        ca.horzcat(0.0, 0.0, Izz),
+    )
+
 print("[dbg] building opti...", flush=True)
 opti = ca.Opti()
 
@@ -299,14 +332,32 @@ F_R = opti.variable(3, N)
 M_L = opti.variable(3, N)
 M_R = opti.variable(3, N)
 
-# centroidal inertia trajectory [Ixx, Iyy, Izz, Ixy, Ixz, Iyz] at each node
+# Tuck parameter t_k ∈ [0,1] at each flight node.
+# t=0: legs extended (liftoff/touchdown); t=1: fully tucked.
+# Inertia I(t) and foot positions foot(t) are derived from tuck via polynomial fits,
+# ensuring physical consistency between the aerial configuration and body inertia.
 if _var_inertia:
-    I_var = opti.variable(6, N + 1)
-    opti.subject_to(opti.bounded(_I_min, I_var, _I_max))
+    tuck_flight = opti.variable(N_flight + 1)   # one scalar per flight node
+    opti.subject_to(opti.bounded(0.0, tuck_flight, 1.0))
+    opti.subject_to(tuck_flight[0] == 0.0)              # legs extended at liftoff
+    opti.subject_to(tuck_flight[N_flight] == 0.0)       # legs extended at touchdown
+    if cfg.solver.max_tuck_dot is not None:
+        _dt_max = cfg.solver.max_tuck_dot * dt_nom
+        for k in range(N_flight):
+            opti.subject_to(opti.bounded(-_dt_max, tuck_flight[k + 1] - tuck_flight[k], _dt_max))
     # Angular momentum L = I·ω in body frame (auxiliary variable — avoids ca.solve).
     # Dynamics: L_{k+1} = L_k + dt*M_net_B  (linear, enforced in dynamics loop).
-    # Coupling: I_mat_k @ w_k = L_k          (bilinear, enforced after loop).
+    # Coupling: I_mat(tuck_k) @ w_k = L_k   (bilinear, enforced after loop).
     L_var = opti.variable(3, N + 1)
+
+    def _tuck_at(k):
+        """CasADi tuck expression at trajectory node k (0 outside flight)."""
+        if stance_end <= k <= flight_end:
+            return tuck_flight[k - stance_end]
+        return ca.DM(0.0)
+
+    def _I_mat_at(k):
+        return _I_mat_from_tuck(_tuck_at(k))
 
 ##############################################################
 # Touchdown-to-world mapping for landing feet (yaw-only)
@@ -531,10 +582,10 @@ if cfg.constraints.L_extension_min > 0:
     opti.subject_to(ca.sumsqr(r_R_td) >= L_ext2)
 
 # L = I·ω coupling: bilinear constraint tying angular momentum, inertia, and
-# angular velocity at every node.  Simpler than the ca.solve formulation.
+# angular velocity at every node.  Inertia is derived from the tuck polynomial.
 if _var_inertia:
     for k in range(N + 1):
-        opti.subject_to(_to_I_mat(I_var[:, k]) @ X[10:13, k] == L_var[:, k])
+        opti.subject_to(_I_mat_at(k) @ X[10:13, k] == L_var[:, k])
 
 print("[dbg] pz constraints...", flush=True)
 _c_pz = cfg.constraints.pitch_pz_coupling
@@ -768,9 +819,10 @@ for k in range(N):
                 F_L[:, k+1], F_R[:, k+1], M_L[:, k+1], M_R[:, k+1],
                 dt_k)
 
-    # inertia rate cost — penalise rapid configuration changes across all transitions
-    if _var_inertia and cfg.costs.Q_I_dot > 0:
-        J += dt_k * 0.5 * cfg.costs.Q_I_dot * ca.sumsqr(I_var[:, k + 1] - I_var[:, k])
+    # tuck rate cost — penalise rapid tuck changes during flight
+    if _var_inertia and cfg.costs.Q_I_dot > 0 and stance_end <= k < flight_end:
+        fi = k - stance_end
+        J += dt_k * 0.5 * cfg.costs.Q_I_dot * (tuck_flight[fi + 1] - tuck_flight[fi])**2
 
 # foot placement cost (body frame)
 J += srb.foot_placement_cost(p_L_land, p_R_land, p_L_goal, p_R_goal)
@@ -853,22 +905,19 @@ for k in range(N):
 opti.set_initial(M_L, 0)
 opti.set_initial(M_R, 0)
 
-# inertia: start at nominal (standing) value — within bounds, good initial feasibility
+# tuck: bell-curve guess (0 at liftoff/touchdown, peak 0.5 at midpoint).
+# L_var: I_nom @ ω_ref at each node (nominal inertia matches tuck=0).
 if _var_inertia:
-    I_nom_mat = np.array(srb.I)   # 3×3 numpy from CasADi DM
-    I_nom = np.array([
-        I_nom_mat[0, 0], I_nom_mat[1, 1], I_nom_mat[2, 2],
-        I_nom_mat[0, 1], I_nom_mat[0, 2], I_nom_mat[1, 2],
-    ])
-    opti.set_initial(I_var, np.tile(I_nom[:, None], (1, N + 1)))
+    I_nom_mat = np.array(srb.I)
+    for fi in range(N_flight + 1):
+        t_norm = fi / N_flight
+        tuck_guess = 4.0 * 0.5 * t_norm * (1.0 - t_norm)  # ∈ [0, 0.5]
+        opti.set_initial(tuck_flight[fi], tuck_guess)
 
-    # L_var initial guess: I_nom @ ω_ref at each node.
-    # stance/landing: ω≈0 → L=0.  flight: use SLERP-derived angular velocity.
     L_guess = np.zeros((3, N + 1))
     for k in range(N + 1):
         if stance_end <= k < flight_end:
-            j = k - stance_end          # index into omega_ref_body (length N_flight)
-            j = min(j, N_flight - 1)
+            j = min(k - stance_end, N_flight - 1)
             w_ref = omega_ref_body[j] / float(T_flight_nom / N_flight)
             L_guess[:, k] = I_nom_mat @ w_ref
     opti.set_initial(L_var, L_guess)
@@ -893,8 +942,18 @@ FR_sol = sol.value(F_R)
 ML_sol = sol.value(M_L)
 MR_sol = sol.value(M_R)
 if _var_inertia:
-    I_var_sol = np.array(sol.value(I_var))   # (6, N+1)
-    L_var_sol = np.array(sol.value(L_var))   # (3, N+1)
+    tuck_sol  = np.array(sol.value(tuck_flight)).flatten()   # (N_flight+1,)
+    L_var_sol = np.array(sol.value(L_var))                   # (3, N+1)
+
+    # Reconstruct full-trajectory inertia from tuck (for pipeline compatibility).
+    I_np = np.array(srb.I)
+    I_var_sol = np.zeros((6, N + 1))
+    for k in range(N + 1):
+        t_k = float(tuck_sol[k - stance_end]) if stance_end <= k <= flight_end else 0.0
+        I_var_sol[0, k] = float(I_np[0, 0]) + float(np.polyval(_poly_Ixx, t_k)) - _Ixx0
+        I_var_sol[1, k] = float(I_np[1, 1]) + float(np.polyval(_poly_Iyy, t_k)) - _Iyy0
+        I_var_sol[2, k] = float(I_np[2, 2]) + float(np.polyval(_poly_Izz, t_k)) - _Izz0
+        # off-diagonals = 0 (diagonal-only; bilateral symmetry)
 T_stance_sol = float(sol.value(T_stance))
 T_flight_sol = float(sol.value(T_flight))
 T_land_sol = float(sol.value(T_land))
@@ -1019,5 +1078,19 @@ np.savetxt(save_dir + "moment_right.csv", MR_sol.T,      delimiter=",")
 if _var_inertia:
     np.savetxt(save_dir + "I_opt.csv", I_var_sol.T, delimiter=",",
                header="Ixx,Iyy,Izz,Ixy,Ixz,Iyz (N+1 rows, body-frame kg·m²)")
+    np.savetxt(save_dir + "tuck_opt.csv", tuck_sol, delimiter=",",
+               header="tuck parameter at each flight node (N_flight+1 values)")
+    # Aerial foot positions in pelvis frame — for IK pipeline flight phase.
+    foot_aerial = np.zeros((N_flight + 1, 6))
+    for fi in range(N_flight + 1):
+        t_k = float(tuck_sol[fi])
+        foot_aerial[fi, 0] = float(np.polyval(_poly_fL[0], t_k))
+        foot_aerial[fi, 1] = float(np.polyval(_poly_fL[1], t_k))
+        foot_aerial[fi, 2] = float(np.polyval(_poly_fL[2], t_k))
+        foot_aerial[fi, 3] = float(np.polyval(_poly_fR[0], t_k))
+        foot_aerial[fi, 4] = float(np.polyval(_poly_fR[1], t_k))
+        foot_aerial[fi, 5] = float(np.polyval(_poly_fR[2], t_k))
+    np.savetxt(save_dir + "aerial_foot_pos.csv", foot_aerial, delimiter=",",
+               header="fLx,fLy,fLz,fRx,fRy,fRz pelvis-frame (N_flight+1 rows)")
 
 print(f"\nSaved results to {save_dir}")

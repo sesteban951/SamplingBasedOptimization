@@ -88,6 +88,7 @@ config = AerialConfig(
     ),
     solver=SolverConfig(
         max_iter=5000,
+        reject_self_collision=True,
     ),
     save_dir="./results/srb/srb_aerial/",
 )

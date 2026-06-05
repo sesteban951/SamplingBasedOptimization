@@ -130,6 +130,20 @@ class SolverConfig:
     # Ixy/Ixz/Iyz are fixed at zero.  Correct for bilaterally symmetric maneuvers
     # (backflip, jump).  Set False only for asymmetric motions.
     variable_inertia_diagonal_only: bool = True
+    # Hard upper bound on per-component inertia rate of change (kg·m²/s).
+    # Prevents sharp oscillations that make IPOPT sensitive.  Applied as
+    # |I_j(k+1) - I_j(k)| <= max_I_dot * dt_nom per component per step.
+    # None = unconstrained (soft Q_I_dot penalty only).
+    max_I_dot: Optional[float] = None
+    # Hard upper bound on tuck rate (1/s) when variable_inertia=True.
+    # Applied as |tuck(k+1) - tuck(k)| <= max_tuck_dot * dt_nom per flight step.
+    # None = unconstrained (soft Q_I_dot penalty only).
+    max_tuck_dot: Optional[float] = None
+    # When True: each IK solution is checked for self-collision via pinocchio's
+    # collision engine.  Frames in collision are flagged with a warning but kept
+    # (the IK result is still used).  Costs extra time per frame due to geometry
+    # loading on first use.
+    reject_self_collision: bool = False
 
 
 @dataclass

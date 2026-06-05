@@ -14,7 +14,7 @@ import os
 import numpy as np
 import pinocchio as pin
 
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_REPO_ROOT    = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _DEFAULT_URDF = os.path.join(_REPO_ROOT, "models", "g1", "g1_29dof_rev_1_0.urdf")
 
 
@@ -54,6 +54,7 @@ class G1IK:
         hi = self.model.upperPositionLimit
         self._leg_lo = np.array([lo[qi] for qi in self._leg_qidx])
         self._leg_hi = np.array([hi[qi] for qi in self._leg_qidx])
+
 
     # ------------------------------------------------------------------
     # Main solver

@@ -70,6 +70,8 @@ config = AerialConfig(
     solver=SolverConfig(
         max_iter=5000,
         variable_inertia=True,
+        max_tuck_dot=4.0,  # 1/s — allows 0→1 tuck in 0.25 s at dt=0.02
+        reject_self_collision=True,
     ),
     save_dir="./results/srb/backflip_varinertia/",
 )

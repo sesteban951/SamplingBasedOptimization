@@ -31,6 +31,8 @@ from utils.kinematics.g1_ipopt_ik import G1IPOPTIK
 # ---------------------------------------------------------------------------
 
 _REPO_ROOT  = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_G1_URDF    = os.path.join(_REPO_ROOT, "models", "g1", "g1_29dof_rev_1_0.urdf")
+_G1_PKG_DIRS = [os.path.join(_REPO_ROOT, "models", "g1")]
 _G1_XML     = os.path.join(_REPO_ROOT, "models", "g1", "g1_29dof_rev_1_0.xml")
 _SRB_XML    = os.path.join(_REPO_ROOT, "models", "srb", "srb.xml")
 _COMBINED   = os.path.join(_REPO_ROOT, "models", "g1", "g1_srb_combined.xml")
@@ -133,6 +135,19 @@ def _mj_to_pin_quat(qw, qx, qy, qz):
     return np.array([qx, qy, qz, qw])
 
 
+_COM_PELVIS_NOMINAL: float = None  # cached at first call
+
+
+def _get_com_pelvis_dz(ik) -> float:
+    """CoM-pelvis z offset at nominal standing pose (~-0.089 m). Computed once."""
+    global _COM_PELVIS_NOMINAL
+    if _COM_PELVIS_NOMINAL is None:
+        q_nom = ik.standing_config(0.79)
+        pin.centerOfMass(ik.model, ik.data, q_nom)
+        _COM_PELVIS_NOMINAL = float(ik.data.com[0][2] - q_nom[2])
+    return _COM_PELVIS_NOMINAL
+
+
 def _build_q0(ik, q_srb_row: np.ndarray, q_warm=None,
               warmstart_min_drop: float = 0.03, stance_ground_z: float = 0.0):
     """
@@ -141,9 +156,10 @@ def _build_q0(ik, q_srb_row: np.ndarray, q_warm=None,
     or set from standing_config's squat-biased heuristic.
 
     For IPOPT IK: q0[0:3] is used as p_com_des.  The SRB approximates CoM ≈ pelvis,
-    but the actual G1 CoM is ~0.089 m below the pelvis.  We correct q0[2] to the
-    actual robot CoM (evaluated at the warm-start config) so IPOPT targets a feasible
-    height.  The solver will set pelvis_z ≈ SRB height to satisfy com(q) = corrected.
+    so q_srb[2] is the intended CoM height.  We correct q0[2] by the CoM-pelvis
+    offset so IPOPT targets the right absolute CoM height.  The offset is taken from
+    q_warm (previous solved frame — guaranteed correct foot placement) when available,
+    falling back to the nominal standing offset on the first frame.
 
     stance_ground_z: elevation of the stance surface (e.g. box height).  Used to
     compute the correct squat depth for the joint initial guess.
@@ -158,10 +174,24 @@ def _build_q0(ik, q_srb_row: np.ndarray, q_warm=None,
     if q_warm is not None and drop > warmstart_min_drop:
         q0[7:] = q_warm[7:]
     if isinstance(ik, G1IPOPTIK):
-        # Correct the CoM target: compute actual robot CoM at this warm-start config
-        # and use that as p_com_des instead of the raw SRB CoM height.
-        pin.centerOfMass(ik.model, ik.data, q0)
-        q0[2] = ik.data.com[0][2]
+        # Compute CoM-pelvis offset from q_warm (has correct foot placement from the
+        # previous IPOPT solve) or fall back to the nominal standing offset.
+        # Do NOT use q0 here: standing_config produces feet at wrong z, making the
+        # warm-start CoM unreliable as a p_com_des target.
+        # Only trust q_warm's offset when its feet are near the expected floor z;
+        # liftoff/flight frames have feet in the air and give a wrong offset.
+        if q_warm is not None:
+            pin.framesForwardKinematics(ik.model, ik.data, q_warm)
+            q_warm_lfoot_z = float(ik.data.oMf[ik.l_foot_id].translation[2])
+            expected_foot_z = stance_ground_z + ik.ANKLE_HEIGHT
+            if abs(q_warm_lfoot_z - expected_foot_z) < 0.015:  # within 15mm of floor
+                pin.centerOfMass(ik.model, ik.data, q_warm)
+                com_pelvis_dz = float(ik.data.com[0][2] - q_warm[2])
+            else:
+                com_pelvis_dz = _get_com_pelvis_dz(ik)
+        else:
+            com_pelvis_dz = _get_com_pelvis_dz(ik)
+        q0[2] = q_srb_row[2] + com_pelvis_dz
     return q0
 
 
@@ -174,13 +204,82 @@ def _row_to_I_mat(row: np.ndarray) -> np.ndarray:
     ])
 
 
+# Nominal standing Iyy [kg·m²] — from srb.xml; used to compute tuck ratio.
+_IYY_NOM = 3.301
+
+# Target flight tuck configuration (leg joints only, 12-vector).
+# Chosen via viz_crouch_configs.py at t=0.90 — hip=-2.25, knee=2.59, ankle=+0.45.
+# Negative hip_pitch = hip flexion (thigh/foot swings forward+up toward chest).
+_FLIGHT_TUCK_LEGS = np.array([
+    -2.247, 0.0, 0.0,  2.588,  0.447, 0.0,   # left  hip_p/r/y, knee, ankle_p/r
+    -2.247, 0.0, 0.0,  2.588,  0.447, 0.0,   # right
+])
+
+def _tuck_q0(ik, q_srb_row: np.ndarray, tuck_ratio: float,
+             arm_defaults: np.ndarray = None) -> np.ndarray:
+    """
+    Generate a tuck-biased initial guess for flight IK.
+
+    tuck_ratio ∈ [0, 1]: 0 = standing, 1 = maximum tuck.
+    Computed from the desired Iyy: tuck_ratio = 1 - Iyy_des / Iyy_nom.
+
+    Joint angles are relative to the pelvis frame, so this warm-start works
+    regardless of world-frame body orientation (standing, inverted, etc.).
+    The pelvis position/orientation slots (q[0:7]) are filled from q_srb_row
+    and will be overwritten by the CoM correction in the caller.
+    """
+    q = pin.neutral(ik.model)
+    q[0:3] = q_srb_row[0:3]
+    q[3:7] = _mj_to_pin_quat(q_srb_row[3], q_srb_row[4], q_srb_row[5], q_srb_row[6])
+    if arm_defaults is not None:
+        q[19:] = arm_defaults[19:]
+
+    tr = float(np.clip(tuck_ratio, 0.0, 1.0))
+    hip_p   = tr * 2.0          # hip flexion 0 → 2.0 rad
+    knee    = 0.05 + tr * 2.2   # knee bend   0.05 → 2.25 rad
+    ankle_p = -tr * 0.3         # ankle pitch 0 → -0.3 rad
+
+    for name, angle in [
+        ("left_hip_pitch_joint",    hip_p),
+        ("right_hip_pitch_joint",   hip_p),
+        ("left_knee_joint",         knee),
+        ("right_knee_joint",        knee),
+        ("left_ankle_pitch_joint",  ankle_p),
+        ("right_ankle_pitch_joint", ankle_p),
+    ]:
+        jid = ik.model.getJointId(name)
+        q[ik.model.joints[jid].idx_q] = angle
+
+    return q
+
+
+def _build_collision_checker(model):
+    """Lazily build a pinocchio collision model+data for self-collision queries."""
+    geom_model = pin.GeometryModel()
+    pin.buildGeomFromUrdf(model, _G1_URDF, pin.COLLISION, geom_model, _G1_PKG_DIRS)
+    geom_model.addAllCollisionPairs()
+    return geom_model, geom_model.createData()
+
+
+def _check_self_collision(model, data, geom_model, geom_data, q) -> bool:
+    pin.computeCollisions(model, data, geom_model, geom_data, q, True)
+    return any(geom_data.collisionResults[k].isCollision()
+               for k in range(len(geom_model.collisionPairs)))
+
+
 def run_ik_trajectory(ik: G1IK, q_srb: np.ndarray, feet_ext: np.ndarray,
                       stance_end: int, flight_end: int,
                       arm_defaults: np.ndarray = None,
                       stance_ground_z: float = 0.0,
                       I_opt: np.ndarray = None,
                       w_inertia_contact: float = 1e-3,
-                      w_inertia_flight: float = 0.5):
+                      w_inertia_flight: float = 2.0,
+                      w_sym_flight: float = 2.0,
+                      w_reg_flight: float = 0.01,
+
+                      reject_self_collision: bool = False,
+                      times: np.ndarray = None,
+                      q_dot_max_flight: float = 10.0):
     """
     Returns q_ik (N+1, 36) pinocchio configuration at every timestep.
 
@@ -191,6 +290,12 @@ def run_ik_trajectory(ik: G1IK, q_srb: np.ndarray, feet_ext: np.ndarray,
            None → inertia cost disabled (uses solver default weight which is 0).
     w_inertia_contact: inertia cost weight during stance/landing (low, foot cost dominates).
     w_inertia_flight:  inertia cost weight during flight (higher, no foot constraint).
+    w_sym_flight:      bilateral symmetry cost weight during flight.
+    w_reg_flight:      joint regularisation weight during flight.
+
+    times:             (N+1,) timestamps [s] for computing per-frame dt.  None → dt=0.02 s.
+    q_dot_max_flight:  max joint velocity [rad/s] as box constraints during flight IK.
+                       0 = disabled.
     """
     N = q_srb.shape[0] - 1
     q_ik = np.zeros((N + 1, ik.model.nq))
@@ -199,6 +304,21 @@ def run_ik_trajectory(ik: G1IK, q_srb: np.ndarray, feet_ext: np.ndarray,
     landing_foot_z = ik.ANKLE_HEIGHT  # landing always on ground
 
     use_inertia = (I_opt is not None) and isinstance(ik, G1IPOPTIK)
+    use_ipopt   = isinstance(ik, G1IPOPTIK)
+
+    # Per-frame dt array — used for velocity box constraints in flight IK.
+    _nom_dt = 0.02
+    if times is not None:
+        _dt_arr = np.diff(times.astype(float))
+        _dt_arr = np.concatenate([[_nom_dt], _dt_arr])
+    else:
+        _dt_arr = np.full(N + 1, _nom_dt)
+
+    geom_model = geom_data = None
+    if reject_self_collision:
+        print("[pipeline] Building self-collision model ...")
+        geom_model, geom_data = _build_collision_checker(ik.model)
+        print(f"  {len(geom_model.collisionPairs)} collision pairs loaded.")
 
     # Pre-fill upper-body defaults on every frame — IK only overwrites leg joints
     if arm_defaults is not None:
@@ -207,20 +327,30 @@ def run_ik_trajectory(ik: G1IK, q_srb: np.ndarray, feet_ext: np.ndarray,
     # ---- STANCE ----
     print("[pipeline] Running stance IK ...")
     q_warm = None
+    p_l_prev = np.array([feet_ext[0, 0], feet_ext[0, 1], stance_foot_z])
+    p_r_prev = np.array([feet_ext[0, 2], feet_ext[0, 3], stance_foot_z])
     for i in range(stance_end):
         q0 = _build_q0(ik, q_srb[i], q_warm, stance_ground_z=stance_ground_z)
         if arm_defaults is not None:
-            q0[19:] = arm_defaults[19:]   # IK only updates leg joints; these survive
+            q0[19:] = arm_defaults[19:]
         oMl = pin.SE3(np.eye(3), np.array([feet_ext[i,0], feet_ext[i,1], stance_foot_z]))
         oMr = pin.SE3(np.eye(3), np.array([feet_ext[i,2], feet_ext[i,3], stance_foot_z]))
         I_des_i = _row_to_I_mat(I_opt[i]) if use_inertia else None
         q_sol, ok, errs = ik.solve(q0, oMl, oMr,
                                    I_des=I_des_i,
-                                   w_inertia=w_inertia_contact if use_inertia else None)
+                                   w_inertia=w_inertia_contact if use_inertia else None,
+                                   p_l_prev=p_l_prev, p_r_prev=p_r_prev,
+                                   w_foot_vel=0.1 if use_ipopt else 0.0,
+                                   floor_z=stance_foot_z if use_ipopt else -1000.0)
         if not ok and errs[-1] > 1e-3:
             print(f"  [warn] stance frame {i}: IK did not converge (err={errs[-1]:.2e})")
+        if geom_model and _check_self_collision(ik.model, ik.data, geom_model, geom_data, q_sol):
+            print(f"  [warn] stance frame {i}: self-collision detected")
         q_ik[i] = q_sol
         q_warm = q_sol
+        pin.framesForwardKinematics(ik.model, ik.data, q_sol)
+        p_l_prev = ik.data.oMf[ik.l_foot_id].translation.copy()
+        p_r_prev = ik.data.oMf[ik.r_foot_id].translation.copy()
 
     # ---- FLIGHT — interpolate leg joints, then refine with inertia IK ----
     # Pre-compute IK at the first landing frame so flight interpolation ends exactly
@@ -228,7 +358,10 @@ def run_ik_trajectory(ik: G1IK, q_srb: np.ndarray, feet_ext: np.ndarray,
     print("[pipeline] Interpolating flight joints ...")
     joints_takeoff = q_ik[stance_end - 1, 7:].copy()
     # Warm-start touchdown IK from liftoff config — same standing-like pose, avoids cold-start
-    q0_td = _build_q0(ik, q_srb[flight_end], q_warm=q_ik[stance_end - 1])
+    # For touchdown, always use q_warm joints (warmstart_min_drop=0) — the liftoff
+    # configuration is the best available warm-start for landing, regardless of squat depth.
+    q0_td = _build_q0(ik, q_srb[flight_end], q_warm=q_ik[stance_end - 1],
+                      warmstart_min_drop=0.0)
     if arm_defaults is not None:
         q0_td[19:] = arm_defaults[19:]
     oMl_td = pin.SE3(np.eye(3), np.array([feet_ext[flight_end, 0], feet_ext[flight_end, 1], landing_foot_z]))
@@ -236,9 +369,12 @@ def run_ik_trajectory(ik: G1IK, q_srb: np.ndarray, feet_ext: np.ndarray,
     I_des_td = _row_to_I_mat(I_opt[flight_end]) if use_inertia else None
     q_td, ok_td, errs_td = ik.solve(q0_td, oMl_td, oMr_td,
                                      I_des=I_des_td,
-                                     w_inertia=w_inertia_contact if use_inertia else None)
+                                     w_inertia=w_inertia_contact if use_inertia else None,
+                                     floor_z=landing_foot_z if use_ipopt else -1000.0)
     if not ok_td and errs_td[-1] > 1e-3:
         print(f"  [warn] touchdown frame {flight_end}: IK did not converge (err={errs_td[-1]:.2e})")
+    if geom_model and _check_self_collision(ik.model, ik.data, geom_model, geom_data, q_td):
+        print(f"  [warn] touchdown frame {flight_end}: self-collision detected")
     joints_touchdown = q_td[7:].copy()
 
     # Pelvis position during flight — interpolate per-axis CoM→pelvis offsets so
@@ -260,7 +396,10 @@ def run_ik_trajectory(ik: G1IK, q_srb: np.ndarray, feet_ext: np.ndarray,
 
     # Flight inertia refinement — if inertia tracking is active, run a lightweight
     # IPOPT solve for each flight frame: CoM equality + inertia cost, no foot targets.
-    # The interpolated pose above is used as the warm-start.
+    # Warm-start: tuck-biased config scaled by the desired Iyy ratio so the solver
+    # starts near the correct joint-space branch (not the standing/interpolated one).
+    # CoM target: offset computed from the last *converged* frame (q_flight_warm)
+    # rather than from the (potentially bad) interpolated joints.
     if use_inertia:
         print("[pipeline] Running flight inertia IK ...")
         # Dummy foot targets — ignored when w_foot=0
@@ -268,24 +407,40 @@ def run_ik_trajectory(ik: G1IK, q_srb: np.ndarray, feet_ext: np.ndarray,
         oMr_dummy = pin.SE3(np.eye(3), np.array([0.0, -ik.HIP_WIDTH, ik.ANKLE_HEIGHT]))
         q_flight_warm = q_ik[stance_end - 1]
         for idx, i in enumerate(range(stance_end, flight_end)):
-            q0_fl = q_ik[i].copy()   # warm-start from interpolated pose
-            if arm_defaults is not None:
-                q0_fl[19:] = arm_defaults[19:]
-            q0_fl[0:3] = q_srb[i, 0:3]
-            q0_fl[3:7] = _mj_to_pin_quat(q_srb[i,3], q_srb[i,4], q_srb[i,5], q_srb[i,6])
-            # Correct CoM target the same way _build_q0 does for IPOPT
-            pin.centerOfMass(ik.model, ik.data, q0_fl)
-            q0_fl[2] = ik.data.com[0][2]
+            Iyy_des = I_opt[i, 1]
+            tuck_ratio = float(np.clip(1.0 - Iyy_des / _IYY_NOM, 0.0, 1.0))
+
+            # Tuck-biased warm-start: joints pre-bent according to inertia ratio.
+            # Body-frame joint angles are orientation-independent, so this works at
+            # any pitch angle (including inverted flight during a backflip).
+            q0_fl = _tuck_q0(ik, q_srb[i], tuck_ratio, arm_defaults)
+
+            # CoM target: use the com-pelvis offset from the last converged frame.
+            # Computing it from the tuck warm-start would give a wrong target
+            # because the tuck joints don't yet match the SRB CoM height.
+            pin.centerOfMass(ik.model, ik.data, q_flight_warm)
+            com_pelvis_dz = ik.data.com[0][2] - q_flight_warm[2]  # ~-0.089 m
+            q0_fl[0:2] = q_srb[i, 0:2]                      # x,y from SRB
+            q0_fl[2]   = q_srb[i, 2] + com_pelvis_dz        # z: SRB pelvis + offset
+
             I_des_fl = _row_to_I_mat(I_opt[i])
+            # Foot-velocity cost disabled during flight (feet move by design);
+            # separation constraints kept to prevent leg crossing during tuck.
             q_fl, ok_fl, _ = ik.solve(q0_fl, oMl_dummy, oMr_dummy,
                                        q_prev=q_flight_warm,
-                                       w_reg=0.05,
+                                       w_reg=w_reg_flight,
                                        I_des=I_des_fl,
                                        w_inertia=w_inertia_flight,
-                                       w_foot=0.0)
-            # Keep pelvis orientation and CoM; only update leg joints
-            q_ik[i, 7:19] = q_fl[7:19]
-            q_flight_warm = q_fl
+                                       w_foot=0.0,
+                                       w_sym=w_sym_flight,
+                                       q_dot_max=q_dot_max_flight,
+                                       dt=float(_dt_arr[i]))
+            if ok_fl:
+                q_ik[i, 7:19] = q_fl[7:19]
+                q_flight_warm = q_fl
+            else:
+                print(f"  [warn] flight frame {i} (tuck={tuck_ratio:.2f}): IK did not converge — keeping interpolated joints")
+                q_flight_warm = q_ik[i].copy()
 
     # ---- LANDING ----
     # w_reg penalises ||q_legs - q_prev_legs||² to keep the solver on the same
@@ -293,6 +448,9 @@ def run_ik_trajectory(ik: G1IK, q_srb: np.ndarray, feet_ext: np.ndarray,
     print("[pipeline] Running landing IK ...")
     q_ik[flight_end] = q_td   # already solved above
     q_warm = q_td
+    pin.framesForwardKinematics(ik.model, ik.data, q_td)
+    p_l_prev = ik.data.oMf[ik.l_foot_id].translation.copy()
+    p_r_prev = ik.data.oMf[ik.r_foot_id].translation.copy()
     for i in range(flight_end + 1, N + 1):
         q0 = _build_q0(ik, q_srb[i], q_warm)
         if arm_defaults is not None:
@@ -302,11 +460,19 @@ def run_ik_trajectory(ik: G1IK, q_srb: np.ndarray, feet_ext: np.ndarray,
         I_des_i = _row_to_I_mat(I_opt[i]) if use_inertia else None
         q_sol, ok, errs = ik.solve(q0, oMl, oMr,
                                    I_des=I_des_i,
-                                   w_inertia=w_inertia_contact if use_inertia else None)
+                                   w_inertia=w_inertia_contact if use_inertia else None,
+                                   p_l_prev=p_l_prev, p_r_prev=p_r_prev,
+                                   w_foot_vel=0.1 if use_ipopt else 0.0,
+                                   floor_z=landing_foot_z if use_ipopt else -1000.0)
         if not ok and errs[-1] > 1e-3:
             print(f"  [warn] landing frame {i}: IK did not converge (err={errs[-1]:.2e})")
+        if geom_model and _check_self_collision(ik.model, ik.data, geom_model, geom_data, q_sol):
+            print(f"  [warn] landing frame {i}: self-collision detected")
         q_ik[i] = q_sol
         q_warm = q_sol
+        pin.framesForwardKinematics(ik.model, ik.data, q_sol)
+        p_l_prev = ik.data.oMf[ik.l_foot_id].translation.copy()
+        p_r_prev = ik.data.oMf[ik.r_foot_id].translation.copy()
 
     return q_ik
 
@@ -441,6 +607,23 @@ def _build_joint_remap(model: pin.Model):
         if jname in pin_joints:
             pairs.append((pin_joints[jname], 8 + dst_col))  # 8 = 1 (time) + 7 (base cols)
     return pairs
+
+
+def _pad_trajectory(q_ik: np.ndarray, times: np.ndarray,
+                    hold_seconds: float = 1.0, dt: float = 0.02):
+    """
+    Prepend the first frame and append the last frame, each held for hold_seconds.
+    Uses a fixed dt for the padding (independent of the trajectory's variable dt).
+    Returns (q_padded, times_padded).
+    """
+    n_pad = max(1, int(round(hold_seconds / dt)))
+    pre_times  = times[0]  - dt * np.arange(n_pad, 0, -1)   # e.g. -1.0 … -0.02
+    post_times = times[-1] + dt * np.arange(1, n_pad + 1)    # e.g.  T+0.02 … T+1.0
+    q_pre  = np.tile(q_ik[0],  (n_pad, 1))
+    q_post = np.tile(q_ik[-1], (n_pad, 1))
+    q_out  = np.vstack([q_pre,  q_ik,  q_post])
+    t_out  = np.concatenate([pre_times, times, post_times])
+    return q_out, t_out
 
 
 def export_ik_solution(q_ik: np.ndarray, times: np.ndarray, export_dir: str,
@@ -761,6 +944,8 @@ if __name__ == "__main__":
     parser.add_argument("--box-xml",     default=None,
                         help="Path to box scene XML to include in the viewer "
                              "(e.g. models/box/box_20x30x24in.xml)")
+    parser.add_argument("--no-visualize", action="store_true",
+                        help="Skip the MuJoCo visualizer (useful for non-interactive runs)")
 
     args = parser.parse_args()
 
@@ -774,9 +959,11 @@ if __name__ == "__main__":
         _cfg_mod = importlib.import_module(args.config)
         _results_dir   = os.path.join(_REPO_ROOT, _cfg_mod.config.save_dir.lstrip("./"))
         _stance_ground_z = _cfg_mod.config.constraints.stance_ground_z
+        _reject_self_collision = _cfg_mod.config.solver.reject_self_collision
     except Exception:
         _results_dir     = _RESULTS_DEFAULT
         _stance_ground_z = 0.0
+        _reject_self_collision = False
     times, q_srb, feet_ext, stance_end, flight_end = load_srb_results(_results_dir)
 
     # 3. IK — export into a config-specific subdirectory so configs don't overwrite each other
@@ -799,9 +986,9 @@ if __name__ == "__main__":
         q_ik = run_ik_trajectory(ik, q_srb, feet_ext, stance_end, flight_end,
                                   arm_defaults=arm_defaults,
                                   stance_ground_z=_stance_ground_z,
-                                  I_opt=_I_opt)
-        # 4. Export
-        export_ik_solution(q_ik, times, export_dir, model=ik.model)
+                                  I_opt=_I_opt,
+                                  reject_self_collision=_reject_self_collision,
+                                  times=times)
     else:
         q_ik_mj = np.loadtxt(os.path.join(export_dir, "ik_q_mujoco.csv"),
                               delimiter=",", comments="#")
@@ -811,16 +998,23 @@ if __name__ == "__main__":
                                           r[7:]]) for r in q_ik_mj])
         print(f"[pipeline] Loaded cached IK solution ({q_ik.shape[0]} frames)")
 
-    # 4b. IK error report
+    # 4b. IK error report (uses original times before padding)
     check_ik_errors(q_ik, times, feet_ext, stance_end, flight_end, ik,
                     stance_ground_z=_stance_ground_z)
 
-    # 5. Wrench plot
+    # 5. Wrench plot (uses original times)
     plot_srb_wrenches(_results_dir, times, stance_end, flight_end)
+
+    # 4. Export — pad first/last pose for 1 s on each end before writing CSVs
+    q_ik_export, times_export = _pad_trajectory(q_ik, times, hold_seconds=1.0)
+    export_ik_solution(q_ik_export, times_export, export_dir, model=ik.model)
 
     # 5b. Build combined XML
     box_xml = os.path.join(_REPO_ROOT, args.box_xml) if args.box_xml else None
     build_combined_xml(_G1_XML, _SRB_XML, _COMBINED, box_xml=box_xml)
 
     # 6. Visualize
-    visualize(q_ik, q_srb, times, _COMBINED, speed=args.speed, I_opt=_I_opt)
+    if not args.no_visualize:
+        visualize(q_ik, q_srb, times, _COMBINED, speed=args.speed, I_opt=_I_opt)
+    else:
+        print("[pipeline] Skipping visualizer (--no-visualize).")
