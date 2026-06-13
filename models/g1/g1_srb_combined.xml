@@ -254,7 +254,7 @@
       
       <geom name="axis_z" type="cylinder" fromto="0 0 0 0 0 0.25" size="0.02" rgba="0 0 1 0.35" contype="0" conaffinity="0" />
     </body>
-  </worldbody>
+  <body name="srb_foot_L" mocap="true" pos="0 0 -100"><geom type="sphere" size="0.04" rgba="0.2 0.55 1.0 0.9" contype="0" conaffinity="0" /></body><body name="srb_foot_R" mocap="true" pos="0 0 -100"><geom type="sphere" size="0.04" rgba="1.0 0.45 0.1 0.9" contype="0" conaffinity="0" /></body></worldbody>
 
   <actuator>
     <motor name="left_hip_pitch_joint" joint="left_hip_pitch_joint" />

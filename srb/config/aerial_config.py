@@ -62,6 +62,7 @@ class CostWeights:
     Q_stance_foot_com_x: float = 0.0 # penalises x-offset of CoM from stance feet (x=0) during pre-jump
     Q_stance_feet_com_x: float = 0.0 # penalises CoM x vs actual stance foot positions (p0_L, p0_R) during pre-jump
     Q_I_dot: float = 0.0         # rate penalty on inertia changes ||I(k+1)-I(k)||² / dt
+    Q_flip_mid: float = 0.0      # orientation cost at flight midpoint — guides flip direction
 
 
 @dataclass

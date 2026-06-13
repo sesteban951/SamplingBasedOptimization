@@ -155,11 +155,11 @@ def _build_q0(ik, q_srb_row: np.ndarray, q_warm=None,
     Base pose comes from the SRB trajectory; leg joints are either warm-started
     or set from standing_config's squat-biased heuristic.
 
-    For IPOPT IK: q0[0:3] is used as p_com_des.  The SRB approximates CoM ≈ pelvis,
-    so q_srb[2] is the intended CoM height.  We correct q0[2] by the CoM-pelvis
-    offset so IPOPT targets the right absolute CoM height.  The offset is taken from
-    q_warm (previous solved frame — guaranteed correct foot placement) when available,
-    falling back to the nominal standing offset on the first frame.
+    For IPOPT IK: q0[0:3] is used as p_com_des.  The SRB stores pelvis position,
+    not the full-body CoM, so q_srb[2] must be shifted by the nominal CoM-pelvis
+    z offset (_COM_PELVIS_NOMINAL) to obtain the correct CoM target for IPOPT.
+    A fixed nominal offset is used (not recomputed from q_warm) so the CoM target
+    tracks the SRB smoothly across all frames and phase transitions.
 
     stance_ground_z: elevation of the stance surface (e.g. box height).  Used to
     compute the correct squat depth for the joint initial guess.
@@ -174,24 +174,13 @@ def _build_q0(ik, q_srb_row: np.ndarray, q_warm=None,
     if q_warm is not None and drop > warmstart_min_drop:
         q0[7:] = q_warm[7:]
     if isinstance(ik, G1IPOPTIK):
-        # Compute CoM-pelvis offset from q_warm (has correct foot placement from the
-        # previous IPOPT solve) or fall back to the nominal standing offset.
-        # Do NOT use q0 here: standing_config produces feet at wrong z, making the
-        # warm-start CoM unreliable as a p_com_des target.
-        # Only trust q_warm's offset when its feet are near the expected floor z;
-        # liftoff/flight frames have feet in the air and give a wrong offset.
-        if q_warm is not None:
-            pin.framesForwardKinematics(ik.model, ik.data, q_warm)
-            q_warm_lfoot_z = float(ik.data.oMf[ik.l_foot_id].translation[2])
-            expected_foot_z = stance_ground_z + ik.ANKLE_HEIGHT
-            if abs(q_warm_lfoot_z - expected_foot_z) < 0.015:  # within 15mm of floor
-                pin.centerOfMass(ik.model, ik.data, q_warm)
-                com_pelvis_dz = float(ik.data.com[0][2] - q_warm[2])
-            else:
-                com_pelvis_dz = _get_com_pelvis_dz(ik)
-        else:
-            com_pelvis_dz = _get_com_pelvis_dz(ik)
-        q0[2] = q_srb_row[2] + com_pelvis_dz
+        # Use the nominal standing CoM-pelvis z offset (constant) so that
+        # p_com_des[2] = q_srb[2] + offset tracks the SRB smoothly across all
+        # frames and phase transitions.  The previous approach recomputed the
+        # offset from q_warm each frame, which introduced discontinuities at
+        # phase boundaries where q_warm's body orientation changed abruptly
+        # (e.g. liftoff → touchdown), causing 9 cm jumps in the CoM target.
+        q0[2] = q_srb_row[2] + _get_com_pelvis_dz(ik)
     return q0
 
 
@@ -216,17 +205,17 @@ _FLIGHT_TUCK_LEGS = np.array([
 ])
 
 def _tuck_q0(ik, q_srb_row: np.ndarray, tuck_ratio: float,
+             q_legs_base: np.ndarray,
              arm_defaults: np.ndarray = None) -> np.ndarray:
     """
     Generate a tuck-biased initial guess for flight IK.
 
-    tuck_ratio ∈ [0, 1]: 0 = standing, 1 = maximum tuck.
-    Computed from the desired Iyy: tuck_ratio = 1 - Iyy_des / Iyy_nom.
+    tuck_ratio ∈ [0, 1]: 0 = q_legs_base, 1 = _FLIGHT_TUCK_LEGS.
+    q_legs_base: 12-vector of actual leg joints at the tuck=0 boundary
+                 (liftoff joints for flight, touchdown joints reversed for landing).
 
-    Joint angles are relative to the pelvis frame, so this warm-start works
-    regardless of world-frame body orientation (standing, inverted, etc.).
-    The pelvis position/orientation slots (q[0:7]) are filled from q_srb_row
-    and will be overwritten by the CoM correction in the caller.
+    Blending between real robot states means the warm-start is physically
+    continuous at both phase boundaries, regardless of body orientation.
     """
     q = pin.neutral(ik.model)
     q[0:3] = q_srb_row[0:3]
@@ -235,20 +224,10 @@ def _tuck_q0(ik, q_srb_row: np.ndarray, tuck_ratio: float,
         q[19:] = arm_defaults[19:]
 
     tr = float(np.clip(tuck_ratio, 0.0, 1.0))
-    hip_p   = tr * 2.0          # hip flexion 0 → 2.0 rad
-    knee    = 0.05 + tr * 2.2   # knee bend   0.05 → 2.25 rad
-    ankle_p = -tr * 0.3         # ankle pitch 0 → -0.3 rad
-
-    for name, angle in [
-        ("left_hip_pitch_joint",    hip_p),
-        ("right_hip_pitch_joint",   hip_p),
-        ("left_knee_joint",         knee),
-        ("right_knee_joint",        knee),
-        ("left_ankle_pitch_joint",  ankle_p),
-        ("right_ankle_pitch_joint", ankle_p),
-    ]:
+    q_legs = (1.0 - tr) * q_legs_base + tr * _FLIGHT_TUCK_LEGS
+    for name, val in zip(G1IK.LEG_JOINTS, q_legs):
         jid = ik.model.getJointId(name)
-        q[ik.model.joints[jid].idx_q] = angle
+        q[ik.model.joints[jid].idx_q] = val
 
     return q
 
@@ -267,35 +246,134 @@ def _check_self_collision(model, data, geom_model, geom_data, q) -> bool:
                for k in range(len(geom_model.collisionPairs)))
 
 
+def _quat_slerp(q0: np.ndarray, q1: np.ndarray, a: float) -> np.ndarray:
+    """Shortest-path SLERP between two pinocchio-convention quaternions [qx,qy,qz,qw]."""
+    q0 = q0 / np.linalg.norm(q0)
+    q1 = q1 / np.linalg.norm(q1)
+    dot = float(np.dot(q0, q1))
+    if dot < 0.0:          # take the shorter arc
+        q1, dot = -q1, -dot
+    if dot > 0.9995:       # nearly aligned — linear blend avoids 0/0
+        q = (1.0 - a) * q0 + a * q1
+        return q / np.linalg.norm(q)
+    theta = np.arccos(dot)
+    s = np.sin(theta)
+    return (np.sin((1.0 - a) * theta) / s) * q0 + (np.sin(a * theta) / s) * q1
+
+
+def _solve_contact_frame(ik, q0: np.ndarray, oMl: pin.SE3, oMr: pin.SE3,
+                         q_warm, solve_kwargs: dict,
+                         com_step_max: float = 0.02, ang_step_max: float = 0.1,
+                         n_sub_cap: int = 20, verify_step: float = 0.5):
+    """
+    Continuation solve for a fully-determined contact-frame IK.
+
+    The contact IK (CoM + both feet pose, all hard) has DOF == #constraints, so the
+    solution is unique but very sensitive to the warm start.  Two opposite failure
+    modes appear near full leg extension (a kinematic singularity):
+
+      * Landing squat — CoM drops fast while the body is pitched.  A single
+        full-target solve from the previous frame falls out of its basin, returns a
+        stale (straight-leg) iterate, and the knee snaps a frame later.  Small steps
+        FIX this.
+      * Stance pre-jump — the leg starts at full extension.  Here a *small* step has
+        a near-zero CoM-vs-knee gradient and stalls at the straight singularity,
+        whereas a single large solve has enough push to escape onto the bent branch.
+        Small steps make this WORSE.
+
+    Resolution — the determined IK also has multiple solution branches, so a solve
+    can *converge* yet jump to a far branch (a snap).  We therefore judge a solve by
+    BOTH convergence and step size relative to the previous config:
+
+      1. Direct full-target solve.  If it converges with a SMALL step, accept it
+         (fast path; also the stance escape when the big single step is genuinely
+         needed is handled in step 3).
+      2. Otherwise (failed, or a large step that may be a branch flip) run a
+         continuation: walk the CoM target + pelvis orientation from the previous
+         converged config to the target in small sub-steps, each warm-started from
+         the last, to stay on the NEAREST branch.  Feet are planted (constant within
+         a contact phase), so only CoM and orientation are interpolated.
+      3. Prefer the continuation result when it converged AND its step is no larger
+         than the direct solve's (the landing squat: continuation finds the smooth
+         on-branch path the direct solve snapped past).  Keep the direct solve when
+         continuation stalls (the stance singularity: small steps can't escape full
+         extension, so the big direct step is the only valid branch).
+
+    q_warm=None → single direct solve (cold start, e.g. first stance frame).
+    solve_kwargs: forwarded to ik.solve WITHOUT q_prev (set per sub-step here).
+    Returns (q_sol, ok, errs).
+    """
+    if q_warm is None:
+        return ik.solve(q0, oMl, oMr, q_prev=None, **solve_kwargs)
+
+    leg = ik._leg_qidx
+    def _leg_step(qa, qb):
+        return float(np.linalg.norm(np.array([qa[i] - qb[i] for i in leg])))
+
+    def _continuation():
+        com_to  = np.asarray(q0[0:3], dtype=float)
+        quat_to = np.asarray(q0[3:7], dtype=float)
+        pin.centerOfMass(ik.model, ik.data, q_warm)
+        com_from  = np.array(ik.data.com[0])
+        quat_from = np.asarray(q_warm[3:7], dtype=float)
+
+        d_com = float(np.linalg.norm(com_to - com_from))
+        dot   = abs(float(np.dot(quat_from / np.linalg.norm(quat_from),
+                                 quat_to  / np.linalg.norm(quat_to))))
+        d_ang = 2.0 * np.arccos(min(1.0, dot))
+        n_sub = max(1, int(np.ceil(max(d_com / com_step_max, d_ang / ang_step_max))))
+        n_sub = min(n_sub, n_sub_cap)
+
+        q_seed = q_warm.copy()
+        q_s, ok_s, errs_s = q_warm, False, [float("inf")]
+        for s in range(1, n_sub + 1):
+            a = s / n_sub
+            q0_s = q_seed.copy()
+            q0_s[0:3] = (1.0 - a) * com_from + a * com_to
+            q0_s[3:7] = _quat_slerp(quat_from, quat_to, a)
+            q_s, ok_s, errs_s = ik.solve(q0_s, oMl, oMr, q_prev=q_seed, **solve_kwargs)
+            q_seed = q_s
+        return q_s, ok_s, errs_s
+
+    # 1) Direct full-target solve.
+    q_dir, ok_dir, e_dir = ik.solve(q0, oMl, oMr, q_prev=q_warm, **solve_kwargs)
+    if ok_dir and _leg_step(q_dir, q_warm) <= verify_step:
+        return q_dir, ok_dir, e_dir
+
+    # 2) Failed or large step (possible branch flip): refine on the nearest branch.
+    q_con, ok_con, e_con = _continuation()
+
+    # 3) Prefer continuation when it converged and is no worse a step than direct;
+    #    otherwise keep direct (stance singularity escape).
+    if ok_con and (not ok_dir or _leg_step(q_con, q_warm) <= _leg_step(q_dir, q_warm)):
+        return q_con, ok_con, e_con
+    return q_dir, ok_dir, e_dir
+
+
 def run_ik_trajectory(ik: G1IK, q_srb: np.ndarray, feet_ext: np.ndarray,
                       stance_end: int, flight_end: int,
                       arm_defaults: np.ndarray = None,
                       stance_ground_z: float = 0.0,
-                      I_opt: np.ndarray = None,
-                      w_inertia_contact: float = 1e-3,
-                      w_inertia_flight: float = 2.0,
+                      tuck_opt: np.ndarray = None,
                       w_sym_flight: float = 2.0,
-                      w_reg_flight: float = 0.01,
-
+                      w_reg_flight: float = 1.0,
                       reject_self_collision: bool = False,
                       times: np.ndarray = None,
                       q_dot_max_flight: float = 10.0):
     """
     Returns q_ik (N+1, 36) pinocchio configuration at every timestep.
 
-    arm_defaults: full nq-length array with upper-body joint angles to hold
-                  throughout (from load_arm_defaults).  None = zeros.
+    arm_defaults:    full nq-length array with upper-body joint angles to hold
+                     throughout (from load_arm_defaults).  None = zeros.
     stance_ground_z: height of the stance surface above z=0 (e.g. box top).
-    I_opt: (N+1, 6) SRB inertia trajectory [Ixx,Iyy,Izz,Ixy,Ixz,Iyz], body frame.
-           None → inertia cost disabled (uses solver default weight which is 0).
-    w_inertia_contact: inertia cost weight during stance/landing (low, foot cost dominates).
-    w_inertia_flight:  inertia cost weight during flight (higher, no foot constraint).
-    w_sym_flight:      bilateral symmetry cost weight during flight.
-    w_reg_flight:      joint regularisation weight during flight.
-
-    times:             (N+1,) timestamps [s] for computing per-frame dt.  None → dt=0.02 s.
-    q_dot_max_flight:  max joint velocity [rad/s] as box constraints during flight IK.
-                       0 = disabled.
+    tuck_opt:        (N_flight+1,) tuck scalar per flight node from the SRB solver.
+                     When provided, flight IK uses tuck-interpolated warm starts
+                     (liftoff joints → _FLIGHT_TUCK_LEGS → touchdown joints).
+                     None → flight frames use linear joint interpolation only.
+    w_sym_flight:    bilateral symmetry cost weight during flight.
+    w_reg_flight:    joint regularisation weight during flight.
+    times:           (N+1,) timestamps [s] for per-frame dt.  None → dt=0.02 s.
+    q_dot_max_flight: max joint velocity [rad/s] box constraint during flight IK.
     """
     N = q_srb.shape[0] - 1
     q_ik = np.zeros((N + 1, ik.model.nq))
@@ -303,8 +381,8 @@ def run_ik_trajectory(ik: G1IK, q_srb: np.ndarray, feet_ext: np.ndarray,
     stance_foot_z  = ik.ANKLE_HEIGHT + stance_ground_z
     landing_foot_z = ik.ANKLE_HEIGHT  # landing always on ground
 
-    use_inertia = (I_opt is not None) and isinstance(ik, G1IPOPTIK)
-    use_ipopt   = isinstance(ik, G1IPOPTIK)
+    use_ipopt      = isinstance(ik, G1IPOPTIK)
+    run_flight_ik  = (tuck_opt is not None) and use_ipopt
 
     # Per-frame dt array — used for velocity box constraints in flight IK.
     _nom_dt = 0.02
@@ -335,13 +413,14 @@ def run_ik_trajectory(ik: G1IK, q_srb: np.ndarray, feet_ext: np.ndarray,
             q0[19:] = arm_defaults[19:]
         oMl = pin.SE3(np.eye(3), np.array([feet_ext[i,0], feet_ext[i,1], stance_foot_z]))
         oMr = pin.SE3(np.eye(3), np.array([feet_ext[i,2], feet_ext[i,3], stance_foot_z]))
-        I_des_i = _row_to_I_mat(I_opt[i]) if use_inertia else None
-        q_sol, ok, errs = ik.solve(q0, oMl, oMr,
-                                   I_des=I_des_i,
-                                   w_inertia=w_inertia_contact if use_inertia else None,
-                                   p_l_prev=p_l_prev, p_r_prev=p_r_prev,
-                                   w_foot_vel=0.1 if use_ipopt else 0.0,
-                                   floor_z=stance_foot_z if use_ipopt else -1000.0)
+        q_sol, ok, errs = _solve_contact_frame(
+            ik, q0, oMl, oMr, q_warm,
+            dict(w_reg=0.1 if q_warm is not None else 0.0,
+                 p_l_prev=p_l_prev, p_r_prev=p_r_prev,
+                 w_foot_vel=0.1 if use_ipopt else 0.0,
+                 floor_z=stance_foot_z if use_ipopt else -1000.0,
+                 foot_hard=use_ipopt,
+                 dt=float(_dt_arr[i])))
         if not ok and errs[-1] > 1e-3:
             print(f"  [warn] stance frame {i}: IK did not converge (err={errs[-1]:.2e})")
         if geom_model and _check_self_collision(ik.model, ik.data, geom_model, geom_data, q_sol):
@@ -361,16 +440,16 @@ def run_ik_trajectory(ik: G1IK, q_srb: np.ndarray, feet_ext: np.ndarray,
     # For touchdown, always use q_warm joints (warmstart_min_drop=0) — the liftoff
     # configuration is the best available warm-start for landing, regardless of squat depth.
     q0_td = _build_q0(ik, q_srb[flight_end], q_warm=q_ik[stance_end - 1],
-                      warmstart_min_drop=0.0)
+                      warmstart_min_drop=-1.0)
     if arm_defaults is not None:
         q0_td[19:] = arm_defaults[19:]
     oMl_td = pin.SE3(np.eye(3), np.array([feet_ext[flight_end, 0], feet_ext[flight_end, 1], landing_foot_z]))
     oMr_td = pin.SE3(np.eye(3), np.array([feet_ext[flight_end, 2], feet_ext[flight_end, 3], landing_foot_z]))
-    I_des_td = _row_to_I_mat(I_opt[flight_end]) if use_inertia else None
     q_td, ok_td, errs_td = ik.solve(q0_td, oMl_td, oMr_td,
-                                     I_des=I_des_td,
-                                     w_inertia=w_inertia_contact if use_inertia else None,
-                                     floor_z=landing_foot_z if use_ipopt else -1000.0)
+                                     q_prev=q0_td, w_reg=0.1, w_sym=2.0,
+                                     floor_z=landing_foot_z if use_ipopt else -1000.0,
+                                     foot_hard=use_ipopt,
+                                     q_dot_max=0.0)
     if not ok_td and errs_td[-1] > 1e-3:
         print(f"  [warn] touchdown frame {flight_end}: IK did not converge (err={errs_td[-1]:.2e})")
     if geom_model and _check_self_collision(ik.model, ik.data, geom_model, geom_data, q_td):
@@ -394,46 +473,42 @@ def run_ik_trajectory(ik: G1IK, q_srb: np.ndarray, feet_ext: np.ndarray,
         q_ik[i, 3:7] = _mj_to_pin_quat(q_srb[i,3], q_srb[i,4], q_srb[i,5], q_srb[i,6])
         q_ik[i, 7:]  = (1 - t) * joints_takeoff + t * joints_touchdown
 
-    # Flight inertia refinement — if inertia tracking is active, run a lightweight
-    # IPOPT solve for each flight frame: CoM equality + inertia cost, no foot targets.
-    # Warm-start: tuck-biased config scaled by the desired Iyy ratio so the solver
-    # starts near the correct joint-space branch (not the standing/interpolated one).
-    # CoM target: offset computed from the last *converged* frame (q_flight_warm)
-    # rather than from the (potentially bad) interpolated joints.
-    if use_inertia:
-        print("[pipeline] Running flight inertia IK ...")
-        # Dummy foot targets — ignored when w_foot=0
+    # Flight IK — run per-frame IPOPT solve when tuck_opt is available.
+    # Warm-start blends from actual liftoff joints → _FLIGHT_TUCK_LEGS → touchdown
+    # joints, matching the SRB tuck profile.  No inertia cost — the warm start
+    # already encodes the tuck geometry; CoM equality + reg handles the rest.
+    if run_flight_ik:
+        print("[pipeline] Running flight tuck IK ...")
         oMl_dummy = pin.SE3(np.eye(3), np.array([0.0,  ik.HIP_WIDTH, ik.ANKLE_HEIGHT]))
         oMr_dummy = pin.SE3(np.eye(3), np.array([0.0, -ik.HIP_WIDTH, ik.ANKLE_HEIGHT]))
-        q_flight_warm = q_ik[stance_end - 1]
-        for idx, i in enumerate(range(stance_end, flight_end)):
-            Iyy_des = I_opt[i, 1]
-            tuck_ratio = float(np.clip(1.0 - Iyy_des / _IYY_NOM, 0.0, 1.0))
 
-            # Tuck-biased warm-start: joints pre-bent according to inertia ratio.
-            # Body-frame joint angles are orientation-independent, so this works at
-            # any pitch angle (including inverted flight during a backflip).
-            q0_fl = _tuck_q0(ik, q_srb[i], tuck_ratio, arm_defaults)
+        q_liftoff_legs   = q_ik[stance_end - 1, 7:19].copy()
+        q_touchdown_legs = joints_touchdown[:12].copy()
+        q_flight_warm    = q_ik[stance_end - 1].copy()
 
-            # CoM target: use the com-pelvis offset from the last converged frame.
-            # Computing it from the tuck warm-start would give a wrong target
-            # because the tuck joints don't yet match the SRB CoM height.
+        _flight_ik_end = max(stance_end, flight_end - 5)
+        for idx, i in enumerate(range(stance_end, _flight_ik_end)):
+            tuck_ratio = float(np.clip(tuck_opt[idx], 0.0, 1.0))
+            alpha_fl   = idx / max(1, n_flight - 1)
+
+            # Warm-start boundary blends from liftoff legs (start of flight) to
+            # touchdown legs (end of flight) so the last flight frame naturally
+            # converges to a configuration close to the first landing frame.
+            q_legs_base = (1.0 - alpha_fl) * q_liftoff_legs + alpha_fl * q_touchdown_legs
+            q0_fl = _tuck_q0(ik, q_srb[i], tuck_ratio, q_legs_base, arm_defaults)
+
+            # CoM target: use offset from last converged frame (correct foot placement).
             pin.centerOfMass(ik.model, ik.data, q_flight_warm)
-            com_pelvis_dz = ik.data.com[0][2] - q_flight_warm[2]  # ~-0.089 m
-            q0_fl[0:2] = q_srb[i, 0:2]                      # x,y from SRB
-            q0_fl[2]   = q_srb[i, 2] + com_pelvis_dz        # z: SRB pelvis + offset
+            com_pelvis_dz = ik.data.com[0][2] - q_flight_warm[2]
+            q0_fl[0:2] = q_srb[i, 0:2]
+            q0_fl[2]   = q_srb[i, 2] + com_pelvis_dz
 
-            I_des_fl = _row_to_I_mat(I_opt[i])
-            # Foot-velocity cost disabled during flight (feet move by design);
-            # separation constraints kept to prevent leg crossing during tuck.
             q_fl, ok_fl, _ = ik.solve(q0_fl, oMl_dummy, oMr_dummy,
-                                       q_prev=q_flight_warm,
+                                       q_prev=q0_fl,        # reg pulls toward tuck target
                                        w_reg=w_reg_flight,
-                                       I_des=I_des_fl,
-                                       w_inertia=w_inertia_flight,
                                        w_foot=0.0,
                                        w_sym=w_sym_flight,
-                                       q_dot_max=q_dot_max_flight,
+                                       q_dot_max=0.0,       # no velocity box in flight
                                        dt=float(_dt_arr[i]))
             if ok_fl:
                 q_ik[i, 7:19] = q_fl[7:19]
@@ -442,28 +517,41 @@ def run_ik_trajectory(ik: G1IK, q_srb: np.ndarray, feet_ext: np.ndarray,
                 print(f"  [warn] flight frame {i} (tuck={tuck_ratio:.2f}): IK did not converge — keeping interpolated joints")
                 q_flight_warm = q_ik[i].copy()
 
+        # Re-interpolate the tail frames (_flight_ik_end..flight_end-1) from the
+        # last tuck IK joints to joints_touchdown.  The original linear interpolation
+        # used liftoff→touchdown, which is now discontinuous with the tuck IK result.
+        if _flight_ik_end < flight_end:
+            q_tuck_end = q_ik[_flight_ik_end - 1, 7:19].copy()
+            n_tail = flight_end - _flight_ik_end + 1  # includes touchdown frame
+            for idx2, i in enumerate(range(_flight_ik_end, flight_end)):
+                t2 = (idx2 + 1) / n_tail
+                q_ik[i, 7:19] = (1.0 - t2) * q_tuck_end + t2 * joints_touchdown[:12]
+
     # ---- LANDING ----
-    # w_reg penalises ||q_legs - q_prev_legs||² to keep the solver on the same
-    # joint-space branch across consecutive frames.
     print("[pipeline] Running landing IK ...")
     q_ik[flight_end] = q_td   # already solved above
     q_warm = q_td
     pin.framesForwardKinematics(ik.model, ik.data, q_td)
     p_l_prev = ik.data.oMf[ik.l_foot_id].translation.copy()
     p_r_prev = ik.data.oMf[ik.r_foot_id].translation.copy()
-    for i in range(flight_end + 1, N + 1):
-        q0 = _build_q0(ik, q_srb[i], q_warm)
+
+    for j, i in enumerate(range(flight_end + 1, N + 1)):
+        # warmstart_min_drop=-1 forces q_warm joints to always be used (avoids
+        # standing_config fallback which uses wrong-sign hip_pitch at near-standing height).
+        q0 = _build_q0(ik, q_srb[i], q_warm, warmstart_min_drop=-1.0)
         if arm_defaults is not None:
             q0[19:] = arm_defaults[19:]
         oMl = pin.SE3(np.eye(3), np.array([feet_ext[i,0], feet_ext[i,1], landing_foot_z]))
         oMr = pin.SE3(np.eye(3), np.array([feet_ext[i,2], feet_ext[i,3], landing_foot_z]))
-        I_des_i = _row_to_I_mat(I_opt[i]) if use_inertia else None
-        q_sol, ok, errs = ik.solve(q0, oMl, oMr,
-                                   I_des=I_des_i,
-                                   w_inertia=w_inertia_contact if use_inertia else None,
-                                   p_l_prev=p_l_prev, p_r_prev=p_r_prev,
-                                   w_foot_vel=0.1 if use_ipopt else 0.0,
-                                   floor_z=landing_foot_z if use_ipopt else -1000.0)
+        q_sol, ok, errs = _solve_contact_frame(
+            ik, q0, oMl, oMr, q_warm,
+            dict(w_reg=0.1,
+                 p_l_prev=p_l_prev, p_r_prev=p_r_prev,
+                 w_foot_vel=0.1 if use_ipopt else 0.0,
+                 w_sym=2.0,
+                 floor_z=landing_foot_z if use_ipopt else -1000.0,
+                 foot_hard=use_ipopt,
+                 dt=float(_dt_arr[i])))
         if not ok and errs[-1] > 1e-3:
             print(f"  [warn] landing frame {i}: IK did not converge (err={errs[-1]:.2e})")
         if geom_model and _check_self_collision(ik.model, ik.data, geom_model, geom_data, q_sol):
@@ -748,6 +836,14 @@ def build_combined_xml(g1_xml: str, srb_xml: str, output: str,
     worldbody = g1_root.find("worldbody")
     worldbody.append(srb_body)
 
+    # Foot marker mocap bodies (left=blue, right=orange)
+    for name, rgba in [("srb_foot_L", "0.2 0.55 1.0 0.9"),
+                        ("srb_foot_R", "1.0 0.45 0.1 0.9")]:
+        foot_body = ET.SubElement(worldbody, "body", name=name, mocap="true",
+                                  pos="0 0 -100")
+        ET.SubElement(foot_body, "geom", type="sphere", size="0.04", rgba=rgba,
+                      contype="0", conaffinity="0")
+
     # Merge box geometry into the scene
     if box_xml is not None:
         box_tree = ET.parse(box_xml)
@@ -774,8 +870,6 @@ def plot_srb_wrenches(results_dir: str, times: np.ndarray,
       Row 1: Mx, My, Mz  — left (blue), right (orange), total (black dashed)
     Phase regions shaded: stance=blue, flight=white, landing=green.
     """
-    import matplotlib
-    matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import matplotlib.patches as mpatches
 
@@ -845,20 +939,157 @@ def plot_srb_wrenches(results_dir: str, times: np.ndarray,
 
 
 # ---------------------------------------------------------------------------
+# Step 5c — plot SRB states
+# ---------------------------------------------------------------------------
+
+def plot_srb_states(results_dir: str, times: np.ndarray,
+                    stance_end: int, flight_end: int,
+                    save_path: str = None):
+    """
+    Plot the SRB state trajectory (position, orientation, velocities).
+    If I_opt.csv / tuck_opt.csv are present, an extra row shows tuck + Ixx + Iyy.
+
+    Layout:
+      Row 0: px, py, pz  (m)
+      Row 1: roll, pitch, yaw  (deg, ZYX Euler from quaternion)
+      Row 2: vx, vy, vz  (m/s)
+      Row 3: wx, wy, wz  (rad/s, body frame)
+      Row 4: tuck, Ixx, Iyy  (kg·m²)  — only when varinertia data exists
+    Phase regions shaded: stance=blue, flight=white, landing=green.
+
+    Shows the plot live (plt.show()).  If save_path is given, also saves to that path.
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+    from scipy.spatial.transform import Rotation
+
+    q_path = os.path.join(results_dir, "q_opt.csv")
+    if not os.path.exists(q_path):
+        print("[pipeline] q_opt.csv not found — run solver first")
+        return
+
+    q_srb = np.loadtxt(q_path, delimiter=",")          # (N+1, 7) [px,py,pz,qw,qx,qy,qz]
+    v_srb = np.loadtxt(os.path.join(results_dir, "v_opt.csv"), delimiter=",")  # (N+1, 6)
+
+    I_path    = os.path.join(results_dir, "I_opt.csv")
+    tuck_path = os.path.join(results_dir, "tuck_opt.csv")
+    has_varinertia = os.path.exists(I_path) and os.path.exists(tuck_path)
+
+    if has_varinertia:
+        I_opt    = np.loadtxt(I_path,    delimiter=",", comments="#")  # (N+1, 6)
+        tuck_opt = np.loadtxt(tuck_path, delimiter=",", comments="#").flatten()
+
+    t = times  # (N+1,)
+    t_stance_end = times[stance_end]
+    t_flight_end = times[flight_end]
+
+    # Quaternion → ZYX Euler (deg)  — q_srb uses scalar-first [qw,qx,qy,qz]
+    quats_xyzw = np.column_stack([q_srb[:, 4:7], q_srb[:, 3]])  # scipy xyzw
+    euler_deg  = Rotation.from_quat(quats_xyzw).as_euler("ZYX", degrees=True)
+    yaw_deg, pitch_deg, roll_deg = euler_deg[:, 0], euler_deg[:, 1], euler_deg[:, 2]
+
+    n_rows = 5 if has_varinertia else 4
+    fig, axes = plt.subplots(n_rows, 3, figsize=(14, 3 * n_rows), sharex=True)
+    fig.suptitle("SRB State Trajectory", fontsize=13)
+
+    def _shade(ax):
+        ax.axvspan(t[0],         t_stance_end, alpha=0.08, color="steelblue", zorder=0)
+        ax.axvspan(t_flight_end, t[-1],        alpha=0.08, color="seagreen",  zorder=0)
+        ax.axvline(t_stance_end, color="steelblue", lw=0.8, ls="--")
+        ax.axvline(t_flight_end, color="seagreen",  lw=0.8, ls="--")
+        ax.axhline(0, color="gray", lw=0.5)
+        ax.set_xlabel("time (s)")
+
+    colors = ["steelblue", "darkorange", "seagreen"]
+
+    # Row 0 — position
+    for col, (label, data) in enumerate(zip(
+            ["px (m)", "py (m)", "pz (m)"],
+            [q_srb[:, 0], q_srb[:, 1], q_srb[:, 2]])):
+        ax = axes[0, col]
+        _shade(ax)
+        ax.plot(t, data, color=colors[col], lw=1.4)
+        ax.set_ylabel(label)
+
+    # Row 1 — orientation (ZYX Euler)
+    for col, (label, data) in enumerate(zip(
+            ["roll (deg)", "pitch (deg)", "yaw (deg)"],
+            [roll_deg, pitch_deg, yaw_deg])):
+        ax = axes[1, col]
+        _shade(ax)
+        ax.plot(t, data, color=colors[col], lw=1.4)
+        ax.set_ylabel(label)
+
+    # Row 2 — linear velocity
+    for col, (label, data) in enumerate(zip(
+            ["vx (m/s)", "vy (m/s)", "vz (m/s)"],
+            [v_srb[:, 0], v_srb[:, 1], v_srb[:, 2]])):
+        ax = axes[2, col]
+        _shade(ax)
+        ax.plot(t, data, color=colors[col], lw=1.4)
+        ax.set_ylabel(label)
+
+    # Row 3 — angular velocity (body frame)
+    for col, (label, data) in enumerate(zip(
+            ["wx (rad/s)", "wy (rad/s)", "wz (rad/s)"],
+            [v_srb[:, 3], v_srb[:, 4], v_srb[:, 5]])):
+        ax = axes[3, col]
+        _shade(ax)
+        ax.plot(t, data, color=colors[col], lw=1.4)
+        ax.set_ylabel(label)
+
+    # Row 4 — varinertia: tuck, Ixx, Iyy  (3 columns = 3 axes, no overflow)
+    if has_varinertia:
+        t_tuck = times[stance_end : flight_end + 1]  # (N_flight+1,)
+
+        ax_tuck = axes[4, 0]
+        _shade(ax_tuck)
+        ax_tuck.plot(t_tuck, tuck_opt, color="purple", lw=1.4)
+        ax_tuck.set_ylabel("tuck")
+        ax_tuck.set_ylim(-0.05, 1.05)
+
+        for col, (label, col_idx) in enumerate(
+                zip(["Ixx (kg·m²)", "Iyy (kg·m²)"], [0, 1])):
+            ax = axes[4, col + 1]
+            _shade(ax)
+            ax.plot(t, I_opt[:, col_idx], color=colors[col_idx], lw=1.4)
+            ax.set_ylabel(label)
+
+    phase_patches = [
+        mpatches.Patch(color="steelblue", alpha=0.3, label="Stance"),
+        mpatches.Patch(color="white",     alpha=0.0, label="Flight", ec="gray"),
+        mpatches.Patch(color="seagreen",  alpha=0.3, label="Landing"),
+    ]
+    fig.legend(handles=phase_patches, loc="lower center", ncol=3,
+               fontsize=8, frameon=False, bbox_to_anchor=(0.5, -0.01))
+
+    fig.tight_layout(rect=[0, 0.03, 1, 1])
+
+    if save_path:
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"[pipeline] State plot saved → {save_path}")
+
+    plt.show()
+
+
+# ---------------------------------------------------------------------------
 # Step 6 — visualize
 # ---------------------------------------------------------------------------
 
 def visualize(q_ik: np.ndarray, q_srb: np.ndarray, times: np.ndarray,
               combined_xml: str, speed: float = 1.0,
-              I_opt: np.ndarray = None):
+              I_opt: np.ndarray = None,
+              feet_world: np.ndarray = None):
     """
     Animate the combined model in real time.
     Each frame is displayed for its actual trajectory duration (times[i+1]-times[i])
     divided by speed, so playback is physically correct across variable-dt phases.
     speed < 1 → slow motion, speed > 1 → fast forward.
 
-    I_opt: (N+1, 6) inertia trajectory [Ixx,Iyy,Izz,Ixy,Ixz,Iyz].  When provided,
-           the SRB ellipsoid geom is rescaled each frame to reflect the current inertia.
+    I_opt:       (N+1, 6) inertia trajectory [Ixx,Iyy,Izz,Ixy,Ixz,Iyz].  When provided,
+                 the SRB ellipsoid geom is rescaled each frame.
+    feet_world:  (N+1, 6) world-frame foot positions [pLx,pLy,pLz, pRx,pRy,pRz].
+                 NaN rows → feet hidden below ground (flight phase).
     """
     mj_model = mujoco.MjModel.from_xml_path(combined_xml)
     mj_data  = mujoco.MjData(mj_model)
@@ -883,11 +1114,7 @@ def visualize(q_ik: np.ndarray, q_srb: np.ndarray, times: np.ndarray,
     _srb_geom_id   = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_GEOM, "base_geom")
     _scale_inertia = (I_opt is not None) and (_srb_geom_id >= 0)
     if _scale_inertia:
-        # Nominal semi-axes from the XML (a=x-forward, b=y-lateral, c=z-up)
-        _nom_abc = mj_model.geom_size[_srb_geom_id].copy()   # shape (3,)
-        # Nominal inertia: standing pose values from srb.py (Ixx=3.747, Iyy=3.301 kg·m²).
-        # Using these as the reference keeps the ellipsoid at its XML size when the robot
-        # is in the nominal standing configuration.
+        _nom_abc = mj_model.geom_size[_srb_geom_id].copy()
         _Ixx_nom = 3.747533
         _Iyy_nom = 3.300958
         print(f"[pipeline] SRB ellipsoid scaling active — nominal size: "
@@ -898,13 +1125,26 @@ def visualize(q_ik: np.ndarray, q_srb: np.ndarray, times: np.ndarray,
             return
         Ixx = I_opt[i, 0]
         Iyy = I_opt[i, 1]
-        # Iyy (pitch, around y) drives the forward (a) and vertical (c) extents.
-        # Ixx (roll,  around x) drives the lateral (b) extent.
         scale_ac = np.sqrt(np.clip(Iyy / _Iyy_nom, 0.01, 4.0))
         scale_b  = np.sqrt(np.clip(Ixx / _Ixx_nom, 0.01, 4.0))
-        mj_model.geom_size[_srb_geom_id, 0] = _nom_abc[0] * scale_ac  # x (forward)
-        mj_model.geom_size[_srb_geom_id, 1] = _nom_abc[1] * scale_b   # y (lateral)
-        mj_model.geom_size[_srb_geom_id, 2] = _nom_abc[2] * scale_ac  # z (height)
+        mj_model.geom_size[_srb_geom_id, 0] = _nom_abc[0] * scale_ac
+        mj_model.geom_size[_srb_geom_id, 1] = _nom_abc[1] * scale_b
+        mj_model.geom_size[_srb_geom_id, 2] = _nom_abc[2] * scale_ac
+
+    # Foot marker mocap setup
+    _HIDDEN = np.array([0.0, 0.0, -100.0])
+    _foot_L_body = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_BODY, "srb_foot_L")
+    _foot_R_body = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_BODY, "srb_foot_R")
+    _foot_L_mocap = int(mj_model.body_mocapid[_foot_L_body]) if _foot_L_body >= 0 else -1
+    _foot_R_mocap = int(mj_model.body_mocapid[_foot_R_body]) if _foot_R_body >= 0 else -1
+    _show_feet = (feet_world is not None) and (_foot_L_mocap >= 0) and (_foot_R_mocap >= 0)
+
+    def _update_feet(i):
+        if not _show_feet:
+            return
+        row = feet_world[i]
+        mj_data.mocap_pos[_foot_L_mocap] = row[0:3] if not np.any(np.isnan(row[0:3])) else _HIDDEN
+        mj_data.mocap_pos[_foot_R_mocap] = row[3:6] if not np.any(np.isnan(row[3:6])) else _HIDDEN
 
     with mujoco.viewer.launch_passive(mj_model, mj_data) as viewer:
         viewer.cam.lookat[:]  = [0.0, 0.0, 0.6]
@@ -918,6 +1158,7 @@ def visualize(q_ik: np.ndarray, q_srb: np.ndarray, times: np.ndarray,
                     break
 
                 _update_ellipsoid(i)
+                _update_feet(i)
                 mj_data.qpos[:g1_nq] = q_g1_mj[i]
                 mj_data.qpos[srb_qpos_adr : srb_qpos_adr + 7] = q_srb[i]
                 mj_data.qvel[:] = 0
@@ -946,6 +1187,8 @@ if __name__ == "__main__":
                              "(e.g. models/box/box_20x30x24in.xml)")
     parser.add_argument("--no-visualize", action="store_true",
                         help="Skip the MuJoCo visualizer (useful for non-interactive runs)")
+    parser.add_argument("--plot-states",  action="store_true",
+                        help="Save an SRB state trajectory plot (srb_states.png)")
 
     args = parser.parse_args()
 
@@ -972,21 +1215,19 @@ if __name__ == "__main__":
     ik = G1IPOPTIK()
     arm_defaults = load_arm_defaults(ik.model)
 
-    # Load SRB inertia trajectory if available (output of variable_inertia=True SRB run)
-    _I_opt_path = os.path.join(_results_dir, "I_opt.csv")
-    _I_opt = None
-    if os.path.exists(_I_opt_path):
-        _I_opt = np.loadtxt(_I_opt_path, delimiter=",", comments="#")
-        assert _I_opt.shape == (len(times), 6), \
-            f"I_opt.csv shape mismatch: expected ({len(times)}, 6), got {_I_opt.shape}"
-        print(f"[pipeline] Loaded SRB inertia trajectory → inertia tracking active")
-        print(f"  Iyy ∈ [{_I_opt[:,1].min():.3f}, {_I_opt[:,1].max():.3f}] kg·m²")
+    # Load SRB tuck trajectory if available (output of variable_inertia=True SRB run).
+    _tuck_opt_path = os.path.join(_results_dir, "tuck_opt.csv")
+    _tuck_opt = None
+    if os.path.exists(_tuck_opt_path):
+        _tuck_opt = np.loadtxt(_tuck_opt_path, delimiter=",", comments="#").flatten()
+        print(f"[pipeline] Loaded tuck trajectory → flight tuck IK active")
+        print(f"  tuck ∈ [{_tuck_opt.min():.3f}, {_tuck_opt.max():.3f}]")
 
     if not args.skip_ik:
         q_ik = run_ik_trajectory(ik, q_srb, feet_ext, stance_end, flight_end,
                                   arm_defaults=arm_defaults,
                                   stance_ground_z=_stance_ground_z,
-                                  I_opt=_I_opt,
+                                  tuck_opt=_tuck_opt,
                                   reject_self_collision=_reject_self_collision,
                                   times=times)
     else:
@@ -1005,6 +1246,10 @@ if __name__ == "__main__":
     # 5. Wrench plot (uses original times)
     plot_srb_wrenches(_results_dir, times, stance_end, flight_end)
 
+    # 5c. State plot
+    if args.plot_states:
+        plot_srb_states(_results_dir, times, stance_end, flight_end)
+
     # 4. Export — pad first/last pose for 1 s on each end before writing CSVs
     q_ik_export, times_export = _pad_trajectory(q_ik, times, hold_seconds=1.0)
     export_ik_solution(q_ik_export, times_export, export_dir, model=ik.model)
@@ -1015,6 +1260,22 @@ if __name__ == "__main__":
 
     # 6. Visualize
     if not args.no_visualize:
-        visualize(q_ik, q_srb, times, _COMBINED, speed=args.speed, I_opt=_I_opt)
+        _I_opt_vis_path = os.path.join(_results_dir, "I_opt.csv")
+        _I_opt_vis = np.loadtxt(_I_opt_vis_path, delimiter=",", comments="#") if os.path.exists(_I_opt_vis_path) else None
+
+        # Build world-frame foot positions (N+1, 6): NaN rows during flight → hidden.
+        _landing_gz = getattr(getattr(_cfg_mod, 'config', None), 'constraints', None)
+        _landing_gz = float(_landing_gz.landing_ground_z) if _landing_gz is not None else 0.0
+        _feet_world = np.full((len(times), 6), np.nan)
+        for _k in range(len(times)):
+            if _k < stance_end:
+                _feet_world[_k] = [feet_ext[_k, 0], feet_ext[_k, 1], _stance_ground_z,
+                                   feet_ext[_k, 2], feet_ext[_k, 3], _stance_ground_z]
+            elif _k >= flight_end:
+                _feet_world[_k] = [feet_ext[_k, 0], feet_ext[_k, 1], _landing_gz,
+                                   feet_ext[_k, 2], feet_ext[_k, 3], _landing_gz]
+
+        visualize(q_ik, q_srb, times, _COMBINED, speed=args.speed,
+                  I_opt=_I_opt_vis, feet_world=_feet_world)
     else:
         print("[pipeline] Skipping visualizer (--no-visualize).")

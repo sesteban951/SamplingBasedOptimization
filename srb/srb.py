@@ -143,24 +143,15 @@ class SRBDynamics(ABC):
 
         return x_dot
     
-    # SRB model discrete dynamics using Euler integration
+    # SRB model discrete dynamics using RK4 integration
     def f_disc(self, x, u, dt):
 
-        # Euler integration
-        k1 = self.f_cont(x, u)
-        x_next = x + dt * k1
-
-        # RK2
-        # k1 = self.f_cont(x, u)
-        # k2 = self.f_cont(x + 0.5 * dt * k1, u)
-        # x_next = x + dt * k2
-
-        # RK4
-        # k1 = self.f_cont(x, u)
-        # k2 = self.f_cont(x + 0.5 * dt * k1, u)
-        # k3 = self.f_cont(x + 0.5 * dt * k2, u)
-        # k4 = self.f_cont(x + dt * k3, u)
-        # x_next = x + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
+        # RK4 (u is zero-order hold over the interval)
+        k1 = self.f_cont(x,                   u)
+        k2 = self.f_cont(x + 0.5 * dt * k1,  u)
+        k3 = self.f_cont(x + 0.5 * dt * k2,  u)
+        k4 = self.f_cont(x + dt * k3,         u)
+        x_next = x + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
         
         # project back to unit quaternion manifold
         quat_next = x_next[3:7]

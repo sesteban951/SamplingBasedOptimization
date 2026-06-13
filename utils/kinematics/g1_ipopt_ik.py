@@ -113,6 +113,11 @@ class G1IPOPTIK:
         # p_l_des(3) + R_l_flat(9) + p_r_des(3) + R_r_flat(9) + I_des_flat(9) +
         # q_prev_legs(12) + w_reg(1) + w_inertia(1) + w_foot(1) + w_sym(1) +
         # p_l_prev(3) + p_r_prev(3) + w_foot_vel(1) + floor_z(1)  →  total 63
+        # g layout (17 rows): com_eq(3) + lfoot_floor(1) + rfoot_floor(1)
+        #                   + lfoot_pos(3) + rfoot_pos(3)
+        #                   + lfoot_rot(3) + rfoot_rot(3)
+        # foot_hard=True:  pins foot position and orientation to target (hard equality).
+        # foot_hard=False: lbg/ubg open → foot pose constraints inactive.
         quat_pelvis   = ca.SX.sym("quat_pelvis",  4)
         p_com_des     = ca.SX.sym("p_com_des",    3)
         p_l_des       = ca.SX.sym("p_l_des",      3)
@@ -207,13 +212,34 @@ class G1IPOPTIK:
                 + w_foot_vel_sym * cost_foot_vel)
 
         # ── Constraints ───────────────────────────────────────────────────
-        # [0:3] CoM equality: com(q) = p_com_des
-        # [3]   left foot floor:  p_l_z >= floor_z  (lbg=0, ubg=inf)
-        # [4]   right foot floor: p_r_z >= floor_z  (lbg=0, ubg=inf)
+        # [0:3]   CoM equality: com(q) = p_com_des
+        # [3]     left foot floor:  p_l_z >= floor_z  (lbg=0, ubg=inf)
+        # [4]     right foot floor: p_r_z >= floor_z  (lbg=0, ubg=inf)
+        # [5:8]   left foot position equality  (activated by lbg/ubg in solve())
+        # [8:11]  right foot position equality (activated by lbg/ubg in solve())
+        # [11:14] left foot orientation — 3-vector rotation error via skew(R_des^T @ R)
+        # [14:17] right foot orientation
         # floor_z = ANKLE_HEIGHT during contact; -1000 during flight (inactive).
         g_lfoot_floor = p_l[2] - floor_z_sym
         g_rfoot_floor = p_r[2] - floor_z_sym
-        g = ca.vertcat(com - p_com_des, g_lfoot_floor, g_rfoot_floor)
+        g_lfoot_pos   = p_l - p_l_des
+        g_rfoot_pos   = p_r - p_r_des
+
+        # Rotation error: skew-symmetric part of R_des^T @ R_actual.
+        # Zero iff R_actual == R_des; independent of sign / branch cuts.
+        def _rot_err(R_act, R_des_mat):
+            E    = R_des_mat.T @ R_act
+            skew = (E - E.T) / 2
+            return ca.vertcat(skew[2, 1], skew[0, 2], skew[1, 0])
+
+        R_l_des_mat = ca.reshape(R_l_flat, 3, 3)
+        R_r_des_mat = ca.reshape(R_r_flat, 3, 3)
+        g_lfoot_rot = _rot_err(R_l, R_l_des_mat)
+        g_rfoot_rot = _rot_err(R_r, R_r_des_mat)
+
+        g = ca.vertcat(com - p_com_des, g_lfoot_floor, g_rfoot_floor,
+                       g_lfoot_pos, g_rfoot_pos,
+                       g_lfoot_rot, g_rfoot_rot)
 
         nlp = {"x": x, "f": cost, "g": g, "p": params}
 
@@ -241,6 +267,7 @@ class G1IPOPTIK:
               p_l_prev: np.ndarray = None, p_r_prev: np.ndarray = None,
               w_foot_vel: float = 0.0,
               floor_z: float = -1000.0,
+              foot_hard: bool = False,
               q_dot_max=None, dt: float = 0.02):
         """
         Solve IK via IPOPT.
@@ -257,6 +284,12 @@ class G1IPOPTIK:
             w_inertia: Weight on inertia cost. None → self.w_inertia.
             w_foot:    Weight on foot placement cost. None → self.w_foot.
             w_sym:     Weight on bilateral symmetry cost.
+            foot_hard: If True, foot xyz position and orientation are enforced as hard
+                       equality constraints instead of being part of the soft cost.
+                       Orientation uses a 3-vector skew-symmetric rotation error
+                       (skew(R_des^T @ R)), giving 3 independent constraints per foot.
+                       Use during contact phases (stance, landing) to guarantee foot
+                       pose regardless of competing costs or CoM mismatch.
             q_dot_max: Per-joint velocity limit [rad/s] as box constraint on leg joints.
                        None → uses URDF velocity limits.  0.0 → disabled.
                        Only active when q_prev is provided.
@@ -318,9 +351,23 @@ class G1IPOPTIK:
         lbx = np.concatenate([[-np.inf, -np.inf, max(0.2, p_com_des[2] - _pz_margin)], leg_lo_eff])
         ubx = np.concatenate([[ np.inf,  np.inf,               p_com_des[2] + _pz_margin], leg_hi_eff])
 
-        # g layout: [com_eq(3), lfoot_floor(1), rfoot_floor(1)]
-        lbg = np.array([0., 0., 0., 0., 0.])
-        ubg = np.array([0., 0., 0., np.inf, np.inf])
+        # g layout (17 rows):
+        #   [0:3]   com_eq      — always equality
+        #   [3]     lfoot_floor — always >= 0
+        #   [4]     rfoot_floor — always >= 0
+        #   [5:8]   lfoot_pos   — equality when foot_hard, else inactive
+        #   [8:11]  rfoot_pos   — equality when foot_hard, else inactive
+        #   [11:14] lfoot_rot   — equality when foot_hard, else inactive
+        #   [14:17] rfoot_rot   — equality when foot_hard, else inactive
+        _BIG  = np.inf
+        _zero = np.zeros(6)   # pos + rot per foot (3+3)
+        _open = np.full(6, _BIG)
+        if foot_hard:
+            lbg = np.concatenate([[0., 0., 0., 0., 0.], _zero, _zero])
+            ubg = np.concatenate([[0., 0., 0., _BIG, _BIG], _zero, _zero])
+        else:
+            lbg = np.concatenate([[0., 0., 0., 0., 0.], -_open, -_open])
+            ubg = np.concatenate([[0., 0., 0., _BIG, _BIG],  _open,  _open])
 
         sol = self._solver(
             x0=x0, lbx=lbx, ubx=ubx,

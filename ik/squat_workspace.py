@@ -43,8 +43,8 @@ R_flat  = np.eye(3)
 oMl_des = pin.SE3(R_flat, np.array([0.0,  G1IK.HIP_WIDTH, G1IK.ANKLE_HEIGHT]))
 oMr_des = pin.SE3(R_flat, np.array([0.0, -G1IK.HIP_WIDTH, G1IK.ANKLE_HEIGHT]))
 
-# Pitch grid: covers stance wind-up (positive) and landing backward tilt (negative)
-PITCHES_SWEEP = np.linspace(-0.40, 0.40, 9)   # rad
+# Pitch grid: covers stance wind-up (positive) and large-pitch landing (backflip ~50°)
+PITCHES_SWEEP = np.linspace(-0.95, 0.95, 19)   # rad  (±54°, 19 slices)
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 

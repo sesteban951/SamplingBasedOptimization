@@ -132,21 +132,33 @@ sec_qidx  = [leg_qidx[i] for i in sec_leg_idx]
 sec_lo    = leg_lo[sec_leg_idx]
 sec_hi    = leg_hi[sec_leg_idx]
 
-# Tuck endpoints for each primary joint (extended → tucked):
-#   hip_pitch  : 0 → min(URDF upper, 2.0 rad)   — pull legs toward chest
-#   knee       : 0 → min(URDF upper, 2.5 rad)   — bend knee tight
-#   ankle_pitch: 0 → max(URDF lower, -0.5 rad)  — dorsiflexion (toes up)
+# Tuck endpoints matching viz_crouch_configs.py / _FLIGHT_TUCK_LEGS in pipeline_srb_ik.py.
+# prim_leg_idx order: [hip_pitch_L, knee_L, ankle_L, hip_pitch_R, knee_R, ankle_R]
+#
+# Convention: negative hip_pitch = hip flexion (thigh/foot swings forward+up).
+#   hip_pitch : +0.03 → -2.50  (STANDING → MAX_CROUCH)
+#   knee      : +0.05 → +2.87
+#   ankle     : -0.03 → +0.50  (point toes at full tuck)
+_TUCK_START = {
+    "hip_pitch":   0.03,
+    "knee":        0.05,
+    "ankle_pitch": -0.03,
+}
+_TUCK_END = {
+    "hip_pitch":   -2.50,
+    "knee":         2.87,
+    "ankle_pitch":  0.50,
+}
+
 prim_start = np.zeros(len(prim_leg_idx))
 prim_end   = np.zeros(len(prim_leg_idx))
 for k, i in enumerate(prim_leg_idx):
     name = LEG_JOINTS[i]
-    lo_i, hi_i = leg_lo[i], leg_hi[i]
-    if "hip_pitch"   in name:
-        prim_end[k] = min(hi_i,  2.0)
-    elif "knee"      in name:
-        prim_end[k] = min(hi_i,  2.5)
-    elif "ankle_pitch" in name:
-        prim_end[k] = max(lo_i, -0.5)
+    for key in _TUCK_START:
+        if key in name:
+            prim_start[k] = _TUCK_START[key]
+            prim_end[k]   = np.clip(_TUCK_END[key], leg_lo[i], leg_hi[i])
+            break
 
 print("Tuck joint classification:")
 print("  Primary  (driven by t):", [LEG_JOINTS[i] for i in prim_leg_idx])

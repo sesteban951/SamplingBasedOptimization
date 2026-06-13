@@ -359,21 +359,37 @@ if _var_inertia:
     def _I_mat_at(k):
         return _I_mat_from_tuck(_tuck_at(k))
 
+    def _w_from_L(L, tuck_sym):
+        """ω = I(tuck)⁻¹ L.  I is diagonal so no ca.solve — just element-wise divide."""
+        I_mat = _I_mat_from_tuck(tuck_sym)
+        return ca.vertcat(L[0] / I_mat[0, 0],
+                          L[1] / I_mat[1, 1],
+                          L[2] / I_mat[2, 2])
+
+    def _f_var(p, q, v, L, tuck_sym, F_net_W, M_total):
+        """Continuous variable-inertia SRB derivatives [ṗ, q̇, v̇, L̇]."""
+        w      = _w_from_L(L, tuck_sym)
+        R_BW   = kin.quat_to_rot_matrix_ca(q)
+        q_dot  = 0.5 * kin.quat_mult_ca(q, ca.vertcat(0, w))
+        p_dot  = v
+        v_dot  = F_net_W / srb.m
+        L_dot  = R_BW.T @ M_total
+        return p_dot, q_dot, v_dot, L_dot
+
 ##############################################################
-# Touchdown-to-world mapping for landing feet (yaw-only)
+# Touchdown-to-world mapping for landing feet (full 3D rotation)
+# Use the full rotation matrix so that pitch-heavy manoeuvres
+# (e.g. backflip) don't produce spurious yaw and swapped feet.
+# p_L_land is 2D body-frame [x,y]; foot z_body≈0, so the xy
+# world projection is just R3d[:2,:2] @ p_L_land.
 ##############################################################
 
-q_touchdown = X[3:7, flight_end]
-yaw_touchdown = kin.quat_to_yaw_ca(q_touchdown)
-c_td = ca.cos(yaw_touchdown)
-s_td = ca.sin(yaw_touchdown)
-Rz_touchdown = ca.vertcat(
-    ca.horzcat(c_td, -s_td),
-    ca.horzcat(s_td,  c_td),
-)
+q_touchdown  = X[3:7, flight_end]
+R_td_3x3     = kin.quat_to_rot_matrix_ca(q_touchdown)   # 3×3, body→world
+R_td_xy      = R_td_3x3[:2, :2]                         # 2×2 xy block
 p_com_touchdown_xy = X[0:2, flight_end]
-p_L_land_xy_W = p_com_touchdown_xy + Rz_touchdown @ p_L_land
-p_R_land_xy_W = p_com_touchdown_xy + Rz_touchdown @ p_R_land
+p_L_land_xy_W = p_com_touchdown_xy + R_td_xy @ p_L_land
+p_R_land_xy_W = p_com_touchdown_xy + R_td_xy @ p_R_land
 p_L_land_W = ca.vertcat(p_L_land_xy_W, _landing_gz)
 p_R_land_W = ca.vertcat(p_R_land_xy_W, _landing_gz)
 
@@ -534,30 +550,28 @@ for k in range(N):
 
     # dynamics
     if _var_inertia:
-        # d(I·ω)/dt = M_ext using angular momentum L = I·ω as auxiliary variable.
-        # Avoids ca.solve (which creates a dense symbolic Hessian).
-        # L dynamics are LINEAR; coupling I@w=L is BILINEAR — much better for IPOPT.
-        q_k  = X[3:7, k]
-        v_k  = X[7:10, k]
-        w_k  = X[10:13, k]
-        R_BW = kin.quat_to_rot_matrix_ca(q_k)   # body-to-world rotation
-
+        # RK4 integration of [p, q, v, L] with variable inertia.
+        # I is diagonal so ω = I⁻¹L is element-wise — no ca.solve needed.
+        # Tuck is treated as ZOH over the interval (value at node k).
+        # w_{k+1} is pinned by the I@w=L coupling constraint applied after the loop.
+        p_k = X[0:3, k]; q_k = X[3:7, k]; v_k = X[7:10, k]
+        L_k = L_var[:, k]
+        tuck_k  = _tuck_at(k)
         F_net_W = F_total + ca.vertcat(0.0, 0.0, -srb.m * srb.g)
-        M_net_B = R_BW.T @ M_total
 
-        # L dynamics: L_{k+1} = L_k + dt * M_net_B  (angular momentum conservation)
-        opti.subject_to(L_var[:, k + 1] == L_var[:, k] + dt_k * M_net_B)
+        p1, q1, v1, L1 = _f_var(p_k,                  q_k,                  v_k,                  L_k,                  tuck_k, F_net_W, M_total)
+        p2, q2, v2, L2 = _f_var(p_k + 0.5*dt_k*p1,   q_k + 0.5*dt_k*q1,   v_k + 0.5*dt_k*v1,   L_k + 0.5*dt_k*L1,   tuck_k, F_net_W, M_total)
+        p3, q3, v3, L3 = _f_var(p_k + 0.5*dt_k*p2,   q_k + 0.5*dt_k*q2,   v_k + 0.5*dt_k*v2,   L_k + 0.5*dt_k*L2,   tuck_k, F_net_W, M_total)
+        p4, q4, v4, L4 = _f_var(p_k + dt_k*p3,        q_k + dt_k*q3,        v_k + dt_k*v3,        L_k + dt_k*L3,        tuck_k, F_net_W, M_total)
 
-        # Position / quaternion / velocity dynamics (unchanged from fixed-I formulation)
-        w_quat = ca.vertcat(0, w_k)
-        q_dot  = 0.5 * kin.quat_mult_ca(q_k, w_quat)
-        p_next = X[0:3, k] + dt_k * v_k
-        q_next = q_k + dt_k * q_dot
+        p_next = p_k + (dt_k / 6.0) * (p1 + 2*p2 + 2*p3 + p4)
+        q_next = q_k + (dt_k / 6.0) * (q1 + 2*q2 + 2*q3 + q4)
+        v_next = v_k + (dt_k / 6.0) * (v1 + 2*v2 + 2*v3 + v4)
+        L_next = L_k + (dt_k / 6.0) * (L1 + 2*L2 + 2*L3 + L4)
         q_next = q_next / ca.norm_2(q_next)
-        v_next = v_k + dt_k * (F_net_W / srb.m)
 
-        # w_{k+1} is not explicitly stepped; it is pinned by the coupling L=I@w below.
         opti.subject_to(X[0:10, k + 1] == ca.vertcat(p_next, q_next, v_next))
+        opti.subject_to(L_var[:, k + 1] == L_next)
     else:
         u      = ca.vertcat(F_total, M_total)
         x_next = f(X[:, k], u, dt_k)
@@ -762,21 +776,27 @@ for k in range(N):
     if k < stance_end:
         x_ref_k = None
     elif k < flight_end:
-        alpha = (k - stance_end + 1) / N_flight
-        quat_k = interp.sample_piecewise_slerp(alpha, quat_slerp_keyframes)
+        if _var_inertia:
+            # Variable-inertia flight: angular momentum L = I·ω is conserved,
+            # so ω ∝ 1/I(tuck).  Don't track a constant-rate SLERP reference —
+            # it fights physics.  Terminal constraint + L-dynamics drive the flip.
+            x_ref_k = None
+        else:
+            alpha = (k - stance_end + 1) / N_flight
+            quat_k = interp.sample_piecewise_slerp(alpha, quat_slerp_keyframes)
 
-        # body-frame angular velocity reference (scaled by N_flight / T_flight)
-        j = k - stance_end
-        omega_ref_k = ca.DM(omega_ref_body[j]) * N_flight / T_flight
+            # body-frame angular velocity reference (scaled by N_flight / T_flight)
+            j = k - stance_end
+            omega_ref_k = ca.DM(omega_ref_body[j]) * N_flight / T_flight
 
-        x_ref_k = ca.vertcat(
-            alpha * x_goal[0] + (1 - alpha) * x0[0],
-            alpha * x_goal[1] + (1 - alpha) * x0[1],
-            x_goal[2],
-            quat_k[0], quat_k[1], quat_k[2], quat_k[3],
-            0.0, 0.0, 0.0,
-            omega_ref_k[0], omega_ref_k[1], omega_ref_k[2],
-        )
+            x_ref_k = ca.vertcat(
+                alpha * x_goal[0] + (1 - alpha) * x0[0],
+                alpha * x_goal[1] + (1 - alpha) * x0[1],
+                x_goal[2],
+                quat_k[0], quat_k[1], quat_k[2], quat_k[3],
+                0.0, 0.0, 0.0,
+                omega_ref_k[0], omega_ref_k[1], omega_ref_k[2],
+            )
     else:
         x_ref_k = x_goal_ca
 
@@ -823,6 +843,16 @@ for k in range(N):
     if _var_inertia and cfg.costs.Q_I_dot > 0 and stance_end <= k < flight_end:
         fi = k - stance_end
         J += dt_k * 0.5 * cfg.costs.Q_I_dot * (tuck_flight[fi + 1] - tuck_flight[fi])**2
+
+# flight midpoint orientation cost — guides flip direction without enforcing a rate.
+# Penalises deviation from the halfway-through-maneuver orientation at the midpoint
+# flight node.  Frontflip and backflip have ~180° different orientations here, so
+# a small weight is enough to break the degeneracy while leaving the rate free.
+if cfg.costs.Q_flip_mid > 0:
+    k_mid = stance_end + N_flight // 2
+    quat_mid = ca.DM(interp.sample_piecewise_slerp(0.5, quat_slerp_keyframes))
+    quat_err_mid = kin.quat_diff_ca(X[3:7, k_mid], quat_mid)
+    J += cfg.costs.Q_flip_mid * ca.sumsqr(kin.quat_log_ca(quat_err_mid))
 
 # foot placement cost (body frame)
 J += srb.foot_placement_cost(p_L_land, p_R_land, p_L_goal, p_R_goal)
@@ -969,16 +999,11 @@ dt_land_sol = T_land_sol / N_land
 F = (FL_sol + FR_sol).T  # (N, 3)
 
 q_touchdown_sol = X_sol[3:7, flight_end]
-yaw_touchdown_sol = kin.quat_to_yaw(q_touchdown_sol)
-c_td_sol = np.cos(yaw_touchdown_sol)
-s_td_sol = np.sin(yaw_touchdown_sol)
-Rz_touchdown_sol = np.array([
-    [c_td_sol, -s_td_sol],
-    [s_td_sol,  c_td_sol],
-])
+R_td_sol_3x3    = kin.quat_to_rot_matrix(q_touchdown_sol)   # 3×3
+R_td_sol_xy     = R_td_sol_3x3[:2, :2]                      # 2×2 xy block
 p_com_touchdown_xy_sol = X_sol[0:2, flight_end]
-pL_land_world_xy = p_com_touchdown_xy_sol + Rz_touchdown_sol @ pL_land
-pR_land_world_xy = p_com_touchdown_xy_sol + Rz_touchdown_sol @ pR_land
+pL_land_world_xy = p_com_touchdown_xy_sol + R_td_sol_xy @ pL_land
+pR_land_world_xy = p_com_touchdown_xy_sol + R_td_sol_xy @ pR_land
 
 M = np.zeros((N, 3))
 for k in range(N):
