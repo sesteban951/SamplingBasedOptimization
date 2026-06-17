@@ -17,13 +17,13 @@ config = AerialConfig(
         w_body=[0.0, 0.0, 0.0],
     ),
     goal=GoalStateConfig(
-        p_com=[0.5, 0.0, 0.77],
-        rpy_deg=[0.0, 0.0, 360.0],
+        p_com=[0.2, 0.0, 0.77],
+        rpy_deg=[0.0, 0.0, 180.0],
         v_com=[0.0, 0.0, 0.0],
         w_body=[0.0, 0.0, 0.0],
     ),
     maneuver=ManeuverConfig(
-        rpy_deg=[0.0, 0.0, 360.0],
+        rpy_deg=[0.0, 0.0, 180.0],
     ),
     timing=TimingConfig(
         dt_nom=0.02,
@@ -60,8 +60,11 @@ config = AerialConfig(
         M_ankle_z_max=10.0,
         F_leg_max=500.0,
         landing_tol=0.1,
-        stance_rotation_allow=0.15,
+        stance_rotation_allow=0.4,
         touchdown_rp_max=0.15,
+        workspace_pz=True,
+        workspace_pz_2d=True,
+
     ),
     solver=SolverConfig(
         max_iter=5000,

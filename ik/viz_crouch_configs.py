@@ -78,25 +78,34 @@ def _mj_qidx(name):
 
 _mj_leg_idx = [_mj_qidx(n) for n in LEG_JOINTS]
 
-_ARM_DEFAULTS = {
-    "left_shoulder_pitch_joint":  0.498,
+_ARM_FIXED = {
     "left_shoulder_roll_joint":   0.3,
     "left_shoulder_yaw_joint":    0.0,
-    "left_elbow_joint":           0.501,
-    "right_shoulder_pitch_joint": 0.498,
     "right_shoulder_roll_joint":  -0.3,
     "right_shoulder_yaw_joint":   0.0,
-    "right_elbow_joint":          0.501,
 }
-_mj_arm = {_mj_qidx(n): v for n, v in _ARM_DEFAULTS.items()}
+_mj_arm_fixed = {_mj_qidx(n): v for n, v in _ARM_FIXED.items()}
+
+_ARM_TUCK_JOINTS = [
+    "left_shoulder_pitch_joint", "left_elbow_joint",
+    "right_shoulder_pitch_joint", "right_elbow_joint",
+]
+_mj_arm_tuck_idx = [_mj_qidx(n) for n in _ARM_TUCK_JOINTS]
+
+_arm_pitch_lo = -3.089
+_arm_pitch_hi =  2.670
+_arm_elbow_lo = -1.047
+_arm_elbow_hi =  2.094
 
 # ── State ─────────────────────────────────────────────────────────────────────
 
 state = {
-    "t":         0.0,
-    "mode":      "flight",   # "ground" or "flight"
-    "flight_z":  1.0,
-    "dirty":     True,
+    "t":            0.0,
+    "mode":         "flight",   # "ground" or "flight"
+    "flight_z":     1.0,
+    "shoulder_pitch": 0.498,    # free — dial with W/S
+    "elbow":          0.501,    # free — dial with E/D
+    "dirty":        True,
 }
 
 # ── Config application ────────────────────────────────────────────────────────
@@ -116,9 +125,12 @@ def _pelvis_z_ground(q_legs):
 def apply_config():
     t  = state["t"]
     ql = (1.0 - t) * STANDING + t * MAX_CROUCH
-
-    for mj_i, v in zip(_mj_leg_idx, ql): mj_data.qpos[mj_i] = v
-    for mj_i, v in _mj_arm.items():      mj_data.qpos[mj_i] = v
+    sp = state["shoulder_pitch"]
+    el = state["elbow"]
+    qa = [sp, el, sp, el]   # L pitch, L elbow, R pitch, R elbow
+    for mj_i, v in zip(_mj_leg_idx, ql):      mj_data.qpos[mj_i] = v
+    for mj_i, v in zip(_mj_arm_tuck_idx, qa): mj_data.qpos[mj_i] = v
+    for mj_i, v in _mj_arm_fixed.items():     mj_data.qpos[mj_i] = v
 
     pz = _pelvis_z_ground(ql) if state["mode"] == "ground" else state["flight_z"]
     mj_data.qpos[0:3] = [0.0, 0.0, pz]
@@ -131,8 +143,12 @@ def print_config():
     t  = state["t"]
     ql = (1.0 - t) * STANDING + t * MAX_CROUCH
     pz = mj_data.qpos[2]
+    sp = state["shoulder_pitch"]
+    el = state["elbow"]
     print(f"\n── t={t:.2f}  mode={state['mode']}  pelvis_z={pz:.3f}m ───────────")
     print(f"  hip_pitch={ql[0]:+.4f}  knee={ql[3]:.4f}  ankle={ql[4]:+.4f}")
+    print(f"  shoulder_pitch={sp:+.4f}  elbow={el:.4f}")
+    print(f"  → ARM_TUCK = np.array([{sp:.4f}, {el:.4f}, {sp:.4f}, {el:.4f}])")
 
     if state["mode"] == "ground":
         q = pin.neutral(pin_model); q[2] = pz
@@ -145,18 +161,26 @@ def print_config():
 
 # ── Keyboard callback (runs in viewer thread) ─────────────────────────────────
 # GLFW key codes: LEFT=263, RIGHT=262, UP=265, DOWN=264
-# ASCII uppercase: G=71, F=70, R=82, T=84, [=91, ]=93
+# ASCII uppercase: G=71, F=70, R=82, T=84, [=91, ]=93, W=87, S=83, E=69, D=68
 
 def key_callback(keycode):
     dirty = True
-    if keycode == 262:    # RIGHT — coarse +
+    if keycode == 262:    # RIGHT — coarse tuck +
         state["t"] = min(1.0, round(state["t"] + 0.05, 4))
-    elif keycode == 263:  # LEFT — coarse -
+    elif keycode == 263:  # LEFT — coarse tuck -
         state["t"] = max(0.0, round(state["t"] - 0.05, 4))
-    elif keycode == 265:  # UP — fine +
+    elif keycode == 265:  # UP — fine tuck +
         state["t"] = min(1.0, round(state["t"] + 0.01, 4))
-    elif keycode == 264:  # DOWN — fine -
+    elif keycode == 264:  # DOWN — fine tuck -
         state["t"] = max(0.0, round(state["t"] - 0.01, 4))
+    elif keycode == 87:   # W — shoulder pitch +0.05
+        state["shoulder_pitch"] = round(np.clip(state["shoulder_pitch"] + 0.05, _arm_pitch_lo, _arm_pitch_hi), 4)
+    elif keycode == 83:   # S — shoulder pitch -0.05
+        state["shoulder_pitch"] = round(np.clip(state["shoulder_pitch"] - 0.05, _arm_pitch_lo, _arm_pitch_hi), 4)
+    elif keycode == 69:   # E — elbow +0.05
+        state["elbow"] = round(np.clip(state["elbow"] + 0.05, _arm_elbow_lo, _arm_elbow_hi), 4)
+    elif keycode == 68:   # D — elbow -0.05
+        state["elbow"] = round(np.clip(state["elbow"] - 0.05, _arm_elbow_lo, _arm_elbow_hi), 4)
     elif keycode == 71:   # G — ground mode
         state["mode"] = "ground"
     elif keycode == 70:   # F — flight mode
@@ -165,8 +189,10 @@ def key_callback(keycode):
         state["flight_z"] = round(state["flight_z"] - 0.1, 2)
     elif keycode == 93:   # ] — raise pelvis
         state["flight_z"] = round(state["flight_z"] + 0.1, 2)
-    elif keycode == 82:   # R — reset
+    elif keycode == 82:   # R — reset to standing
         state["t"] = 0.0
+        state["shoulder_pitch"] = 0.498
+        state["elbow"] = 0.501
     elif keycode == 84:   # T — print
         print_config()
         dirty = False
@@ -175,10 +201,12 @@ def key_callback(keycode):
 
     if dirty:
         state["dirty"] = True
-        t = state["t"]
+        t  = state["t"]
         ql = (1.0 - t) * STANDING + t * MAX_CROUCH
-        print(f"\rt={t:.2f}  mode={state['mode']}  flight_z={state['flight_z']:.1f}m"
-              f"  hip={ql[0]:+.2f}  knee={ql[3]:.2f}  ank={ql[4]:+.2f}   ", end="", flush=True)
+        sp = state["shoulder_pitch"]
+        el = state["elbow"]
+        print(f"\rt={t:.2f}  hip={ql[0]:+.2f}  knee={ql[3]:.2f}"
+              f"  | sp={sp:+.2f}  el={el:.2f}   ", end="", flush=True)
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
@@ -187,10 +215,12 @@ print("G1 Crouch / Tuck Visualizer")
 print("=" * 62)
 print("  LEFT / RIGHT   coarse tuck  (±0.05)")
 print("  UP   / DOWN    fine tuck    (±0.01)")
+print("  W / S          shoulder pitch  (±0.05)")
+print("  E / D          elbow           (±0.05)")
 print("  G / F          ground / flight mode")
 print("  [ / ]          pelvis height ±0.1 m  (flight mode)")
 print("  R              reset to standing")
-print("  T              print current joint config")
+print("  T              print config  (shows ARM_TUCK line to copy)")
 print("=" * 62)
 print("Click the viewer window to capture key input.\n")
 
