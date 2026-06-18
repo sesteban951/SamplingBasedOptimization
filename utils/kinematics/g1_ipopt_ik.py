@@ -268,6 +268,7 @@ class G1IPOPTIK:
               w_foot_vel: float = 0.0,
               floor_z: float = -1000.0,
               foot_hard: bool = False,
+              foot_yaw_tol: float = 0.0,
               q_dot_max=None, dt: float = 0.02):
         """
         Solve IK via IPOPT.
@@ -290,6 +291,12 @@ class G1IPOPTIK:
                        (skew(R_des^T @ R)), giving 3 independent constraints per foot.
                        Use during contact phases (stance, landing) to guarantee foot
                        pose regardless of competing costs or CoM mismatch.
+            foot_yaw_tol: Half-width [rad] of the allowed foot yaw (rotation about
+                       world-vertical — foot stays flat on the ground, twists in place).
+                       Only used when foot_hard=True: the yaw component of each foot's
+                       rotation constraint is relaxed from a hard equality to the band
+                       [-sin(tol), +sin(tol)], while roll/pitch stay pinned.  0.0 (default)
+                       keeps the original fully-rigid foot orientation.
             q_dot_max: Per-joint velocity limit [rad/s] as box constraint on leg joints.
                        None → uses URDF velocity limits.  0.0 → disabled.
                        Only active when q_prev is provided.
@@ -360,11 +367,19 @@ class G1IPOPTIK:
         #   [11:14] lfoot_rot   — equality when foot_hard, else inactive
         #   [14:17] rfoot_rot   — equality when foot_hard, else inactive
         _BIG  = np.inf
-        _zero = np.zeros(6)   # pos + rot per foot (3+3)
+        _zero = np.zeros(6)   # left pos (3) + right pos (3)
         _open = np.full(6, _BIG)
+        # Rot block layout: [lfoot_rot(rx,ry,rz), rfoot_rot(rx,ry,rz)] where the error is
+        # expressed in the target frame (R_des=I → world axes).  The z-component is the
+        # yaw error about world-vertical; relaxing it to a band of ±sin(foot_yaw_tol)
+        # lets each foot rotate about vertical (stays flat on the ground) within that
+        # cone while roll/pitch stay pinned.  tol=0 → band collapses to {0} (rigid).
+        _yaw_bnd = float(np.sin(foot_yaw_tol))
+        _rot_lo  = np.array([0., 0., -_yaw_bnd, 0., 0., -_yaw_bnd])
+        _rot_hi  = np.array([0., 0.,  _yaw_bnd, 0., 0.,  _yaw_bnd])
         if foot_hard:
-            lbg = np.concatenate([[0., 0., 0., 0., 0.], _zero, _zero])
-            ubg = np.concatenate([[0., 0., 0., _BIG, _BIG], _zero, _zero])
+            lbg = np.concatenate([[0., 0., 0., 0., 0.], _zero, _rot_lo])
+            ubg = np.concatenate([[0., 0., 0., _BIG, _BIG], _zero, _rot_hi])
         else:
             lbg = np.concatenate([[0., 0., 0., 0., 0.], -_open, -_open])
             ubg = np.concatenate([[0., 0., 0., _BIG, _BIG],  _open,  _open])

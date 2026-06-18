@@ -29,7 +29,7 @@ from kino_ik.kino_nlp import distribute_wrench_to_points
 
 
 def _make_stub(model, data, q_srb, v_srb, c_srb, cd_srb, lam_srb,
-               stance_end, flight_end, N):
+               stance_end, flight_end, N, n_terminal):
     """Lightweight object exposing only what plot_ik_vs_ref reads."""
     mass = float(sum(model.inertias[i].mass for i in range(1, model.njoints)))
 
@@ -45,7 +45,7 @@ def _make_stub(model, data, q_srb, v_srb, c_srb, cd_srb, lam_srb,
         c_srb=c_srb, cd_srb=cd_srb,
         quat_srb_pin=np.column_stack([q_srb[:, 4:7], q_srb[:, 3:4]]),
         w_body_srb=v_srb[:, 3:6], lam_srb=lam_srb,
-        stance_end=stance_end, flight_end=flight_end)
+        stance_end=stance_end, flight_end=flight_end, n_terminal=n_terminal)
 
 
 def main():
@@ -63,13 +63,13 @@ def main():
     print(f"[view] SRB dir : {srb_dir}")
 
     times, q_srb, feet_ext, stance_end, flight_end = load_srb_results(srb_dir)
-    N = len(times) - 1
+    N_srb = len(times) - 1
     v_srb = np.loadtxt(os.path.join(srb_dir, "v_opt.csv"), delimiter=",")
 
     model = pin.buildModelFromUrdf(_DEFAULT_URDF, pin.JointModelFreeFlyer())
     data = model.createData()
     c_srb, cd_srb, _ = compute_com_refs(model, data, q_srb, v_srb)
-    lam_srb = distribute_wrench_to_points(load_lambda_srb(srb_dir, N))
+    lam_srb = distribute_wrench_to_points(load_lambda_srb(srb_dir, N_srb))
 
     Q_sol = np.loadtxt(os.path.join(out_dir, "kino_q.csv"), delimiter=",")
     V_sol = np.loadtxt(os.path.join(out_dir, "kino_v.csv"), delimiter=",")
@@ -78,8 +78,37 @@ def main():
     print(f"[view] Loaded kino_q {Q_sol.shape}, kino_v {V_sol.shape}, "
           f"lambda {None if lam_sol is None else lam_sol.shape}")
 
+    # Account for appended terminal settling nodes (pipeline --n-terminal): the
+    # saved kino trajectory has n_terminal extra nodes past the SRB motion, and
+    # kino_time.csv carries the extended grid.  Replicate the last SRB reference
+    # row across the settle window so every series matches the solved length —
+    # this mirrors run_kino_pipeline step 10b (which the NLP plot expects).
+    N = Q_sol.shape[0] - 1
+    n_terminal = N - N_srb
+    if n_terminal < 0:
+        raise ValueError(f"Saved kino_q has {N+1} nodes < SRB {N_srb+1}; mismatch")
+
+    time_path = os.path.join(out_dir, "kino_time.csv")
+    if os.path.exists(time_path):
+        times = np.loadtxt(time_path, delimiter=",")
+    elif n_terminal > 0:
+        dt_last = float(times[-1] - times[-2])
+        times = np.concatenate(
+            [times, times[-1] + dt_last * np.arange(1, n_terminal + 1)])
+
+    if n_terminal > 0:
+        def _rep_last(a):
+            return np.vstack([a, np.repeat(a[-1:], n_terminal, axis=0)])
+        q_srb   = _rep_last(q_srb)     # per-node series → N+1 rows
+        v_srb   = _rep_last(v_srb)
+        c_srb   = _rep_last(c_srb)
+        cd_srb  = _rep_last(cd_srb)
+        lam_srb = _rep_last(lam_srb)   # per-interval series → N rows
+        print(f"[view] Extended SRB refs by {n_terminal} terminal settling nodes "
+              f"({N_srb} SRB intervals + {n_terminal} settle = {N})")
+
     nlp = _make_stub(model, data, q_srb, v_srb, c_srb, cd_srb, lam_srb,
-                     stance_end, flight_end, N)
+                     stance_end, flight_end, N, n_terminal)
 
     if not args.no_plot:
         plot_ik_vs_ref(nlp, Q_sol, V_sol, lam_sol, times, out_dir, show=True)
@@ -89,8 +118,10 @@ def main():
         I_opt_path = os.path.join(srb_dir, "I_opt.csv")
         if os.path.exists(I_opt_path):
             raw = np.loadtxt(I_opt_path, delimiter=",", comments="#")
-            if raw.shape == (N + 1, 6):
-                I_opt = raw
+            if raw.shape == (N_srb + 1, 6):
+                # Freeze the box inertia at landing across the settle window.
+                I_opt = (np.vstack([raw, np.repeat(raw[-1:], n_terminal, axis=0)])
+                         if n_terminal > 0 else raw)
         build_combined_xml(_G1_XML, _SRB_XML, _COMBINED_XML)
         print("[view] Launching MuJoCo viewer (close to exit)...")
         visualize(Q_sol, q_srb, times, _COMBINED_XML, speed=args.speed, I_opt=I_opt)

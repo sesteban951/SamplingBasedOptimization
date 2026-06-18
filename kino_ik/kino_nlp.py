@@ -69,7 +69,7 @@ from kino_ik import collision_model as cm
 # their symbolic form) changes, so stale serialized solvers are not reloaded.
 # (Weights and reference DATA are not part of the structure — weights are runtime
 # parameters; reference data is hashed into the cache key.)
-_CACHE_VERSION = "v5"   # v5: self-collision (capsule sphere-pair) constraints
+_CACHE_VERSION = "v6"   # v6: appended terminal settling nodes (no SRB cost, V_N=0)
 
 _REPO_ROOT    = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _DEFAULT_URDF = os.path.join(_REPO_ROOT, "models", "g1", "g1_29dof_rev_1_0.urdf")
@@ -119,6 +119,14 @@ FLIGHT_TUCK_LEGS = np.array([
 # order [L_shoulder_pitch, L_elbow, R_shoulder_pitch, R_elbow].  Base (right) is
 FLIGHT_TUCK_ARMS = np.array([-0.802, -0.599, -0.802, -0.599])
 
+# Standing leg config (near-straight), order matches LEG_JOINTS — mirrors
+# STANDING in ik/viz_crouch_configs.py.  Used as the terminal "stand up" target
+# that the strong settle-window regularizer (w_qreg_term) pulls the legs toward.
+STANDING_LEGS = np.array([
+    0.03, 0.0, 0.0, 0.05, -0.03, 0.0,   # left
+    0.03, 0.0, 0.0, 0.05, -0.03, 0.0,   # right
+])
+
 
 def _skew_ca(u):
     return ca.vertcat(ca.horzcat(   0, -u[2],  u[1]),
@@ -165,6 +173,10 @@ _DEFAULT_WEIGHTS = {
     'w_vsmooth':   1e-1,   # velocity smoothness regularizer (conditioning)
     'w_ke':        3e0,   # joint kinetic energy  1/2 qj_dot^T M_jj qj_dot (all nodes)
     'w_config':    35,   # flight posture prior toward the 0.9-tuck config
+    'w_qreg_term': 1e3,   # STRONG terminal regularizer: on the appended settling
+                          # nodes only, pulls the free DOF toward the standing
+                          # config (legs->STANDING, arms->default) so the robot
+                          # rises from the landing crouch into a static stand
 }
 
 
@@ -185,6 +197,9 @@ class KinoNLP:
                  Q_warm,         # (N+1, nq) warm-start configuration
                  V_warm,         # (N+1, nv) warm-start velocity
                  mu=1.0,         # friction coefficient (linearized pyramid)
+                 n_terminal=0,   # # of settling nodes appended after the SRB motion:
+                                 #   no SRB tracking cost, but full dynamics/contact
+                                 #   constraints + a terminal rest constraint V_N=0
                  weights=None,
                  hessian_mode="exact",  # "exact" (default, ~5x faster) or "limited-memory"
                  expand=True,    # expand NLP to a single SX graph (much faster eval)
@@ -255,12 +270,22 @@ class KinoNLP:
         self.floor_z      = float(floor_z)
         self.q_arm_default = np.asarray(q_arm_default, dtype=float)
         self.Q_warm       = np.asarray(Q_warm, dtype=float)
+
+        # Terminal "stand up" target over the free DOF (legs + sagittal arms),
+        # aligned with self._free_qidx = leg_qidx + arm_free_qidx: legs go to the
+        # near-straight STANDING config, the freed arms return to their defaults.
+        self._stand_free = np.concatenate([
+            STANDING_LEGS, self.q_arm_default[self._arm_free_qidx]])
         self.V_warm       = np.asarray(V_warm, dtype=float)
 
         self.mass = float(sum(self.model.inertias[i].mass
                               for i in range(1, self.model.njoints)))
         self.g    = _G
         self.mu   = float(mu)
+        # Settling nodes appended after the SRB motion: the last `n_terminal`
+        # nodes (k > N - n_terminal) carry no SRB tracking cost — only the
+        # dynamics/contact constraints and the terminal rest constraint V_N=0.
+        self.n_terminal = int(n_terminal)
         self.self_collision   = bool(self_collision)
         self.collision_margin = cm.MARGIN if collision_margin is None else float(collision_margin)
         self._caps = cm.build_capsules(self.model)   # "sausage man" capsule model
@@ -275,12 +300,14 @@ class KinoNLP:
         self.w_vsmooth = w['w_vsmooth']
         self.w_ke      = w['w_ke']
         self.w_config  = w['w_config']
+        self.w_qreg_term = w['w_qreg_term']
 
         # Weights are runtime PARAMETERS of the cached solver (so tuning them does
         # not invalidate the cache).  This fixed order maps self.w_* <-> the
         # parameter vector passed to the solver function.
         self._weight_keys = ['w_com', 'w_cdot', 'w_quat', 'w_wbase', 'w_lam',
-                             'w_qreg', 'w_vsmooth', 'w_ke', 'w_config']
+                             'w_qreg', 'w_vsmooth', 'w_ke', 'w_config',
+                             'w_qreg_term']
         self.use_cache  = bool(use_cache)
         self.rebuild    = bool(rebuild)
         self.cache_keep = int(cache_keep)
@@ -386,6 +413,7 @@ class KinoNLP:
         h = hashlib.sha256()
         h.update(_CACHE_VERSION.encode())
         for s in (self.N, self.stance_end, self.flight_end, self.floor_z, self.mu,
+                  self.n_terminal,
                   self.hessian_mode, self.expand, self.linear_solver,
                   self.mu_strategy, self.max_iter, self.nq, self.nv,
                   self.self_collision, self.collision_margin,
@@ -401,7 +429,7 @@ class KinoNLP:
         for arr in (self.dt_vec, self.quat_srb_pin, self.w_body_srb, self.c_srb,
                     self.cd_srb, self.lam_srb, np.nan_to_num(self.p_foot_srb, nan=-9e9),
                     self.q_arm_default, self.Q_warm, self.V_warm,
-                    FOOT_CORNERS, self._flight_prior,
+                    FOOT_CORNERS, self._flight_prior, self._stand_free,
                     np.array(self._free_qidx, dtype=float)):
             h.update(np.ascontiguousarray(arr, dtype=float).tobytes())
         return h.hexdigest()[:16]
@@ -481,6 +509,12 @@ class KinoNLP:
                 opti.subject_to(V[vi, k] == 0.0)
         opti.subject_to(ca.dot(Q[3:7, 0], Q[3:7, 0]) == 1.0)
 
+        # Settling nodes (the last n_terminal nodes, k > N - n_terminal) are
+        # appended after the SRB motion ends: they keep the full dynamics /
+        # contact / collision / limit machinery but drop the SRB tracking costs.
+        def _is_settling(k):
+            return self.n_terminal > 0 and k > (N - self.n_terminal)
+
         # ── Per-node defining constraints + tracking costs ────────────────────
         for k in range(N + 1):
             Q_k, V_k = Q[:, k], V[:, k]
@@ -518,22 +552,32 @@ class KinoNLP:
                 opti.subject_to(_vee_err(R_l) == 0)
                 opti.subject_to(_vee_err(R_r) == 0)
 
-            # Tracking costs (s = [c, c_dot, quat, w, lambda])
-            e_c    = C[:, k]      - self.c_srb[k]
-            e_cd   = Cd[:, k]     - self.cd_srb[k]
-            e_quat = Q[3:7, k]    - self.quat_srb_pin[k]
-            e_w    = V[3:6, k]    - self.w_body_srb[k]
-            J += wp['w_com']  * ca.dot(e_c,  e_c)
-            J += wp['w_cdot'] * ca.dot(e_cd, e_cd)
-            J += wp['w_quat'] * ca.dot(e_quat, e_quat)
-            J += wp['w_wbase']* ca.dot(e_w,  e_w)
+            # Tracking costs (s = [c, c_dot, quat, w, lambda]) — only where an
+            # SRB reference exists; appended settling nodes track nothing.
+            if not _is_settling(k):
+                e_c    = C[:, k]      - self.c_srb[k]
+                e_cd   = Cd[:, k]     - self.cd_srb[k]
+                e_quat = Q[3:7, k]    - self.quat_srb_pin[k]
+                e_w    = V[3:6, k]    - self.w_body_srb[k]
+                J += wp['w_com']  * ca.dot(e_c,  e_c)
+                J += wp['w_cdot'] * ca.dot(e_cd, e_cd)
+                J += wp['w_quat'] * ca.dot(e_quat, e_quat)
+                J += wp['w_wbase']* ca.dot(e_w,  e_w)
 
-            # Free-joint regularization toward warm start (conditioning; for the
-            # freed arms the warm start is the default pose, so this gently keeps
-            # the arms home unless the dynamics genuinely need them).
-            q_free_warm_k = np.array([self.Q_warm[k, qi] for qi in self._free_qidx])
-            e_qreg = ca.vertcat(*[Q[qi, k] for qi in self._free_qidx]) - q_free_warm_k
-            J += wp['w_qreg'] * ca.dot(e_qreg, e_qreg)
+            # Free-joint regularization.  On the appended settling window this
+            # becomes a STRONG pull toward the standing config (w_qreg_term) so the
+            # robot rises from the landing crouch into a static stand; elsewhere it
+            # is the mild conditioning regularizer toward the warm-start config
+            # (for the freed arms the warm start is the default pose, so it gently
+            # keeps the arms home unless the dynamics genuinely need them).
+            q_free_k = ca.vertcat(*[Q[qi, k] for qi in self._free_qidx])
+            if _is_settling(k):
+                e_qreg = q_free_k - self._stand_free
+                J += wp['w_qreg_term'] * ca.dot(e_qreg, e_qreg)
+            else:
+                q_free_warm_k = np.array([self.Q_warm[k, qi] for qi in self._free_qidx])
+                e_qreg = q_free_k - q_free_warm_k
+                J += wp['w_qreg'] * ca.dot(e_qreg, e_qreg)
 
             # Joint kinetic-energy regularizer (all nodes): minimum-effort
             # redundancy resolution — self-scoping, bites mainly in the swing
@@ -597,11 +641,22 @@ class KinoNLP:
                     _friction(f_Ri)
             opti.subject_to(Hd[:, k] == ca.vertcat(lin, ang))
 
-            # Wrench tracking + velocity smoothness
-            e_lam = Lam[:, k] - self.lam_srb[k]
-            J += wp['w_lam'] * ca.dot(e_lam, e_lam)
+            # Wrench tracking (skip on settling intervals — no SRB reference) +
+            # velocity smoothness (kept everywhere; helps damp the settle).
+            # Settling intervals are k >= N - n_terminal (those that connect the
+            # appended nodes).
+            if not (self.n_terminal > 0 and k >= (N - self.n_terminal)):
+                e_lam = Lam[:, k] - self.lam_srb[k]
+                J += wp['w_lam'] * ca.dot(e_lam, e_lam)
             e_v = V[:, k + 1] - V[:, k]
             J += wp['w_vsmooth'] * ca.dot(e_v, e_v)
+
+        # ── Terminal rest constraint ──────────────────────────────────────────
+        # After the appended settling window the robot must come to a full stop.
+        # Feet are already pinned by the contact constraints, so V_N = 0 lands the
+        # trajectory in a static stand.
+        if self.n_terminal > 0:
+            opti.subject_to(V[:, N] == 0)
 
         # ── Warm start ────────────────────────────────────────────────────────
         opti.set_initial(Q, self.Q_warm.T)

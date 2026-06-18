@@ -37,6 +37,13 @@ from ik.pipeline_srb_ik import (
     load_srb_results,
     load_arm_defaults,
     pin_q_to_mj,
+    plot_srb_wrenches,
+    # 50 Hz resampling + 29/23-DOF full-robot export (shared with the IK pipeline)
+    _resample_and_save,
+    _build_joint_remap,
+    _pad_trajectory,
+    _BASE_COLS,
+    _TARGET_JOINTS,
 )
 
 _REPO_ROOT    = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -284,6 +291,8 @@ def plot_ik_vs_ref(nlp, Q_sol, V_sol, lam_sol, times, out_dir, show=True):
                 a.legend(fontsize=7)
             a.axvline(t[nlp.stance_end], ls=":", color="gray", alpha=0.5)
             a.axvline(t[nlp.flight_end], ls=":", color="gray", alpha=0.5)
+            if nlp.n_terminal > 0:
+                a.axvline(t[nlp.N - nlp.n_terminal], ls=":", color="green", alpha=0.5)
         ax[r][0].set_ylabel(lbl)
     for c in range(3):
         ax[-1][c].set_xlabel("time [s]")
@@ -300,6 +309,49 @@ def plot_ik_vs_ref(nlp, Q_sol, V_sol, lam_sol, times, out_dir, show=True):
         plt.close(fig)
 
 
+def export_kino_fullrobot(Q_sol, times, out_dir, model, hz=50.0,
+                          hold_seconds=1.0):
+    """Write the kino full-body trajectory in yaml_to_csv.py style and resample
+    to a uniform `hz` grid as both 29-DOF and 23-DOF CSVs (mirrors the IK
+    pipeline's export_ik_solution).
+
+    Layout: [time, com_xyz, quat_xyzw, 29 joints]  — Q_sol is pinocchio q
+    (px,py,pz,qx,qy,qz,qw,joints×29), identical to the IK pipeline, so the
+    shared remap / resample helpers apply directly.  Produces in <out_dir>:
+        kino_fullrobot.csv             (variable dt, with time column)
+        kino_fullrobot_50hz.csv        (29-DOF, no time column)
+        kino_fullrobot_50hz_23dof.csv  (23-DOF, no time column)
+
+    hold_seconds: like the IK pipeline, hold the first frame for this long before
+    the motion and the last frame for this long after, so the exported trajectory
+    eases in/out from a static pose.  0 disables.
+    """
+    if hold_seconds > 0:
+        Q_sol, times = _pad_trajectory(Q_sol, times, hold_seconds=hold_seconds)
+        print(f"[kino] Padded export with {hold_seconds:.1f}s static hold "
+              f"on each end → {Q_sol.shape[0]} frames")
+
+    n_frames = Q_sol.shape[0]
+    n_cols   = 1 + len(_BASE_COLS) + len(_TARGET_JOINTS)   # time + 7 + 29
+    out = np.zeros((n_frames, n_cols))
+    out[:, 0]   = times          # time
+    out[:, 1:4] = Q_sol[:, 0:3]  # com_xyz  (pinocchio px,py,pz)
+    out[:, 4:8] = Q_sol[:, 3:7]  # quat_xyzw (pinocchio convention)
+    for src_q_idx, dst_col in _build_joint_remap(model):
+        out[:, dst_col] = Q_sol[:, src_q_idx]
+    norms = np.linalg.norm(out[:, 4:8], axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    out[:, 4:8] /= norms
+
+    csv_path = os.path.join(out_dir, "kino_fullrobot.csv")
+    np.savetxt(csv_path, out, delimiter=",")
+    print(f"[kino] Full-robot CSV → {csv_path}  "
+          f"({n_frames} frames, {len(_TARGET_JOINTS)} joints)")
+
+    # Resample to uniform `hz` and emit both 29-DOF and 23-DOF outputs.
+    _resample_and_save(out, out_dir, hz=hz, prefix="kino_fullrobot")
+
+
 # ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
@@ -308,7 +360,8 @@ def run_kino_pipeline(config_module, warmstart_dir, skip_solve=False, speed=1.0,
                       no_visualize=False, weights=None, hessian_mode="exact",
                       expand=True, max_iter=10000, linear_solver="mumps",
                       mu_strategy="monotone", rebuild=False, plot=True, cache_keep=2,
-                      self_collision=True, collision_margin=None):
+                      self_collision=True, collision_margin=None, n_terminal=10,
+                      box_xml=None):
 
     # ── 1. Resolve paths from config ─────────────────────────────────────────
     cfg    = importlib.import_module(config_module)
@@ -321,6 +374,7 @@ def run_kino_pipeline(config_module, warmstart_dir, skip_solve=False, speed=1.0,
 
     # ── 2. Load SRB trajectory ────────────────────────────────────────────────
     times, q_srb, feet_ext, stance_end, flight_end = load_srb_results(srb_dir)
+    times_srb = times.copy()   # pre-terminal-append times (for SRB wrench plot)
     N  = len(times) - 1
     dt_vec = np.diff(times)   # (N,)
 
@@ -393,11 +447,14 @@ def run_kino_pipeline(config_module, warmstart_dir, skip_solve=False, speed=1.0,
 
     # ── 8. Floor z (ankle height above ground) + friction coefficient ────────
     floor_z = ANKLE_HEIGHT
+    stance_gz = 0.0
     try:
         stance_gz = cfg.config.constraints.stance_ground_z
         floor_z   = ANKLE_HEIGHT + stance_gz
     except AttributeError:
         pass
+    landing_gz = getattr(getattr(cfg.config, "constraints", None),
+                         "landing_ground_z", 0.0)
     mu = getattr(getattr(cfg.config, "constraints", None), "mu", 1.0)
     print(f"[kino] friction coefficient mu = {mu}")
 
@@ -409,6 +466,49 @@ def run_kino_pipeline(config_module, warmstart_dir, skip_solve=False, speed=1.0,
     c_srb, cd_srb, offset_body = compute_com_refs(model, data, q_srb, v_srb)
     print(f"[kino] CoM target shifted by body-frame offset {offset_body.round(3)} "
           f"(pelvis->CoM); start z {q_srb[0,2]:.3f} -> {c_srb[0,2]:.3f}")
+
+    # ── 10b. Append terminal settling nodes ───────────────────────────────────
+    # The SRB trajectory ends at landing; append `n_terminal` nodes (spaced by the
+    # last dt) so the kino NLP has room to bring the robot to a static rest.  These
+    # nodes hold the landing references (so warm-start seeds / plots stay sane) but
+    # the NLP drops all SRB tracking cost on them and enforces a terminal V_N = 0
+    # constraint instead.  stance_end / flight_end are unchanged — every appended
+    # node sits past flight_end, so it is treated as a (planted) contact node.
+    if n_terminal > 0:
+        dt_last = float(dt_vec[-1])
+
+        def _rep_last(a):
+            return np.vstack([a, np.repeat(a[-1:], n_terminal, axis=0)])
+
+        new_t  = times[-1] + dt_last * np.arange(1, n_terminal + 1)
+        times  = np.concatenate([times, new_t])
+        dt_vec = np.diff(times)
+
+        quat_srb_pin = _rep_last(quat_srb_pin)
+        w_body_srb   = _rep_last(w_body_srb)
+        c_srb        = _rep_last(c_srb)
+        cd_srb       = _rep_last(cd_srb)
+        lam_srb      = _rep_last(lam_srb)          # per-interval; seeds settle forces
+
+        # Foot targets: hold the last *planted* (non-NaN) foot xy so the appended
+        # contact constraints keep the feet where they landed.
+        valid_rows = np.where(~np.isnan(p_foot_srb[:, 0]))[0]
+        p_last     = p_foot_srb[valid_rows[-1]] if len(valid_rows) else p_foot_srb[-1]
+        p_foot_srb = np.vstack([p_foot_srb, np.tile(p_last, (n_terminal, 1))])
+
+        # Warm start: hold landing config, seed settle velocity at rest (V_N=0).
+        Q_warm = _rep_last(Q_warm)
+        V_warm = np.vstack([V_warm, np.zeros((n_terminal, V_warm.shape[1]))])
+
+        # Viz overlays (SRB box / inertia stay frozen at landing during settle).
+        q_srb = _rep_last(q_srb)
+        if I_opt is not None:
+            I_opt = _rep_last(I_opt)
+
+        N = len(times) - 1
+        print(f"[kino] Appended {n_terminal} terminal settling nodes "
+              f"(dt={dt_last:.4f}s, no SRB cost, V_N=0): "
+              f"{N + 1} nodes total (SRB {N - n_terminal + 1} + settle {n_terminal})")
 
     # ── 11. Build NLP ─────────────────────────────────────────────────────────
     nlp = KinoNLP(
@@ -426,6 +526,7 @@ def run_kino_pipeline(config_module, warmstart_dir, skip_solve=False, speed=1.0,
         Q_warm       = Q_warm,
         V_warm       = V_warm,
         mu           = mu,
+        n_terminal   = n_terminal,
         weights      = weights,
         hessian_mode = hessian_mode,
         expand       = expand,
@@ -483,18 +584,40 @@ def run_kino_pipeline(config_module, warmstart_dir, skip_solve=False, speed=1.0,
     np.savetxt(os.path.join(out_dir, "kino_q_mujoco.csv"), q_mj, delimiter=",",
                header="MuJoCo qpos (nq=36): px,py,pz,qw,qx,qy,qz,joints×29")
 
+    # Full-robot CSV + uniform 50 Hz resampling for 29-DOF and 23-DOF (like the
+    # IK pipeline).  Q_sol shares the IK pinocchio q layout, so the shared
+    # remap/resample helpers apply directly.
+    export_kino_fullrobot(Q_sol, times, out_dir, model, hz=50.0)
+
     # ── 16. Tracking plot (CoM pos/vel + per-foot net force vs SRB) ────────────
     if plot:
         plot_ik_vs_ref(nlp, Q_sol, V_sol, lam_sol, times, out_dir,
                        show=not no_visualize)
 
+    # ── 16b. SRB wrench plot (per-foot forces / moments) ───────────────────────
+    plot_srb_wrenches(srb_dir, times_srb, stance_end, flight_end)
+
     # ── 17. Visualize ─────────────────────────────────────────────────────────
     if no_visualize:
         return Q_sol, V_sol, success
 
-    build_combined_xml(_G1_XML, _SRB_XML, _COMBINED_XML)
+    build_combined_xml(_G1_XML, _SRB_XML, _COMBINED_XML, box_xml=box_xml)
     print("[kino] Launching MuJoCo viewer (close to exit)...")
-    visualize(Q_sol, q_srb, times, _COMBINED_XML, speed=speed, I_opt=I_opt)
+
+    # Foot-target markers: blue (L) / orange (R) spheres at the SRB foot targets.
+    # Stance frames sit on the (possibly raised) stance surface, landing frames on
+    # the landing ground; flight frames are NaN → hidden below ground.
+    feet_world = np.full((N + 1, 6), np.nan)
+    for k in range(N + 1):
+        if k < stance_end:
+            feet_world[k] = [p_foot_srb[k, 0], p_foot_srb[k, 1], stance_gz,
+                             p_foot_srb[k, 2], p_foot_srb[k, 3], stance_gz]
+        elif k >= flight_end:
+            feet_world[k] = [p_foot_srb[k, 0], p_foot_srb[k, 1], landing_gz,
+                             p_foot_srb[k, 2], p_foot_srb[k, 3], landing_gz]
+
+    visualize(Q_sol, q_srb, times, _COMBINED_XML, speed=speed, I_opt=I_opt,
+              feet_world=feet_world)
 
     return Q_sol, V_sol, success
 
@@ -523,7 +646,7 @@ if __name__ == "__main__":
     # (weights are runtime parameters), so it only pays the solve, not a rebuild.
     wgrp = parser.add_argument_group("cost weights (override _DEFAULT_WEIGHTS)")
     for _wk in ['w_com', 'w_cdot', 'w_quat', 'w_wbase', 'w_lam',
-                'w_qreg', 'w_vsmooth', 'w_ke', 'w_config']:
+                'w_qreg', 'w_vsmooth', 'w_ke', 'w_config', 'w_qreg_term']:
         wgrp.add_argument(f"--{_wk.replace('_', '-')}", dest=_wk, type=float,
                           default=None, metavar="W",
                           help=f"{_wk} (default {_DEFAULT_WEIGHTS[_wk]:g})")
@@ -550,12 +673,19 @@ if __name__ == "__main__":
                         help="Disable capsule self-collision constraints")
     parser.add_argument("--collision-margin", type=float, default=None,
                         help="Self-collision clearance margin [m] (default collision_model.MARGIN)")
+    parser.add_argument("--n-terminal", type=int, default=10,
+                        help="Append this many settling nodes after the SRB motion "
+                             "(no SRB tracking cost; hard terminal constraint V_N=0). "
+                             "0 disables.")
+    parser.add_argument("--box-xml", default=None,
+                        help="Path to a box scene XML to include in the viewer "
+                             "(e.g. models/box/box_20x30x24in.xml)")
 
     args = parser.parse_args()
 
     weights = {wk: getattr(args, wk)
                for wk in ['w_com', 'w_cdot', 'w_quat', 'w_wbase', 'w_lam',
-                          'w_qreg', 'w_vsmooth', 'w_ke', 'w_config']
+                          'w_qreg', 'w_vsmooth', 'w_ke', 'w_config', 'w_qreg_term']
                if getattr(args, wk) is not None}
 
     run_kino_pipeline(
@@ -575,4 +705,7 @@ if __name__ == "__main__":
         cache_keep     = args.cache_keep,
         self_collision   = not args.no_self_collision,
         collision_margin = args.collision_margin,
+        n_terminal       = args.n_terminal,
+        box_xml          = (os.path.join(_REPO_ROOT, args.box_xml)
+                            if args.box_xml else None),
     )

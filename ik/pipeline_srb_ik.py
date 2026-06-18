@@ -359,7 +359,8 @@ def run_ik_trajectory(ik: G1IK, q_srb: np.ndarray, feet_ext: np.ndarray,
                       w_reg_flight: float = 1.0,
                       reject_self_collision: bool = False,
                       times: np.ndarray = None,
-                      q_dot_max_flight: float = 10.0):
+                      q_dot_max_flight: float = 10.0,
+                      foot_yaw_tol: float = 0.0):
     """
     Returns q_ik (N+1, 36) pinocchio configuration at every timestep.
 
@@ -374,6 +375,9 @@ def run_ik_trajectory(ik: G1IK, q_srb: np.ndarray, feet_ext: np.ndarray,
     w_reg_flight:    joint regularisation weight during flight.
     times:           (N+1,) timestamps [s] for per-frame dt.  None → dt=0.02 s.
     q_dot_max_flight: max joint velocity [rad/s] box constraint during flight IK.
+    foot_yaw_tol:    half-width [rad] of allowed foot yaw about vertical (foot stays flat,
+                     twists in place) during contact (stance + landing) IK.
+                     0.0 → feet held fully rigid (original).
     """
     N = q_srb.shape[0] - 1
     q_ik = np.zeros((N + 1, ik.model.nq))
@@ -420,6 +424,7 @@ def run_ik_trajectory(ik: G1IK, q_srb: np.ndarray, feet_ext: np.ndarray,
                  w_foot_vel=0.1 if use_ipopt else 0.0,
                  floor_z=stance_foot_z if use_ipopt else -1000.0,
                  foot_hard=use_ipopt,
+                 foot_yaw_tol=foot_yaw_tol,
                  dt=float(_dt_arr[i])))
         if not ok and errs[-1] > 1e-3:
             print(f"  [warn] stance frame {i}: IK did not converge (err={errs[-1]:.2e})")
@@ -449,6 +454,7 @@ def run_ik_trajectory(ik: G1IK, q_srb: np.ndarray, feet_ext: np.ndarray,
                                      q_prev=q0_td, w_reg=0.1, w_sym=2.0,
                                      floor_z=landing_foot_z if use_ipopt else -1000.0,
                                      foot_hard=use_ipopt,
+                                     foot_yaw_tol=foot_yaw_tol,
                                      q_dot_max=0.0)
     if not ok_td and errs_td[-1] > 1e-3:
         print(f"  [warn] touchdown frame {flight_end}: IK did not converge (err={errs_td[-1]:.2e})")
@@ -551,6 +557,7 @@ def run_ik_trajectory(ik: G1IK, q_srb: np.ndarray, feet_ext: np.ndarray,
                  w_sym=2.0,
                  floor_z=landing_foot_z if use_ipopt else -1000.0,
                  foot_hard=use_ipopt,
+                 foot_yaw_tol=foot_yaw_tol,
                  dt=float(_dt_arr[i])))
         if not ok and errs[-1] > 1e-3:
             print(f"  [warn] landing frame {i}: IK did not converge (err={errs[-1]:.2e})")
@@ -603,10 +610,11 @@ _DROP_23DOF = [20, 21, 27, 28, 34, 35]
 _DROP_23DOF_NAMES = [_TARGET_JOINTS[c - 7] for c in _DROP_23DOF]
 
 
-def _check_and_save_23dof(data_29: np.ndarray, export_dir: str, hz: float) -> None:
+def _check_and_save_23dof(data_29: np.ndarray, export_dir: str, hz: float,
+                          prefix: str = "ik_fullrobot") -> None:
     """Drop 6 secondary joints, save 23-DOF CSV, and report whether dropped cols are zero."""
     data_23 = np.delete(data_29, _DROP_23DOF, axis=1)
-    path = os.path.join(export_dir, f"ik_fullrobot_{int(hz)}hz_23dof.csv")
+    path = os.path.join(export_dir, f"{prefix}_{int(hz)}hz_23dof.csv")
     np.savetxt(path, data_23, delimiter=",")
 
     dropped = data_29[:, _DROP_23DOF]
@@ -633,11 +641,15 @@ def _check_and_save_23dof(data_29: np.ndarray, export_dir: str, hz: float) -> No
     print(f"{_sep}\n")
 
 
-def _resample_and_save(out: np.ndarray, export_dir: str, hz: float = 50.0):
+def _resample_and_save(out: np.ndarray, export_dir: str, hz: float = 50.0,
+                       prefix: str = "ik_fullrobot"):
     """
     Resample the full-robot trajectory (variable dt) to a uniform grid at `hz`.
     Column layout: [time, com_xyz, quat_xyzw, 29 joints]  — same as ik_fullrobot.csv.
     Quaternion columns (4:8) are resampled via Slerp; all others via linear interp.
+
+    prefix: output filename stem; emits <prefix>_<hz>hz.csv (29-DOF) and
+            <prefix>_<hz>hz_23dof.csv.  Defaults to the IK pipeline's name.
     """
     from scipy.spatial.transform import Rotation, Slerp
 
@@ -661,7 +673,7 @@ def _resample_and_save(out: np.ndarray, export_dir: str, hz: float = 50.0):
     slerp = Slerp(t_orig, rots)
     resampled[:, 4:8] = slerp(t_new).as_quat()
 
-    path = os.path.join(export_dir, f"ik_fullrobot_{int(hz)}hz.csv")
+    path = os.path.join(export_dir, f"{prefix}_{int(hz)}hz.csv")
     data_no_time = resampled[:, 1:]                        # drop time column; freq is fixed
     np.savetxt(path, data_no_time, delimiter=",")
 
@@ -672,7 +684,7 @@ def _resample_and_save(out: np.ndarray, export_dir: str, hz: float = 50.0):
     print(f"#  Cols : com_xyz (3)  quat_xyzw (4)  joints (29)  — NO time column")
     print(f"{_sep}\n")
 
-    _check_and_save_23dof(data_no_time, export_dir, hz)
+    _check_and_save_23dof(data_no_time, export_dir, hz, prefix=prefix)
 
 
 def _build_joint_remap(model: pin.Model):
@@ -1189,6 +1201,10 @@ if __name__ == "__main__":
                         help="Skip the MuJoCo visualizer (useful for non-interactive runs)")
     parser.add_argument("--plot-states",  action="store_true",
                         help="Save an SRB state trajectory plot (srb_states.png)")
+    parser.add_argument("--foot-yaw-tol", type=float, default=0.0,
+                        help="Allowed foot yaw about vertical [rad] during contact IK "
+                             "(foot stays flat, twists in place; default 0.0 = rigid). "
+                             "e.g. 0.26 ≈ 15°")
 
     args = parser.parse_args()
 
@@ -1229,7 +1245,8 @@ if __name__ == "__main__":
                                   stance_ground_z=_stance_ground_z,
                                   tuck_opt=_tuck_opt,
                                   reject_self_collision=_reject_self_collision,
-                                  times=times)
+                                  times=times,
+                                  foot_yaw_tol=args.foot_yaw_tol)
     else:
         q_ik_mj = np.loadtxt(os.path.join(export_dir, "ik_q_mujoco.csv"),
                               delimiter=",", comments="#")
