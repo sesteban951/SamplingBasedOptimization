@@ -17,13 +17,13 @@ config = AerialConfig(
         w_body=[0.0, 0.0, 0.0],
     ),
     goal=GoalStateConfig(
-        p_com=[0.25, 0.0, 0.77],
-        rpy_deg=[0.0, 0.0, 360.0],
+        p_com=[0.3, 0.0, 0.77],
+        rpy_deg=[0.0, 0.0, 180.0],
         v_com=[0.0, 0.0, 0.0],
         w_body=[0.0, 0.0, 0.0],
     ),
     maneuver=ManeuverConfig(
-        rpy_deg=[0.0, 0.0, 360.0],
+        rpy_deg=[0.0, 0.0, 180.0],
     ),
     timing=TimingConfig(
         dt_nom=0.02,
@@ -67,7 +67,7 @@ config = AerialConfig(
                                      # 0.8^2 >= pitch^2 + 0.5^2 → up to ~0.62 rad pitch alongside.
         touchdown_rp_max=0.15,
         stance_rp_max=0.1,
-        touchdown_twist_frac=0.99,   # finish 85% of the twist in the air; only 15% settles on the ground
+        touchdown_twist_frac=0.95,   # finish 85% of the twist in the air; only 15% settles on the ground
         # workspace_pz=True,
         # workspace_pz_2d=True,
 

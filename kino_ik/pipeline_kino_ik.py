@@ -352,22 +352,66 @@ def export_kino_fullrobot(Q_sol, times, out_dir, model, hz=50.0,
     _resample_and_save(out, out_dir, hz=hz, prefix="kino_fullrobot")
 
 
+def summarize_and_save(nlp, Q_sol, V_sol, lam_sol, out_dir, success):
+    """Build a post-optimization summary table (per-term objective cost + total,
+    grouped constraint violations) and BOTH print it and persist it to disk.
+
+    Saved immediately after the solve — before the slow residual prints, plots,
+    and the interactive MuJoCo viewer — so a later Ctrl-C never loses it.
+    Writes <out_dir>/kino_summary.txt (human-readable) and kino_summary.csv.
+    Returns the formatted text (also returned so callers can re-print on demand).
+    """
+    stats = nlp.solver_stats()
+    if stats:
+        stats.setdefault('success', success)
+    text, costs, viol = nlp.format_summary(
+        Q_sol, V_sol, lam_sol,
+        stats=stats or {'success': success})
+    print("\n" + text + "\n")
+
+    txt_path = os.path.join(out_dir, "kino_summary.txt")
+    with open(txt_path, "w") as f:
+        f.write(text + "\n")
+    csv_path = os.path.join(out_dir, "kino_summary.csv")
+    with open(csv_path, "w") as f:
+        f.write("section,name,value\n")
+        f.write(f"meta,success,{success}\n")
+        for key in ('return_status', 'iter_count', 'obj', 'inf_pr', 'inf_du'):
+            if key in stats:
+                f.write(f"meta,{key},{stats[key]}\n")
+        for k, v in costs.items():
+            f.write(f"cost,{k},{v:.8g}\n")
+        for g, arr in viol.items():
+            if arr is None or len(arr) == 0:
+                continue
+            f.write(f"viol_mean,{g},{float(np.mean(arr)):.8g}\n")
+            f.write(f"viol_max,{g},{float(np.max(arr)):.8g}\n")
+    print(f"[kino] Summary saved → {txt_path}  and  {csv_path}")
+    return text
+
+
 # ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
 
-def run_kino_pipeline(config_module, warmstart_dir, skip_solve=False, speed=1.0,
+def run_kino_pipeline(config_module, warmstart_dir=None, skip_solve=False, speed=1.0,
                       no_visualize=False, weights=None, hessian_mode="exact",
                       expand=True, max_iter=10000, linear_solver="mumps",
                       mu_strategy="monotone", rebuild=False, plot=True, cache_keep=2,
                       self_collision=True, collision_margin=None, n_terminal=10,
-                      box_xml=None):
+                      n_lead=10, box_xml=None, vis_warm=False):
 
     # ── 1. Resolve paths from config ─────────────────────────────────────────
     cfg    = importlib.import_module(config_module)
     srb_dir = os.path.join(_REPO_ROOT, cfg.config.save_dir.lstrip("./"))
     out_dir = os.path.join(srb_dir, "kino")
     os.makedirs(out_dir, exist_ok=True)
+    # Default the warm start to this config's own IK output (<save_dir>/ik) so it
+    # always matches the config being run — avoids accidentally seeding e.g. a twist
+    # solve with a stale backflip warm start.
+    if warmstart_dir is None:
+        warmstart_dir = os.path.join(cfg.config.save_dir.lstrip("./"), "ik")
+        print(f"[kino] --warmstart-dir not set → defaulting to <save_dir>/ik")
     print(f"[kino] SRB dir  : {srb_dir}")
     print(f"[kino] Output   : {out_dir}")
     print(f"[kino] Warm-start: {warmstart_dir}")
@@ -400,25 +444,45 @@ def run_kino_pipeline(config_module, warmstart_dir, skip_solve=False, speed=1.0,
     if not os.path.exists(warmstart_path):
         raise FileNotFoundError(
             f"Warm-start IK not found: {warmstart_path}\n"
-            "Run: python ik/pipeline_srb_ik.py --config srb.config.backflip first."
+            f"Run: python ik/pipeline_srb_ik.py --config {config_module} first "
+            "(generates <save_dir>/ik/ik_q_pin.csv), or pass --warmstart-dir."
         )
     Q_warm_raw = np.loadtxt(warmstart_path, delimiter=",")
     print(f"[kino] Warm-start loaded: {Q_warm_raw.shape} from {warmstart_path}")
 
-    # Resample if frame count differs from current SRB trajectory
-    if Q_warm_raw.shape[0] != N + 1:
-        print(f"[kino] Resampling warm-start from {Q_warm_raw.shape[0]} → {N+1} frames")
-        idx_orig = np.linspace(0, Q_warm_raw.shape[0] - 1, Q_warm_raw.shape[0])
-        idx_new  = np.linspace(0, Q_warm_raw.shape[0] - 1, N + 1)
-        Q_warm = np.zeros((N + 1, model.nq))
+    # Align the warm start to the SRB trajectory by TIME.  The SRB IK export is
+    # PADDED (a 1 s hold is prepended + appended before export), so ik_q_pin.csv
+    # spans more frames and a wider time range than the SRB motion.  Interpolating
+    # with the warm start's own ik_time.csv at the SRB sample times extracts exactly
+    # the motion portion, correctly aligned, and discards the padding.  The previous
+    # index-based resample instead crammed the holds into the timeline and misaligned
+    # the warm start against the SRB reference the NLP tracks frame-for-frame.
+    def _resample_q(src_q, x_src, x_dst):
+        out = np.zeros((len(x_dst), model.nq))
         for col in range(model.nq):
-            Q_warm[:, col] = np.interp(idx_new, idx_orig, Q_warm_raw[:, col])
-        # Re-normalise quaternion columns after interpolation
-        norms = np.linalg.norm(Q_warm[:, 3:7], axis=1, keepdims=True)
-        norms[norms == 0] = 1.0
-        Q_warm[:, 3:7] /= norms
-    else:
+            out[:, col] = np.interp(x_dst, x_src, src_q[:, col])
+        n = np.linalg.norm(out[:, 3:7], axis=1, keepdims=True)
+        n[n == 0] = 1.0
+        out[:, 3:7] /= n            # re-normalise quaternion columns after interp
+        return out
+
+    warm_time_path = os.path.join(_REPO_ROOT, warmstart_dir.lstrip("./"), "ik_time.csv")
+    t_warm = (np.loadtxt(warm_time_path, delimiter=",", comments="#").ravel()
+              if os.path.exists(warm_time_path) else None)
+
+    if t_warm is not None and t_warm.shape[0] == Q_warm_raw.shape[0]:
+        print(f"[kino] Time-aligning warm start: {Q_warm_raw.shape[0]} frames "
+              f"t∈[{t_warm[0]:.2f},{t_warm[-1]:.2f}] → {N+1} SRB frames "
+              f"t∈[{times[0]:.2f},{times[-1]:.2f}] (drops export padding)")
+        Q_warm = _resample_q(Q_warm_raw, t_warm, times)
+    elif Q_warm_raw.shape[0] == N + 1:
         Q_warm = Q_warm_raw.copy()
+    else:
+        # No usable ik_time.csv — fall back to legacy index-based resample.
+        print(f"[kino] ik_time.csv unavailable/mismatched → index-resampling "
+              f"{Q_warm_raw.shape[0]} → {N+1} frames (timing approximate)")
+        Q_warm = _resample_q(Q_warm_raw, np.arange(Q_warm_raw.shape[0]),
+                             np.linspace(0, Q_warm_raw.shape[0] - 1, N + 1))
 
     # ── 5. Convert SRB quaternion to pinocchio convention ─────────────────────
     # SRB:      [qw,qx,qy,qz]  (MuJoCo, columns 3..6 of q_srb)
@@ -458,6 +522,39 @@ def run_kino_pipeline(config_module, warmstart_dir, skip_solve=False, speed=1.0,
     mu = getattr(getattr(cfg.config, "constraints", None), "mu", 1.0)
     print(f"[kino] friction coefficient mu = {mu}")
 
+    free_foot_yaw = getattr(getattr(cfg.config, "constraints", None),
+                            "free_foot_yaw", False) or args.free_foot_yaw
+    foot_yaw_slack = getattr(getattr(cfg.config, "constraints", None),
+                             "free_foot_yaw_slack", 0.26)
+    if args.foot_yaw_slack is not None:
+        foot_yaw_slack = args.foot_yaw_slack
+    if free_foot_yaw:
+        print(f"[kino] Contact feet: flat sole; heading within +/-{np.degrees(foot_yaw_slack):.0f} deg "
+              f"of body yaw at plant, then locked per ground phase (free_foot_yaw=True)")
+
+    # Commanded absolute world-frame foot heading per ground phase (degrees in config/CLI,
+    # converted to radians).  Overrides the SRB-reference / free_foot_yaw heading — use to
+    # ENFORCE a twist (e.g. [0, 180] = stance forward, land at 180 deg).
+    foot_world_yaw_deg = (args.foot_world_yaw_deg if args.foot_world_yaw_deg is not None
+                          else getattr(getattr(cfg.config, "constraints", None),
+                                       "foot_world_yaw_deg", None))
+    foot_world_yaw = (None if foot_world_yaw_deg is None
+                      else [np.radians(float(a)) for a in np.atleast_1d(foot_world_yaw_deg)])
+    if foot_world_yaw is not None:
+        print(f"[kino] Contact feet: heading COMMANDED to absolute world yaw(s) "
+              f"{list(np.round(np.degrees(foot_world_yaw)))} deg per ground phase "
+              f"(overrides free_foot_yaw / SRB-ref heading)")
+
+    free_waist_yaw = getattr(getattr(cfg.config, "constraints", None),
+                             "free_waist_yaw", False) or args.free_waist_yaw
+    if free_waist_yaw:
+        print("[kino] waist_yaw freed for yaw momentum authority (free_waist_yaw=True)")
+
+    free_full_dof = getattr(getattr(cfg.config, "constraints", None),
+                            "free_full_dof", False) or args.free_full_dof
+    if free_full_dof:
+        print("[kino] full DOF freedom: all joints except wrists freed (free_full_dof=True)")
+
     # ── 9. Foot positions for contact constraints ────────────────────────────
     # feet_ext: (N+1, 4) [pLx,pLy,pRx,pRy], NaN during flight
     p_foot_srb = feet_ext.copy()
@@ -466,6 +563,55 @@ def run_kino_pipeline(config_module, warmstart_dir, skip_solve=False, speed=1.0,
     c_srb, cd_srb, offset_body = compute_com_refs(model, data, q_srb, v_srb)
     print(f"[kino] CoM target shifted by body-frame offset {offset_body.round(3)} "
           f"(pelvis->CoM); start z {q_srb[0,2]:.3f} -> {c_srb[0,2]:.3f}")
+
+    # ── 10a. Prepend standing lead-in nodes ───────────────────────────────────
+    # Mirror of §10b at the FRONT: prepend `n_lead` nodes (spaced by the first dt)
+    # so the kino NLP starts from a static standing pose and then crouches into the
+    # SRB stance.  Like the settle window, these nodes hold the first SRB references
+    # (so warm-start seeds / plots stay sane) but the NLP drops all SRB tracking cost
+    # on them, pulls the free DOF strongly toward the standing config (w_qreg_term),
+    # and enforces an initial rest constraint V_0=0.  Unlike the terminal append,
+    # prepending shifts every downstream node index, so stance_end / flight_end MUST
+    # be bumped by n_lead.  Must run BEFORE §10b so the terminal block sees the
+    # already-extended arrays and the correct N.
+    if n_lead > 0:
+        dt_first = float(dt_vec[0])
+
+        def _rep_first(a):
+            return np.vstack([np.repeat(a[:1], n_lead, axis=0), a])
+
+        new_t  = times[0] - dt_first * np.arange(n_lead, 0, -1)   # n_lead stamps before times[0]
+        times  = np.concatenate([new_t, times])
+        dt_vec = np.diff(times)
+
+        quat_srb_pin = _rep_first(quat_srb_pin)
+        w_body_srb   = _rep_first(w_body_srb)
+        c_srb        = _rep_first(c_srb)
+        cd_srb       = _rep_first(cd_srb)
+        lam_srb      = _rep_first(lam_srb)          # per-interval; seeds lead-in forces
+
+        # Foot targets: hold the first *planted* (non-NaN) foot xy so the prepended
+        # contact constraints keep the feet on the stance footprint.
+        valid_rows = np.where(~np.isnan(p_foot_srb[:, 0]))[0]
+        p_first    = p_foot_srb[valid_rows[0]] if len(valid_rows) else p_foot_srb[0]
+        p_foot_srb = np.vstack([np.tile(p_first, (n_lead, 1)), p_foot_srb])
+
+        # Warm start: seed = first config (w_qreg_term pulls legs to standing), start
+        # velocity at rest (V_0=0).
+        Q_warm = _rep_first(Q_warm)
+        V_warm = np.vstack([np.zeros((n_lead, V_warm.shape[1])), V_warm])
+
+        # Viz overlays (SRB box / inertia stay frozen at the stance start during lead-in).
+        q_srb = _rep_first(q_srb)
+        if I_opt is not None:
+            I_opt = _rep_first(I_opt)
+
+        stance_end += n_lead                        # CRITICAL: all node indices shift
+        flight_end += n_lead
+        N = len(times) - 1
+        print(f"[kino] Prepended {n_lead} standing lead-in nodes "
+              f"(dt={dt_first:.4f}s, no SRB cost, V_0=0): "
+              f"{N + 1} nodes total (lead {n_lead} + SRB {N - n_lead + 1})")
 
     # ── 10b. Append terminal settling nodes ───────────────────────────────────
     # The SRB trajectory ends at landing; append `n_terminal` nodes (spaced by the
@@ -510,6 +656,29 @@ def run_kino_pipeline(config_module, warmstart_dir, skip_solve=False, speed=1.0,
               f"(dt={dt_last:.4f}s, no SRB cost, V_N=0): "
               f"{N + 1} nodes total (SRB {N - n_terminal + 1} + settle {n_terminal})")
 
+    # ── 10c. Warm-start visualization shortcut ────────────────────────────────
+    # --vis_warm: skip the NLP build/solve entirely and just animate the loaded
+    # warm start (the kino analog of `pipeline_srb_ik.py --skip-solve`).  Lets you
+    # eyeball which warm start is being fed to the solver before committing to it.
+    if vis_warm:
+        print(f"[kino] --vis_warm: visualizing warm start ({Q_warm.shape[0]} frames), no solve.")
+        if no_visualize:
+            print("[kino] (--no-visualize set; nothing to display)")
+            return Q_warm, V_warm, True
+        build_combined_xml(_G1_XML, _SRB_XML, _COMBINED_XML, box_xml=box_xml)
+        feet_world = np.full((N + 1, 6), np.nan)
+        for k in range(N + 1):
+            if k < stance_end:
+                feet_world[k] = [p_foot_srb[k, 0], p_foot_srb[k, 1], stance_gz,
+                                 p_foot_srb[k, 2], p_foot_srb[k, 3], stance_gz]
+            elif k >= flight_end:
+                feet_world[k] = [p_foot_srb[k, 0], p_foot_srb[k, 1], landing_gz,
+                                 p_foot_srb[k, 2], p_foot_srb[k, 3], landing_gz]
+        print("[kino] Launching MuJoCo viewer on warm start (close to exit)...")
+        visualize(Q_warm, q_srb, times, _COMBINED_XML, speed=speed, I_opt=I_opt,
+                  feet_world=feet_world)
+        return Q_warm, V_warm, True
+
     # ── 11. Build NLP ─────────────────────────────────────────────────────────
     nlp = KinoNLP(
         dt_vec       = dt_vec,
@@ -526,7 +695,13 @@ def run_kino_pipeline(config_module, warmstart_dir, skip_solve=False, speed=1.0,
         Q_warm       = Q_warm,
         V_warm       = V_warm,
         mu           = mu,
+        free_foot_yaw = free_foot_yaw,
+        foot_yaw_slack = foot_yaw_slack,
+        foot_world_yaw = foot_world_yaw,
+        free_waist_yaw = free_waist_yaw,
+        free_full_dof = free_full_dof,
         n_terminal   = n_terminal,
+        n_lead       = n_lead,
         weights      = weights,
         hessian_mode = hessian_mode,
         expand       = expand,
@@ -556,7 +731,12 @@ def run_kino_pipeline(config_module, warmstart_dir, skip_solve=False, speed=1.0,
         lam_sol = nlp.Lam_sol
         print(f"\n[kino] Solve {'SUCCEEDED' if success else 'FAILED (returning best iterate)'}")
 
-    # ── 13. Post-solve residuals + IK-vs-reference comparison ──────────────────
+    # ── 13. Summary table (total cost per traj + constraint violation) ─────────
+    # Computed and SAVED before the plots / interactive viewer so the table is on
+    # disk regardless of what happens in those later steps.
+    summarize_and_save(nlp, Q_sol, V_sol, lam_sol, out_dir, success)
+
+    # ── 13b. Post-solve residuals + IK-vs-reference comparison ─────────────────
     print_solve_residuals(nlp, Q_sol, V_sol)
     print_ik_vs_ref_comparison(nlp, Q_sol, V_sol, lam_sol)
 
@@ -632,15 +812,41 @@ if __name__ == "__main__":
     )
     parser.add_argument("--config", default="srb.config.backflip_varinertia",
                         help="SRB config module (default: srb.config.backflip_varinertia)")
-    parser.add_argument("--warmstart-dir", default="results/srb/backflip_varinertia/ik",
-                        help="Directory containing ik_q_pin.csv warm start "
-                             "(default: results/srb/backflip_varinertia/ik)")
+    parser.add_argument("--warmstart-dir", default=None,
+                        help="Directory containing ik_q_pin.csv warm start. "
+                             "Default: <config.save_dir>/ik (auto-matches --config), so "
+                             "the warm start always corresponds to the config being run.")
     parser.add_argument("--skip-solve", action="store_true",
                         help="Skip NLP solve, reload existing kino_q.csv")
+    parser.add_argument("--vis_warm", "--vis-warm", action="store_true", dest="vis_warm",
+                        help="Visualize the loaded warm-start trajectory instead of "
+                             "solving (kino analog of pipeline_srb_ik.py --skip-solve). "
+                             "Useful to confirm the right warm start is being fed.")
     parser.add_argument("--speed", type=float, default=0.5,
                         help="Visualizer playback speed (default: 0.5 = half speed)")
     parser.add_argument("--no-visualize", action="store_true",
                         help="Skip MuJoCo viewer")
+    parser.add_argument("--free-foot-yaw", action="store_true", default=False,
+                        help="Contact feet flat-sole with heading aligned (within slack) to "
+                             "the body yaw at the plant frame, then locked per ground phase "
+                             "(overrides per-config constraints.free_foot_yaw). For a twist.")
+    parser.add_argument("--foot-yaw-slack", type=float, default=None,
+                        help="Override free_foot_yaw_slack [rad]: allowed foot-heading "
+                             "deviation from body yaw at the plant frame (default ~0.26 = 15 deg).")
+    parser.add_argument("--foot-world-yaw-deg", type=float, nargs="+", default=None,
+                        metavar="DEG",
+                        help="Pin planted feet to ABSOLUTE WORLD yaw angle(s) [degrees], one "
+                             "per ground phase in plant order (last repeats). Enforces a twist "
+                             "regardless of the SRB plan, e.g. '--foot-world-yaw-deg 0 180' = "
+                             "stance forward, land at 180 deg. Overrides free_foot_yaw.")
+    parser.add_argument("--free-waist-yaw", action="store_true", default=False,
+                        help="Free waist_yaw for yaw momentum authority (overrides "
+                             "per-config constraints.free_waist_yaw). Use for a twist.")
+    parser.add_argument("--free-full-dof", action="store_true", default=False,
+                        help="Free every actuated joint except the wrists (legs + full "
+                             "waist + shoulder roll/yaw + elbow = 23 DOF) for maximum "
+                             "configuration authority (overrides per-config "
+                             "constraints.free_full_dof). Larger, slower NLP.")
     # Cost-weight overrides — one flag per weight, default shown is the current
     # value in _DEFAULT_WEIGHTS.  Changing a weight reuses the cached solver
     # (weights are runtime parameters), so it only pays the solve, not a rebuild.
@@ -677,6 +883,10 @@ if __name__ == "__main__":
                         help="Append this many settling nodes after the SRB motion "
                              "(no SRB tracking cost; hard terminal constraint V_N=0). "
                              "0 disables.")
+    parser.add_argument("--n-lead", type=int, default=10,
+                        help="Prepend this many standing lead-in nodes before the SRB "
+                             "motion (no SRB tracking cost; strong stand pull; hard "
+                             "initial constraint V_0=0). 0 disables.")
     parser.add_argument("--box-xml", default=None,
                         help="Path to a box scene XML to include in the viewer "
                              "(e.g. models/box/box_20x30x24in.xml)")
@@ -706,6 +916,8 @@ if __name__ == "__main__":
         self_collision   = not args.no_self_collision,
         collision_margin = args.collision_margin,
         n_terminal       = args.n_terminal,
+        n_lead           = args.n_lead,
         box_xml          = (os.path.join(_REPO_ROOT, args.box_xml)
                             if args.box_xml else None),
+        vis_warm         = args.vis_warm,
     )

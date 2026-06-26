@@ -113,11 +113,14 @@ class G1IPOPTIK:
         # p_l_des(3) + R_l_flat(9) + p_r_des(3) + R_r_flat(9) + I_des_flat(9) +
         # q_prev_legs(12) + w_reg(1) + w_inertia(1) + w_foot(1) + w_sym(1) +
         # p_l_prev(3) + p_r_prev(3) + w_foot_vel(1) + floor_z(1)  →  total 63
-        # g layout (17 rows): com_eq(3) + lfoot_floor(1) + rfoot_floor(1)
+        # g layout (21 rows): com_eq(3) + lfoot_floor(1) + rfoot_floor(1)
         #                   + lfoot_pos(3) + rfoot_pos(3)
         #                   + lfoot_rot(3) + rfoot_rot(3)
+        #                   + lfoot_up(2)  + rfoot_up(2)
         # foot_hard=True:  pins foot position and orientation to target (hard equality).
-        # foot_hard=False: lbg/ubg open → foot pose constraints inactive.
+        #   free_foot_yaw=False → full skew rotation equality (rigid foot).
+        #   free_foot_yaw=True  → flat-sole equality (up), skew rows inactive (free yaw).
+        # foot_hard=False: lbg/ubg open → all foot pose constraints inactive.
         quat_pelvis   = ca.SX.sym("quat_pelvis",  4)
         p_com_des     = ca.SX.sym("p_com_des",    3)
         p_l_des       = ca.SX.sym("p_l_des",      3)
@@ -237,9 +240,20 @@ class G1IPOPTIK:
         g_lfoot_rot = _rot_err(R_l, R_l_des_mat)
         g_rfoot_rot = _rot_err(R_r, R_r_des_mat)
 
+        # Flat-sole constraint (alternative to the full skew rotation equality):
+        # the foot frame's z-axis is its 3rd column expressed in world.  Pinning that
+        # axis' world-x and world-y components to zero keeps the sole parallel to the
+        # floor while leaving the heading (yaw about vertical) completely free.  Used
+        # instead of g_*foot_rot when free_foot_yaw is requested (e.g. a body twist):
+        # the foot stays flat on the ground but follows the body's heading, avoiding
+        # the degenerate flipped branch the skew error admits when the body has yawed.
+        g_lfoot_up = ca.vertcat(R_l[0, 2], R_l[1, 2])
+        g_rfoot_up = ca.vertcat(R_r[0, 2], R_r[1, 2])
+
         g = ca.vertcat(com - p_com_des, g_lfoot_floor, g_rfoot_floor,
                        g_lfoot_pos, g_rfoot_pos,
-                       g_lfoot_rot, g_rfoot_rot)
+                       g_lfoot_rot, g_rfoot_rot,
+                       g_lfoot_up, g_rfoot_up)
 
         nlp = {"x": x, "f": cost, "g": g, "p": params}
 
@@ -268,7 +282,7 @@ class G1IPOPTIK:
               w_foot_vel: float = 0.0,
               floor_z: float = -1000.0,
               foot_hard: bool = False,
-              foot_yaw_tol: float = 0.0,
+              free_foot_yaw: bool = False,
               q_dot_max=None, dt: float = 0.02):
         """
         Solve IK via IPOPT.
@@ -291,12 +305,14 @@ class G1IPOPTIK:
                        (skew(R_des^T @ R)), giving 3 independent constraints per foot.
                        Use during contact phases (stance, landing) to guarantee foot
                        pose regardless of competing costs or CoM mismatch.
-            foot_yaw_tol: Half-width [rad] of the allowed foot yaw (rotation about
-                       world-vertical — foot stays flat on the ground, twists in place).
-                       Only used when foot_hard=True: the yaw component of each foot's
-                       rotation constraint is relaxed from a hard equality to the band
-                       [-sin(tol), +sin(tol)], while roll/pitch stay pinned.  0.0 (default)
-                       keeps the original fully-rigid foot orientation.
+            free_foot_yaw: Only used when foot_hard=True.  False (default) pins the full
+                       foot orientation to the target (rigid foot, original behaviour).
+                       True replaces the foot's rotation equality with a flat-sole
+                       constraint (foot z-axis kept vertical) and leaves the heading/yaw
+                       free, so the foot stays flat on the ground but rotates about
+                       vertical to follow the body's heading.  Needed for motions where
+                       the body yaws while planted (e.g. a twist); avoids the degenerate
+                       flipped-foot branch the rigid skew equality admits in that case.
             q_dot_max: Per-joint velocity limit [rad/s] as box constraint on leg joints.
                        None → uses URDF velocity limits.  0.0 → disabled.
                        Only active when q_prev is provided.
@@ -358,31 +374,39 @@ class G1IPOPTIK:
         lbx = np.concatenate([[-np.inf, -np.inf, max(0.2, p_com_des[2] - _pz_margin)], leg_lo_eff])
         ubx = np.concatenate([[ np.inf,  np.inf,               p_com_des[2] + _pz_margin], leg_hi_eff])
 
-        # g layout (17 rows):
+        # g layout (21 rows):
         #   [0:3]   com_eq      — always equality
         #   [3]     lfoot_floor — always >= 0
         #   [4]     rfoot_floor — always >= 0
         #   [5:8]   lfoot_pos   — equality when foot_hard, else inactive
         #   [8:11]  rfoot_pos   — equality when foot_hard, else inactive
-        #   [11:14] lfoot_rot   — equality when foot_hard, else inactive
-        #   [14:17] rfoot_rot   — equality when foot_hard, else inactive
-        _BIG  = np.inf
-        _zero = np.zeros(6)   # left pos (3) + right pos (3)
-        _open = np.full(6, _BIG)
-        # Rot block layout: [lfoot_rot(rx,ry,rz), rfoot_rot(rx,ry,rz)] where the error is
-        # expressed in the target frame (R_des=I → world axes).  The z-component is the
-        # yaw error about world-vertical; relaxing it to a band of ±sin(foot_yaw_tol)
-        # lets each foot rotate about vertical (stays flat on the ground) within that
-        # cone while roll/pitch stay pinned.  tol=0 → band collapses to {0} (rigid).
-        _yaw_bnd = float(np.sin(foot_yaw_tol))
-        _rot_lo  = np.array([0., 0., -_yaw_bnd, 0., 0., -_yaw_bnd])
-        _rot_hi  = np.array([0., 0.,  _yaw_bnd, 0., 0.,  _yaw_bnd])
-        if foot_hard:
-            lbg = np.concatenate([[0., 0., 0., 0., 0.], _zero, _rot_lo])
-            ubg = np.concatenate([[0., 0., 0., _BIG, _BIG], _zero, _rot_hi])
-        else:
-            lbg = np.concatenate([[0., 0., 0., 0., 0.], -_open, -_open])
-            ubg = np.concatenate([[0., 0., 0., _BIG, _BIG],  _open,  _open])
+        #   [11:14] lfoot_rot   — skew rotation equality (rigid foot)
+        #   [14:17] rfoot_rot   — skew rotation equality (rigid foot)
+        #   [17:19] lfoot_up    — flat-sole equality (foot z-axis vertical, free yaw)
+        #   [19:21] rfoot_up    — flat-sole equality (foot z-axis vertical, free yaw)
+        # During contact the orientation is enforced by exactly one of the two blocks:
+        #   free_foot_yaw=False → rot block active (rigid), up block inactive.
+        #   free_foot_yaw=True  → up block active (flat, free heading), rot block inactive.
+        _BIG = np.inf
+        def _eq(n):   return [0.] * n
+        def _open(n): return [-_BIG] * n      # paired with +_BIG upper → inactive
+
+        rot_active = foot_hard and not free_foot_yaw
+        up_active  = foot_hard and free_foot_yaw
+
+        lbg = [0., 0., 0., 0., 0.]            # com_eq(3) + foot floors(2, lower=0)
+        ubg = [0., 0., 0., _BIG, _BIG]
+        # foot position (6): hard equality during contact, else inactive
+        lbg += _eq(6) if foot_hard else _open(6)
+        ubg += _eq(6) if foot_hard else [_BIG] * 6
+        # foot rotation — skew (6): active only when rigid feet requested
+        lbg += _eq(6) if rot_active else _open(6)
+        ubg += _eq(6) if rot_active else [_BIG] * 6
+        # foot flat-sole (4): active only when free-yaw feet requested
+        lbg += _eq(4) if up_active else _open(4)
+        ubg += _eq(4) if up_active else [_BIG] * 4
+        lbg = np.array(lbg)
+        ubg = np.array(ubg)
 
         sol = self._solver(
             x0=x0, lbx=lbx, ubx=ubx,

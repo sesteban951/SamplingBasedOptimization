@@ -80,8 +80,17 @@ class ConstraintConfig:
     landing_tol: float = 0.1
     stance_rotation_allow: float = 0.15
     stance_yaw_max: float = 0.0   # yaw limit during stance (rad)
+    # Twist maneuvers: require the body to have completed this FRACTION of the maneuver
+    # rotation by touchdown (flight_end), so the turn finishes in the air and the landing
+    # only settles — planted feet can't source a large on-ground yaw.  None = off.
+    touchdown_twist_frac: Optional[float] = None
+    touchdown_twist_tol: float = 0.15   # [rad] tolerance on the touchdown orientation anchor
     touchdown_rp_max: float = 0.15
     landing_rp_alpha: float = 1.0  # extra orientation budget per metre of CoM error during landing
+    # Hard roll²+pitch² cap [rad] during the stance (pre-jump) phase — limits how far the
+    # body may lean before liftoff.  Analogous to touchdown_rp_max but over stance nodes.
+    # None = off (no stance orientation cap).
+    stance_rp_max: Optional[float] = None
     # Coupling between CoM pitch and minimum CoM height (m/rad).
     # Enforces pz >= pz_min + pitch_pz_coupling * |pitch| during contact phases,
     # reflecting that ankle ROM is shared between squat depth and forward tilt.
@@ -112,6 +121,36 @@ class ConstraintConfig:
     # Prevents planning near-full-extension landings where IK fails.
     # None = unconstrained.
     pz_touchdown_max: Optional[float] = None
+    # IK retargeting only (not used by the SRB solver): if True, the pipeline IK pins the
+    # contact feet RIGIDLY to the leveled SRB body-heading frame Rz(body_yaw) — a flat-sole
+    # foot pointing straight in the body heading (a "straight 90deg feet turn").  Orthogonal
+    # to free_foot_yaw: control_frame picks the foot target orientation, free_foot_yaw picks
+    # whether yaw is rigid or free.
+    control_frame: bool = False
+    # IK retargeting only (not used by the SRB solver): if True, the pipeline IK holds
+    # contact feet flat on the ground but free to yaw about vertical (foot yaw is a free DOF
+    # in the solve) so the heading follows whatever the IK prefers.  Needed when the body
+    # yaws while planted (e.g. a twist); the default rigid-foot orientation otherwise lands
+    # on a flipped branch and digs into the floor.
+    free_foot_yaw: bool = False
+    # Kino IK only (not used by the SRB solver): if True, waist_yaw is freed (in addition
+    # to the legs + sagittal arms) to give the centroidal NLP yaw angular-momentum
+    # authority for twisting maneuvers.  Anchored by a neutral flight prior.
+    free_waist_yaw: bool = False
+    # Kino IK only (not used by the SRB solver): if True, free EVERY actuated joint except
+    # the wrists (legs + full waist + shoulder roll/yaw + elbow = 23 DOF) for maximum
+    # configuration authority.  Overrides the leg+sagittal-arm[+waist_yaw] default set.
+    # Larger, slower NLP.  Newly-freed joints are anchored to their default pose in flight.
+    free_full_dof: bool = False
+    # Kino IK only: allowed foot-heading deviation [rad] from the body heading at the
+    # plant frame when free_foot_yaw is on (~15 deg default).  Larger = more freedom to
+    # pick a landing yaw; the heading is then locked for the rest of the ground phase.
+    free_foot_yaw_slack: float = 0.26
+    # Kino IK only: pin planted feet to ABSOLUTE WORLD yaw angle(s) [degrees], one per
+    # ground phase in plant order (last value repeats).  None = off.  Overrides
+    # free_foot_yaw / the SRB-reference heading; use to COMMAND a twist independently of
+    # the SRB plan, e.g. [0.0, 180.0] = stance forward, land facing 180 deg.
+    foot_world_yaw_deg: Optional[list] = None
 
 
 
@@ -140,6 +179,14 @@ class SolverConfig:
     # Applied as |tuck(k+1) - tuck(k)| <= max_tuck_dot * dt_nom per flight step.
     # None = unconstrained (soft Q_I_dot penalty only).
     max_tuck_dot: Optional[float] = None
+    # Twist-axis inertia modulation (alternative to variable_inertia/leg-tuck).  When
+    # True, Izz is a free per-flight-node variable in nominal*[1-range, 1+range] while
+    # Ixx/Iyy stay nominal, so the solver can shape a NON-uniform twist rate
+    # (omega_z = L_z / Izz(t)).  Uses the angular-momentum (L) integration path; the
+    # first and last flight nodes are pinned to nominal Izz for a clean handoff.
+    # Pair with Q_flip_mid>0 so the freed-rate revolution still closes 360 deg.
+    izz_modulation: bool = False
+    izz_modulation_range: float = 0.10   # fractional +/- range on nominal Izz
     # When True: each IK solution is checked for self-collision via pinocchio's
     # collision engine.  Frames in collision are flagged with a warning but kept
     # (the IK result is still used).  Costs extra time per frame due to geometry

@@ -1,0 +1,39 @@
+============================================================
+           KINO OPTIMIZATION SUMMARY
+============================================================
+solver success = True   status = Solve_Succeeded   iters = 190
+IPOPT final objective      : 6871.16
+IPOPT primal infeasibility : 5.386e-07   (max constraint violation, scaled)
+
+-- Total cost per trajectory (weighted objective terms) --
+  term                    cost  % of total
+  com                    30.18        0.4%
+  cdot                   465.5        6.8%
+  quat                   23.79        0.3%
+  wbase                  235.3        3.4%
+  qreg                    1093       15.9%
+  qreg_term              15.98        0.2%
+  ke                      1172       17.1%
+  config                  2966       43.2%
+  lam                    299.5        4.4%
+  vsmooth                569.3        8.3%
+  TOTAL                   6871      100.0%
+
+-- Constraint violations (recomputed from solution) --
+  group                          mean          max
+  c = com(q)                2.407e-14    7.964e-13
+  h = A_G v                 5.926e-10    2.585e-08
+  m*cdot = h_lin            7.455e-16    7.324e-15
+  hdot = A_G a+bias         6.858e-08    4.490e-06
+  Newton-Euler              9.280e-10    3.566e-08
+  integration               2.890e-12    2.147e-11
+  foot position             3.407e-12    2.038e-11
+  foot flatness             2.702e-13    2.622e-12
+  friction/unilateral       0.000e+00    0.000e+00
+  flight lambda = 0         1.421e-17    2.977e-17
+  joint pos limits          0.000e+00    0.000e+00
+  joint vel limits          0.000e+00    0.000e+00
+  terminal V_N=0            2.325e-13    2.325e-13
+  initial V_0=0             1.174e-14    1.174e-14
+  OVERALL MAX                            4.490e-06
+============================================================

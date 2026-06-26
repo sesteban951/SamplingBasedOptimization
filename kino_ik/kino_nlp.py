@@ -69,7 +69,22 @@ from kino_ik import collision_model as cm
 # their symbolic form) changes, so stale serialized solvers are not reloaded.
 # (Weights and reference DATA are not part of the structure — weights are runtime
 # parameters; reference data is hashed into the cache key.)
-_CACHE_VERSION = "v6"   # v6: appended terminal settling nodes (no SRB cost, V_N=0)
+_CACHE_VERSION = "v11"  # v11: prepended standing lead-in nodes (n_lead) — mirror of the
+                        #      terminal settle window at the front (no SRB cost, stand pull,
+                        #      initial rest V_0=0).  Changes the symbolic graph.
+                        # v10: foot orientation reformulated.  (1) flat + UPRIGHT always
+                        #      (foot z-axis = world +z, R[2,2]=+1) instead of vee(R)=0
+                        #      ("R symmetric"), which also admitted 180-deg flips that stab the
+                        #      foot through the floor.  (2) heading locked per ground phase for
+                        #      BOTH modes: free_foot_yaw=False pins the plant-frame heading to
+                        #      the SRB-reference body yaw (generalises to any twist, no hardcoded
+                        #      forward); free_foot_yaw=True leaves it free within +/-slack.
+                        # v9: free_full_dof flag (free all joints except wrists);
+                        #     free_waist_yaw + free_full_dof added to cache key
+                        # v8: free_foot_yaw reformulated — control-frame (body-yaw) heading
+                        #     with slack at the plant frame, locked across each ground phase
+                        # v7: free_foot_yaw — flat-sole/free-then-locked landing foot heading
+                        # v6: appended terminal settling nodes (no SRB cost, V_N=0)
 
 _REPO_ROOT    = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _DEFAULT_URDF = os.path.join(_REPO_ROOT, "models", "g1", "g1_29dof_rev_1_0.urdf")
@@ -93,7 +108,32 @@ FREE_ARM_JOINTS = [
     "right_shoulder_pitch_joint", "right_elbow_joint",
 ]
 
+# Wrist joints — kept pinned even under free_full_dof (negligible inertia/momentum
+# benefit, only enlarges the NLP).  Drop from here to also free the wrists.
+WRIST_JOINTS = [
+    "left_wrist_roll_joint",  "left_wrist_pitch_joint",  "left_wrist_yaw_joint",
+    "right_wrist_roll_joint", "right_wrist_pitch_joint", "right_wrist_yaw_joint",
+]
+
 _G = 9.81   # gravity (m/s^2)
+
+
+def _resolve_hsllib():
+    """Locate the CoinHSL shared library for IPOPT's runtime HSL loader.
+
+    Order: $IPOPT_HSLLIB (explicit), then the active env's lib dirs for
+    libhsl.so / libcoinhsl.so.  Returns an absolute path or None.
+    """
+    env = os.environ.get("IPOPT_HSLLIB")
+    if env and os.path.exists(env):
+        return env
+    for d in (os.path.join(sys.prefix, "lib"),
+              os.path.join(sys.prefix, "lib", "x86_64-linux-gnu")):
+        for name in ("libhsl.so", "libcoinhsl.so"):
+            p = os.path.join(d, name)
+            if os.path.exists(p):
+                return p
+    return None
 
 # Foot contact polygon: 4 corner points per foot, in the ankle_roll_link frame
 # (taken from the G1 MuJoCo collision spheres — heel pair + toe pair).  Contact
@@ -118,6 +158,11 @@ FLIGHT_TUCK_LEGS = np.array([
 # Flight posture prior for the freed sagittal arms, aligned with FREE_ARM_JOINTS
 # order [L_shoulder_pitch, L_elbow, R_shoulder_pitch, R_elbow].  Base (right) is
 FLIGHT_TUCK_ARMS = np.array([-0.802, -0.599, -0.802, -0.599])
+
+# Flight posture prior for waist_yaw when it is freed for twist authority
+# (free_waist_yaw=True).  Neutral (0): pull the relative upper/lower-body twist back
+# home in flight, letting it deviate only as the momentum dynamics require.
+WAIST_YAW_FLIGHT_PRIOR = 0.0
 
 # Standing leg config (near-straight), order matches LEG_JOINTS — mirrors
 # STANDING in ik/viz_crouch_configs.py.  Used as the terminal "stand up" target
@@ -197,9 +242,33 @@ class KinoNLP:
                  Q_warm,         # (N+1, nq) warm-start configuration
                  V_warm,         # (N+1, nv) warm-start velocity
                  mu=1.0,         # friction coefficient (linearized pyramid)
+                 free_foot_yaw=False,  # contact feet: flat sole; heading aligned to the body
+                                       # yaw (leveled control frame) within +/-foot_yaw_slack,
+                                       # chosen at the plant frame and locked (world-fixed) for
+                                       # the rest of that ground phase — no skid.  vs rigid
+                                       # flat+forward.  Needed when the body yaws (e.g. twist).
+                 foot_yaw_slack=0.26,  # [rad] allowed foot-heading deviation from the body
+                                       # heading at the plant frame (~15 deg). free_foot_yaw only.
+                 foot_world_yaw=None,  # list[float] (radians) | None.  If set, pin the planted
+                                       # foot heading to these ABSOLUTE WORLD yaw angles — one per
+                                       # ground phase in plant order, last value repeats — instead
+                                       # of the SRB-reference body yaw.  COMMANDS a twist regardless
+                                       # of the SRB plan, e.g. [0, pi] = stance forward, land at
+                                       # 180 deg.  Takes priority over free_foot_yaw.
+                 free_waist_yaw=False, # free waist_yaw (in addition to legs + sagittal
+                                       # arms) for yaw momentum authority (e.g. twist).
+                 free_full_dof=False,  # free EVERY actuated joint (legs + full waist +
+                                       # both full arms incl. wrists).  Overrides the
+                                       # leg+sagittal-arm[+waist_yaw] default set.  Extra
+                                       # DOF get a default-pose flight prior; sagittal
+                                       # arms keep their tuck prior.
                  n_terminal=0,   # # of settling nodes appended after the SRB motion:
                                  #   no SRB tracking cost, but full dynamics/contact
                                  #   constraints + a terminal rest constraint V_N=0
+                 n_lead=0,       # # of standing lead-in nodes prepended before the SRB
+                                 #   motion: mirror of n_terminal at the front — no SRB
+                                 #   tracking cost, strong w_qreg_term pull to the standing
+                                 #   config, plus an initial rest constraint V_0=0
                  weights=None,
                  hessian_mode="exact",  # "exact" (default, ~5x faster) or "limited-memory"
                  expand=True,    # expand NLP to a single SX graph (much faster eval)
@@ -232,10 +301,32 @@ class KinoNLP:
         self._leg_qidx = [self.model.joints[self.model.getJointId(j)].idx_q for j in LEG_JOINTS]
         self._leg_vidx = [self.model.joints[self.model.getJointId(j)].idx_v for j in LEG_JOINTS]
         # Freed sagittal arm DOF (shoulder pitch + elbow): movable like the legs.
-        self._arm_free_qidx = [self.model.joints[self.model.getJointId(j)].idx_q for j in FREE_ARM_JOINTS]
-        self._arm_free_vidx = [self.model.joints[self.model.getJointId(j)].idx_v for j in FREE_ARM_JOINTS]
-        # All free actuated DOF (legs + sagittal arms): get box limits, the KE
-        # term, and the warm-start regularizer.
+        # waist_yaw is appended here when free_waist_yaw is set (twist authority), so
+        # it flows into every index-driven block below (free set, box limits, priors)
+        # and out of the pinned arm/waist set.  Built per-instance — the module
+        # constants stay immutable.
+        self.free_waist_yaw = bool(free_waist_yaw)
+        self.free_full_dof  = bool(free_full_dof)
+        arm_free   = list(FREE_ARM_JOINTS)
+        arm_flight = list(FLIGHT_TUCK_ARMS)
+        if self.free_full_dof:
+            # Free every actuated joint except legs, sagittal arms (already free), and
+            # wrists.  Prior = default pose so the extra DOF regularize home but can
+            # move.  Takes precedence over free_waist_yaw (which it already includes).
+            _already = set(LEG_JOINTS) | set(arm_free) | set(WRIST_JOINTS)
+            for _jid in range(1, self.model.njoints):
+                _jname = self.model.names[_jid]
+                if _jname == "root_joint" or _jname in _already:
+                    continue
+                arm_free.append(_jname)
+                arm_flight.append(float(q_arm_default[self.model.joints[_jid].idx_q]))
+        elif self.free_waist_yaw:
+            arm_free.append("waist_yaw_joint")
+            arm_flight.append(WAIST_YAW_FLIGHT_PRIOR)
+        self._arm_free_qidx = [self.model.joints[self.model.getJointId(j)].idx_q for j in arm_free]
+        self._arm_free_vidx = [self.model.joints[self.model.getJointId(j)].idx_v for j in arm_free]
+        # All free actuated DOF (legs + sagittal arms [+ waist_yaw]): get box limits,
+        # the KE term, and the warm-start regularizer.
         self._free_qidx = self._leg_qidx + self._arm_free_qidx
         self._free_vidx = self._leg_vidx + self._arm_free_vidx
         # Everything else in arm/waist stays pinned to defaults (q at node 0, v=0).
@@ -247,9 +338,9 @@ class KinoNLP:
         self._free_qhi  = np.array([self.model.upperPositionLimit[qi] for qi in self._free_qidx])
         self._free_vmax = np.array([self.model.velocityLimit[vi]       for vi in self._free_vidx])
 
-        # Flight posture prior over the free DOF (legs + sagittal arms), aligned
-        # with self._free_qidx = leg_qidx + arm_free_qidx.
-        self._flight_prior = np.concatenate([FLIGHT_TUCK_LEGS, FLIGHT_TUCK_ARMS])
+        # Flight posture prior over the free DOF (legs + sagittal arms [+ waist_yaw]),
+        # aligned with self._free_qidx = leg_qidx + arm_free_qidx.
+        self._flight_prior = np.concatenate([FLIGHT_TUCK_LEGS, np.array(arm_flight)])
 
         l_foot_id = self.model.getFrameId(L_FOOT)
         r_foot_id = self.model.getFrameId(R_FOOT)
@@ -282,10 +373,19 @@ class KinoNLP:
                               for i in range(1, self.model.njoints)))
         self.g    = _G
         self.mu   = float(mu)
+        self.free_foot_yaw = bool(free_foot_yaw)
+        self.foot_yaw_slack = float(foot_yaw_slack)
+        self.foot_world_yaw = (None if foot_world_yaw is None
+                               else [float(a) for a in np.atleast_1d(foot_world_yaw)])
         # Settling nodes appended after the SRB motion: the last `n_terminal`
         # nodes (k > N - n_terminal) carry no SRB tracking cost — only the
         # dynamics/contact constraints and the terminal rest constraint V_N=0.
         self.n_terminal = int(n_terminal)
+        # Standing lead-in nodes prepended before the SRB motion: the first `n_lead`
+        # nodes (k < n_lead) carry no SRB tracking cost — only the dynamics/contact
+        # constraints, the strong w_qreg_term pull to the standing config, and the
+        # initial rest constraint V_0=0.  Mirror of n_terminal at the front.
+        self.n_lead = int(n_lead)
         self.self_collision   = bool(self_collision)
         self.collision_margin = cm.MARGIN if collision_margin is None else float(collision_margin)
         self._caps = cm.build_capsules(self.model)   # "sausage man" capsule model
@@ -413,11 +513,14 @@ class KinoNLP:
         h = hashlib.sha256()
         h.update(_CACHE_VERSION.encode())
         for s in (self.N, self.stance_end, self.flight_end, self.floor_z, self.mu,
-                  self.n_terminal,
+                  self.free_foot_yaw, self.foot_yaw_slack,
+                  self.free_waist_yaw, self.free_full_dof, self.n_terminal, self.n_lead,
                   self.hessian_mode, self.expand, self.linear_solver,
                   self.mu_strategy, self.max_iter, self.nq, self.nv,
                   self.self_collision, self.collision_margin,
-                  cm.N_SPHERES, tuple(cm.PAIRS)):
+                  cm.N_SPHERES, tuple(cm.PAIRS),
+                  (None if self.foot_world_yaw is None
+                   else tuple(round(a, 9) for a in self.foot_world_yaw))):
             h.update(repr(s).encode())
         if self.self_collision:
             for c in self._caps:
@@ -515,6 +618,19 @@ class KinoNLP:
         def _is_settling(k):
             return self.n_terminal > 0 and k > (N - self.n_terminal)
 
+        # Lead-in nodes (the first n_lead nodes, k < n_lead) are prepended before the
+        # SRB motion begins: like the settling window, they keep the full dynamics /
+        # contact / collision / limit machinery but drop the SRB tracking costs and are
+        # pulled toward the standing config instead (plus an initial rest V_0=0).
+        def _is_lead(k):
+            return self.n_lead > 0 and k < self.n_lead
+
+        # Plant-frame foot orientation for the current ground phase (free_foot_yaw): set
+        # at the first planted frame of each phase (stance start / touchdown) and reused
+        # to lock the heading of the rest of that phase so the planted foot cannot skid.
+        R_l_td = R_r_td = None
+        plant_idx = 0   # counts ground phases in plant order (for foot_world_yaw indexing)
+
         # ── Per-node defining constraints + tracking costs ────────────────────
         for k in range(N + 1):
             Q_k, V_k = Q[:, k], V[:, k]
@@ -545,16 +661,78 @@ class KinoNLP:
                 opti.subject_to(p_r[0] == self.p_foot_srb[k, 2])
                 opti.subject_to(p_r[1] == self.p_foot_srb[k, 3])
                 opti.subject_to(p_r[2] == self.floor_z)
-                def _vee_err(R):
-                    return ca.vertcat(R[2, 1] - R[1, 2],
-                                      R[0, 2] - R[2, 0],
-                                      R[1, 0] - R[0, 1])
-                opti.subject_to(_vee_err(R_l) == 0)
-                opti.subject_to(_vee_err(R_r) == 0)
+
+                # Feet flat AND upright (sole down) at EVERY contact node: foot z-axis ==
+                # world +z.  R[0,2]=R[1,2]=0 makes the foot z-axis vertical; R[2,2]=+1 picks
+                # the sole-DOWN branch — without it the foot z-axis may point down (R[2,2]=-1),
+                # an inverted "flat" foot whose corners punch through the floor while
+                # |R02|,|R12| stay ~0.  (Replaces the old vee(R)==0 "R symmetric" test, which
+                # also admitted the whole 180-deg tilt/flip family that stabbed through.)
+                for Rf in (R_l, R_r):
+                    opti.subject_to(Rf[0, 2] == 0)
+                    opti.subject_to(Rf[1, 2] == 0)
+                    opti.subject_to(Rf[2, 2] == 1)
+
+                # Heading (yaw): locked per ground phase at the plant frame so a planted foot
+                # cannot pivot/skid.  The TWO modes differ ONLY in how the plant-frame heading
+                # is chosen:
+                #   free_foot_yaw=False (default) → heading FIXED to the SRB-reference body yaw
+                #       at the plant frame (a constant).  Reads the maneuver's own stance/
+                #       landing heading, so it generalises to any twist (180/360/...) with no
+                #       hardcoded "forward".  Use when you want a determined foot heading.
+                #   free_foot_yaw=True            → heading FREE within +/-foot_yaw_slack of the
+                #       SOLVED body heading; let the feet choose a heading near the body.
+                prev_planted = (k > 0 and self._contact_node(k - 1)
+                                and not np.isnan(self.p_foot_srb[k - 1, 0]))
+                if not prev_planted:
+                    if self.foot_world_yaw is not None:
+                        # COMMANDED heading: pin the foot forward-axis to an ABSOLUTE WORLD
+                        # yaw for this ground phase (indexed in plant order; last value
+                        # repeats).  Lets you enforce a twist independently of the SRB plan,
+                        # e.g. foot_world_yaw=[0, pi] → stance forward, land at 180 deg.
+                        psi = self.foot_world_yaw[min(plant_idx,
+                                                      len(self.foot_world_yaw) - 1)]
+                        hx, hy = float(np.cos(psi)), float(np.sin(psi))
+                        opti.subject_to(R_l[0, 0] == hx);  opti.subject_to(R_l[1, 0] == hy)
+                        opti.subject_to(R_r[0, 0] == hx);  opti.subject_to(R_r[1, 0] == hy)
+                    elif self.free_foot_yaw:
+                        # Body forward-axis horizontal comps from the SOLVED base quat
+                        # Q[3:7] = [qx,qy,qz,qw]; allow the foot heading within +/-slack.
+                        qx, qy, qz, qw = Q[3, k], Q[4, k], Q[5, k], Q[6, k]
+                        b_x = 1.0 - 2.0 * (qy**2 + qz**2)
+                        b_y = 2.0 * (qx * qy + qz * qw)
+                        nb  = ca.sqrt(b_x**2 + b_y**2)
+                        cs  = float(np.cos(self.foot_yaw_slack))
+                        # foot_forward · body_forward_hat >= cos(slack)  ⟺  |Δyaw| <= slack.
+                        # (foot_forward = (R[0,0],R[1,0]) is unit since the sole is flat.)
+                        opti.subject_to(R_l[0, 0] * b_x + R_l[1, 0] * b_y >= cs * nb)
+                        opti.subject_to(R_r[0, 0] * b_x + R_r[1, 0] * b_y >= cs * nb)
+                    else:
+                        # FIXED heading: foot forward-axis == SRB-reference body heading at
+                        # this plant frame (constant), projected to horizontal.  quat_srb_pin
+                        # is pinocchio [qx,qy,qz,qw].
+                        qx, qy, qz, qw = self.quat_srb_pin[k]
+                        b_x = 1.0 - 2.0 * (qy**2 + qz**2)
+                        b_y = 2.0 * (qx * qy + qz * qw)
+                        nb  = float(np.hypot(b_x, b_y))
+                        hx, hy = (1.0, 0.0) if nb < 1e-6 else (b_x / nb, b_y / nb)
+                        opti.subject_to(R_l[0, 0] == hx);  opti.subject_to(R_l[1, 0] == hy)
+                        opti.subject_to(R_r[0, 0] == hx);  opti.subject_to(R_r[1, 0] == hy)
+                    plant_idx += 1                   # advance ground-phase counter
+                    R_l_td, R_r_td = R_l, R_r        # this phase's locked heading
+                else:
+                    # Already planted: lock heading to the plant frame's (world-fixed) so the
+                    # foot cannot pivot/skid.  With the flat+upright rows above, pinning the
+                    # forward-axis horizontal comps fixes the full R.
+                    opti.subject_to(R_l[0, 0] == R_l_td[0, 0])
+                    opti.subject_to(R_l[1, 0] == R_l_td[1, 0])
+                    opti.subject_to(R_r[0, 0] == R_r_td[0, 0])
+                    opti.subject_to(R_r[1, 0] == R_r_td[1, 0])
 
             # Tracking costs (s = [c, c_dot, quat, w, lambda]) — only where an
-            # SRB reference exists; appended settling nodes track nothing.
-            if not _is_settling(k):
+            # SRB reference exists; prepended lead-in and appended settling nodes
+            # track nothing.
+            if not _is_settling(k) and not _is_lead(k):
                 e_c    = C[:, k]      - self.c_srb[k]
                 e_cd   = Cd[:, k]     - self.cd_srb[k]
                 e_quat = Q[3:7, k]    - self.quat_srb_pin[k]
@@ -571,7 +749,7 @@ class KinoNLP:
             # (for the freed arms the warm start is the default pose, so it gently
             # keeps the arms home unless the dynamics genuinely need them).
             q_free_k = ca.vertcat(*[Q[qi, k] for qi in self._free_qidx])
-            if _is_settling(k):
+            if _is_settling(k) or _is_lead(k):
                 e_qreg = q_free_k - self._stand_free
                 J += wp['w_qreg_term'] * ca.dot(e_qreg, e_qreg)
             else:
@@ -641,11 +819,12 @@ class KinoNLP:
                     _friction(f_Ri)
             opti.subject_to(Hd[:, k] == ca.vertcat(lin, ang))
 
-            # Wrench tracking (skip on settling intervals — no SRB reference) +
-            # velocity smoothness (kept everywhere; helps damp the settle).
-            # Settling intervals are k >= N - n_terminal (those that connect the
-            # appended nodes).
-            if not (self.n_terminal > 0 and k >= (N - self.n_terminal)):
+            # Wrench tracking (skip on lead-in / settling intervals — no SRB reference) +
+            # velocity smoothness (kept everywhere; helps damp the settle / lead-in).
+            # Settling intervals are k >= N - n_terminal; lead-in intervals are k < n_lead.
+            _settling_iv = self.n_terminal > 0 and k >= (N - self.n_terminal)
+            _lead_iv     = self.n_lead > 0 and k < self.n_lead
+            if not (_settling_iv or _lead_iv):
                 e_lam = Lam[:, k] - self.lam_srb[k]
                 J += wp['w_lam'] * ca.dot(e_lam, e_lam)
             e_v = V[:, k + 1] - V[:, k]
@@ -657,6 +836,13 @@ class KinoNLP:
         # trajectory in a static stand.
         if self.n_terminal > 0:
             opti.subject_to(V[:, N] == 0)
+
+        # ── Initial rest constraint ───────────────────────────────────────────
+        # Before the prepended standing lead-in the robot starts from a full stop.
+        # Feet are already pinned by the contact constraints, so V_0 = 0 starts the
+        # trajectory in a static stand (mirror of the terminal V_N = 0).
+        if self.n_lead > 0:
+            opti.subject_to(V[:, 0] == 0)
 
         # ── Warm start ────────────────────────────────────────────────────────
         opti.set_initial(Q, self.Q_warm.T)
@@ -681,7 +867,7 @@ class KinoNLP:
 
         opti.minimize(J)
 
-        opti.solver("ipopt", {
+        ipopt_opts = {
             "expand":                               self.expand,
             "error_on_fail":                        False,  # return iterate, don't raise
             "ipopt.linear_solver":                  self.linear_solver,
@@ -696,7 +882,21 @@ class KinoNLP:
             "ipopt.mu_strategy":                    self.mu_strategy,
             "ipopt.print_level":                    5,
             "print_time":                           1,
-        })
+        }
+        # HSL solvers (ma27/ma57/ma77/ma86/ma97) are loaded by IPOPT at runtime
+        # from a shared library.  Point IPOPT at the CoinHSL build explicitly so
+        # it resolves regardless of the loader search path; harmless for mumps.
+        if self.linear_solver.startswith("ma"):
+            hsllib = _resolve_hsllib()
+            if hsllib:
+                ipopt_opts["ipopt.hsllib"] = hsllib
+                print(f"[KinoNLP] HSL linear solver '{self.linear_solver}' "
+                      f"via {hsllib}")
+            else:
+                print(f"[KinoNLP] WARNING: linear_solver='{self.linear_solver}' "
+                      "but no libhsl.so found (set IPOPT_HSLLIB) — IPOPT will "
+                      "fall back / error.")
+        opti.solver("ipopt", ipopt_opts)
 
         # Reusable solver: weights in, solved trajectory out.  This is what gets
         # serialized — the expensive symbolic build (incl. the exact Hessian) is
@@ -794,3 +994,255 @@ class KinoNLP:
             e_r = np.linalg.norm(p_r[:2] - self.p_foot_srb[k, 2:4])
             res[k] = max(e_l, e_r)
         return res
+
+    # -------------------------------------------------------------------------
+    # Post-solve summary: per-term objective cost + grouped constraint violation
+    # -------------------------------------------------------------------------
+
+    def _is_settling_node(self, k):
+        return self.n_terminal > 0 and k > (self.N - self.n_terminal)
+
+    def _is_settling_interval(self, k):
+        return self.n_terminal > 0 and k >= (self.N - self.n_terminal)
+
+    def _is_lead_node(self, k):
+        return self.n_lead > 0 and k < self.n_lead
+
+    def _is_lead_interval(self, k):
+        return self.n_lead > 0 and k < self.n_lead
+
+    def cost_breakdown(self, Q, V, Lam=None, C=None, Cd=None):
+        """Recompute every weighted objective term from a solved (Q, V, Lam),
+        matching _build_opti term-for-term.  C/Cd default to the FK-consistent
+        values (com(q), h_linear/m), which the defining constraints enforce.
+        Returns an ordered dict of weighted term -> cost, plus 'total'.
+        """
+        N, m = self.N, self.mass
+        Lam = (self.Lam_sol if (Lam is None and hasattr(self, "Lam_sol")) else Lam)
+        if Lam is None:
+            Lam = self.lam_srb
+        if C is None:
+            C = np.array([np.array(self.f_com(Q[k])).flatten() for k in range(N + 1)])
+        if Cd is None:
+            Cd = np.array([np.array(self.f_hg(Q[k], V[k])).flatten()[0:3] / m
+                           for k in range(N + 1)])
+
+        c = {k: 0.0 for k in ('com', 'cdot', 'quat', 'wbase',
+                              'qreg', 'qreg_term', 'ke', 'config', 'lam', 'vsmooth')}
+        for k in range(N + 1):
+            if not self._is_settling_node(k) and not self._is_lead_node(k):
+                e = C[k] - self.c_srb[k];            c['com']   += self.w_com   * e @ e
+                e = Cd[k] - self.cd_srb[k];          c['cdot']  += self.w_cdot  * e @ e
+                e = Q[k, 3:7] - self.quat_srb_pin[k];c['quat']  += self.w_quat  * e @ e
+                e = V[k, 3:6] - self.w_body_srb[k];  c['wbase'] += self.w_wbase * e @ e
+            q_free = Q[k, self._free_qidx]
+            if self._is_settling_node(k) or self._is_lead_node(k):
+                e = q_free - self._stand_free;       c['qreg_term'] += self.w_qreg_term * e @ e
+            else:
+                e = q_free - self.Q_warm[k, self._free_qidx]
+                c['qreg'] += self.w_qreg * e @ e
+            c['ke'] += self.w_ke * float(self.f_kej(Q[k], V[k]))
+            if not self._contact_node(k):
+                e = q_free - self._flight_prior;     c['config'] += self.w_config * e @ e
+        for k in range(N):
+            if not self._is_settling_interval(k) and not self._is_lead_interval(k):
+                e = Lam[k] - self.lam_srb[k];        c['lam'] += self.w_lam * e @ e
+            e = V[k + 1] - V[k];                     c['vsmooth'] += self.w_vsmooth * e @ e
+        c['total'] = float(sum(c.values()))
+        return c
+
+    def constraint_violations(self, Q, V, Lam=None, C=None, Cd=None, Hh=None, Hd=None):
+        """Grouped constraint-violation magnitudes for a solved trajectory.
+
+        Each group maps to a numpy array of per-node (or per-interval) violation
+        magnitudes (0 = satisfied).  Uses the solved lifted variables (self.*_sol)
+        when present so the defining-constraint residuals reflect what IPOPT
+        actually returned; otherwise it FK-recomputes them (then those groups are
+        ~0 by construction).  Returns an ordered dict {group_name: np.ndarray}.
+        """
+        N, m = self.N, self.mass
+        Lam = (self.Lam_sol if (Lam is None and hasattr(self, "Lam_sol")) else Lam)
+        if Lam is None:
+            Lam = self.lam_srb
+        if C is None:  C  = getattr(self, "C_sol", None)
+        if Cd is None: Cd = getattr(self, "Cd_sol", None)
+        if Hh is None: Hh = getattr(self, "Hh_sol", None)
+        if Hd is None: Hd = getattr(self, "Hd_sol", None)
+        if C is None:
+            C = np.array([np.array(self.f_com(Q[k])).flatten() for k in range(N + 1)])
+        if Hh is None:
+            Hh = np.array([np.array(self.f_hg(Q[k], V[k])).flatten() for k in range(N + 1)])
+        if Cd is None:
+            Cd = Hh[:, 0:3] / m
+        if Hd is None:
+            Hd = np.zeros((N, 6))
+            for k in range(N):
+                a = (V[k + 1] - V[k]) / self.dt_vec[k]
+                Hd[k] = np.array(self.f_hgdot(Q[k], V[k], a)).flatten()
+
+        g_vec = np.array([0.0, 0.0, m * self.g])
+        gr = {}
+
+        # Lifted defining constraints
+        gr['c = com(q)']      = np.array([np.linalg.norm(C[k] - np.array(self.f_com(Q[k])).flatten())
+                                          for k in range(N + 1)])
+        gr['h = A_G v']       = np.array([np.linalg.norm(Hh[k] - np.array(self.f_hg(Q[k], V[k])).flatten())
+                                          for k in range(N + 1)])
+        gr['m*cdot = h_lin']  = np.array([np.linalg.norm(m * Cd[k] - Hh[k, 0:3]) for k in range(N + 1)])
+
+        # h_dot definition (vs analytic A_G a + Adot_G v) and Newton-Euler (vs wrench)
+        hdot_def = np.zeros(N); newton = np.zeros(N)
+        for k in range(N):
+            a = (V[k + 1] - V[k]) / self.dt_vec[k]
+            hdot_def[k] = np.linalg.norm(Hd[k] - np.array(self.f_hgdot(Q[k], V[k], a)).flatten())
+            _, p_l, p_r, R_l, R_r = [np.array(x) for x in self.f_fkcom(Q[k])]
+            p_l, p_r = p_l.flatten(), p_r.flatten()
+            lin = -g_vec.copy(); ang = np.zeros(3)
+            for i, corner in enumerate(FOOT_CORNERS):
+                f_L = Lam[k, 3 * i:3 * i + 3]
+                f_R = Lam[k, 3 * N_PT + 3 * i:3 * N_PT + 3 * i + 3]
+                p_Li = p_l + R_l @ corner; p_Ri = p_r + R_r @ corner
+                lin = lin + f_L + f_R
+                ang = ang + np.cross(p_Li - C[k], f_L) + np.cross(p_Ri - C[k], f_R)
+            newton[k] = np.linalg.norm(Hd[k] - np.concatenate([lin, ang]))
+        gr['hdot = A_G a+bias'] = hdot_def
+        gr['Newton-Euler']      = newton
+
+        # Manifold integration defect
+        integ = np.zeros(N)
+        for k in range(N):
+            v_avg = 0.5 * (V[k] + V[k + 1])
+            q_next = np.array(self.f_integrate(Q[k], v_avg, float(self.dt_vec[k]))).flatten()
+            integ[k] = np.linalg.norm(pin.difference(self.model, q_next, Q[k + 1]))
+        gr['integration'] = integ
+
+        # Foot planting (position + flatness) on contact nodes
+        fpos, fflat = [], []
+        for k in range(N + 1):
+            if not self._contact_node(k) or np.isnan(self.p_foot_srb[k, 0]):
+                continue
+            _, p_l, p_r, R_l, R_r = [np.array(x) for x in self.f_fkcom(Q[k])]
+            p_l, p_r = p_l.flatten(), p_r.flatten()
+            fpos.append(max(abs(p_l[0] - self.p_foot_srb[k, 0]),
+                            abs(p_l[1] - self.p_foot_srb[k, 1]),
+                            abs(p_l[2] - self.floor_z),
+                            abs(p_r[0] - self.p_foot_srb[k, 2]),
+                            abs(p_r[1] - self.p_foot_srb[k, 3]),
+                            abs(p_r[2] - self.floor_z)))
+            # flat + upright at every contact node (BOTH modes): foot z-axis == world +z,
+            # i.e. |R02|, |R12|, and 1 - R22 all ~0.  (Heading/skid is enforced separately
+            # and is mode/phase dependent, so it is not folded into this flatness metric.)
+            fflat.append(max(abs(R_l[0, 2]), abs(R_l[1, 2]), abs(1.0 - R_l[2, 2]),
+                             abs(R_r[0, 2]), abs(R_r[1, 2]), abs(1.0 - R_r[2, 2])))
+        gr['foot position'] = np.array(fpos)
+        gr['foot flatness'] = np.array(fflat)
+
+        # Contact-force friction / unilateral and flight lambda = 0
+        fric, flight = [], []
+        for k in range(N):
+            if self.stance_end <= k < self.flight_end:
+                flight.append(np.linalg.norm(Lam[k]))
+                continue
+            v = 0.0
+            for i in range(2 * N_PT):
+                f = Lam[k, 3 * i:3 * i + 3]
+                v = max(v, -f[2],
+                        f[0] + f[1] - self.mu * f[2], f[0] - f[1] - self.mu * f[2],
+                        -f[0] + f[1] - self.mu * f[2], -f[0] - f[1] - self.mu * f[2])
+            fric.append(max(0.0, v))
+        gr['friction/unilateral'] = np.array(fric)
+        gr['flight lambda = 0']   = np.array(flight)
+
+        # Free-DOF box limits (position + velocity)
+        qf = Q[:, self._free_qidx]
+        qlim = np.maximum(np.maximum(0.0, self._free_qlo[None, :] - qf),
+                          np.maximum(0.0, qf - self._free_qhi[None, :])).max(axis=1)
+        vf = V[:, self._free_vidx]
+        vlim = np.maximum(0.0, np.abs(vf) - self._free_vmax[None, :]).max(axis=1)
+        gr['joint pos limits'] = qlim
+        gr['joint vel limits'] = vlim
+
+        # Self-collision (squared-distance margin units, m^2)
+        if self.self_collision:
+            coll = np.array([max(0.0, -np.array(self.f_collpairs(Q[k])).flatten().min())
+                             for k in range(N + 1)])
+            gr['self-collision'] = coll
+
+        # Terminal rest
+        if self.n_terminal > 0:
+            gr['terminal V_N=0'] = np.array([np.linalg.norm(V[self.N])])
+
+        # Initial rest (prepended standing lead-in)
+        if self.n_lead > 0:
+            gr['initial V_0=0'] = np.array([np.linalg.norm(V[0])])
+
+        return gr
+
+    def solver_stats(self):
+        """IPOPT-reported final objective / primal infeasibility / status from the
+        last solve (empty dict if unavailable, e.g. after --skip-solve)."""
+        f = getattr(self, "_f_solve", None)
+        if f is None:
+            return {}
+        try:
+            s = f.stats()
+        except Exception:
+            return {}
+        out = {'success': s.get('success'), 'return_status': s.get('return_status')}
+        it = s.get('iterations') or {}
+        for key in ('obj', 'inf_pr', 'inf_du'):
+            seq = it.get(key)
+            if seq:
+                out[key] = seq[-1]
+        out['iter_count'] = (len(it['obj']) if it.get('obj') else s.get('iter_count'))
+        return out
+
+    def format_summary(self, Q, V, Lam=None, stats=None, header=None,
+                       C=None, Cd=None, Hh=None, Hd=None):
+        """Human-readable summary table for a solved trajectory: per-term
+        weighted objective cost + total, and grouped constraint violations.
+        `header` is a list of extra lines printed at the top; `stats` an optional
+        solver_stats() dict.  Returns (text, costs, viol).
+        """
+        costs = self.cost_breakdown(Q, V, Lam, C=C, Cd=Cd)
+        viol  = self.constraint_violations(Q, V, Lam, C=C, Cd=Cd, Hh=Hh, Hd=Hd)
+        total = costs['total']
+        L = []
+        L.append("=" * 60)
+        L.append("           KINO OPTIMIZATION SUMMARY")
+        L.append("=" * 60)
+        for h in (header or []):
+            L.append(h)
+        if stats:
+            sline = (f"solver success = {stats.get('success')}"
+                     f"   status = {stats.get('return_status')}"
+                     f"   iters = {stats.get('iter_count')}")
+            L.append(sline)
+            if 'obj' in stats:
+                L.append(f"IPOPT final objective      : {stats['obj']:.6g}")
+            if 'inf_pr' in stats:
+                L.append(f"IPOPT primal infeasibility : {stats['inf_pr']:.3e}"
+                         "   (max constraint violation, scaled)")
+        L.append("")
+        L.append("-- Total cost per trajectory (weighted objective terms) --")
+        L.append(f"  {'term':<14}{'cost':>14}{'% of total':>12}")
+        for k, v in costs.items():
+            if k == 'total':
+                continue
+            pct = (100.0 * v / total) if total else 0.0
+            L.append(f"  {k:<14}{v:>14.4g}{pct:>11.1f}%")
+        L.append(f"  {'TOTAL':<14}{total:>14.4g}{100.0:>11.1f}%")
+        L.append("")
+        L.append("-- Constraint violations (recomputed from solution) --")
+        L.append(f"  {'group':<22}{'mean':>13}{'max':>13}")
+        overall_max = 0.0
+        for g, arr in viol.items():
+            if arr is None or len(arr) == 0:
+                L.append(f"  {g:<22}{'(n/a)':>13}{'(n/a)':>13}")
+                continue
+            mx = float(np.max(arr))
+            overall_max = max(overall_max, mx)
+            L.append(f"  {g:<22}{float(np.mean(arr)):>13.3e}{mx:>13.3e}")
+        L.append(f"  {'OVERALL MAX':<22}{'':>13}{overall_max:>13.3e}")
+        L.append("=" * 60)
+        return "\n".join(L), costs, viol

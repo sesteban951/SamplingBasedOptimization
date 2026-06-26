@@ -135,6 +135,19 @@ def _mj_to_pin_quat(qw, qx, qy, qz):
     return np.array([qx, qy, qz, qw])
 
 
+def _srb_body_yaw(q_srb_row: np.ndarray) -> float:
+    """Body yaw [rad] from an SRB state row (MuJoCo quat in cols 3:7 = qw,qx,qy,qz)."""
+    qw, qx, qy, qz = q_srb_row[3], q_srb_row[4], q_srb_row[5], q_srb_row[6]
+    return float(np.arctan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy**2 + qz**2)))
+
+
+def _ctrl_frame_R(yaw: float) -> np.ndarray:
+    """Control-frame foot orientation: flat on the ground (z up), heading = body yaw.
+    This is Rz(yaw) — the leveled body-heading frame the contact feet should align to."""
+    c, s = np.cos(yaw), np.sin(yaw)
+    return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+
+
 _COM_PELVIS_NOMINAL: float = None  # cached at first call
 
 
@@ -360,7 +373,8 @@ def run_ik_trajectory(ik: G1IK, q_srb: np.ndarray, feet_ext: np.ndarray,
                       reject_self_collision: bool = False,
                       times: np.ndarray = None,
                       q_dot_max_flight: float = 10.0,
-                      foot_yaw_tol: float = 0.0):
+                      control_frame: bool = False,
+                      free_foot_yaw: bool = False):
     """
     Returns q_ik (N+1, 36) pinocchio configuration at every timestep.
 
@@ -375,9 +389,18 @@ def run_ik_trajectory(ik: G1IK, q_srb: np.ndarray, feet_ext: np.ndarray,
     w_reg_flight:    joint regularisation weight during flight.
     times:           (N+1,) timestamps [s] for per-frame dt.  None → dt=0.02 s.
     q_dot_max_flight: max joint velocity [rad/s] box constraint during flight IK.
-    foot_yaw_tol:    half-width [rad] of allowed foot yaw about vertical (foot stays flat,
-                     twists in place) during contact (stance + landing) IK.
-                     0.0 → feet held fully rigid (original).
+    control_frame:   if True, contact (stance + landing) feet are pinned RIGIDLY to the
+                     leveled body-heading frame Rz(body_yaw) — a flat-sole foot that
+                     points straight in the SRB body heading (the "straight 90deg feet
+                     turn").  False (default) → feet pinned rigidly to world-forward
+                     (identity), the original behaviour.  Orthogonal to free_foot_yaw:
+                     this chooses the *target* orientation; free_foot_yaw chooses whether
+                     foot yaw is held rigid or left free.
+    free_foot_yaw:   if True, contact feet are held flat on the ground but free to rotate
+                     about vertical (foot yaw is a free DOF in the solve), so the heading
+                     is whatever the IK prefers (needed when the body yaws while planted,
+                     e.g. a twist).  False (default) → foot yaw held rigid to the target
+                     orientation (identity, or Rz(body_yaw) when control_frame=True).
     """
     N = q_srb.shape[0] - 1
     q_ik = np.zeros((N + 1, ik.model.nq))
@@ -411,12 +434,27 @@ def run_ik_trajectory(ik: G1IK, q_srb: np.ndarray, feet_ext: np.ndarray,
     q_warm = None
     p_l_prev = np.array([feet_ext[0, 0], feet_ext[0, 1], stance_foot_z])
     p_r_prev = np.array([feet_ext[0, 2], feet_ext[0, 3], stance_foot_z])
+    # Two orthogonal toggles govern contact-foot orientation:
+    #   ctrl_align (control_frame): pick the foot TARGET orientation.  When on, align the
+    #     feet to the leveled SRB body-heading frame Rz(body_yaw), evaluated at the plant
+    #     frame and held across the phase (no skid) — the straight 90deg feet turn.  Stance
+    #     plants at frame 0 (body yaw ~0).  Off → world-forward (identity), the original.
+    #   ff_yaw (free_foot_yaw): whether foot yaw is held rigid to that target or left free
+    #     (flat sole, heading chosen by the solve).  Passed through to ik.solve.
+    ctrl_align = control_frame and use_ipopt
+    ff_yaw     = free_foot_yaw and use_ipopt
+    R_ctrl_st = _ctrl_frame_R(_srb_body_yaw(q_srb[0])) if ctrl_align else np.eye(3)
+    if ctrl_align:
+        print(f"  [pipeline] stance feet aligned to body yaw "
+              f"{np.degrees(_srb_body_yaw(q_srb[0])):+.1f}deg (control frame)")
+    if ff_yaw:
+        print(f"  [pipeline] contact feet: flat sole, yaw free (free_foot_yaw=True)")
     for i in range(stance_end):
         q0 = _build_q0(ik, q_srb[i], q_warm, stance_ground_z=stance_ground_z)
         if arm_defaults is not None:
             q0[19:] = arm_defaults[19:]
-        oMl = pin.SE3(np.eye(3), np.array([feet_ext[i,0], feet_ext[i,1], stance_foot_z]))
-        oMr = pin.SE3(np.eye(3), np.array([feet_ext[i,2], feet_ext[i,3], stance_foot_z]))
+        oMl = pin.SE3(R_ctrl_st, np.array([feet_ext[i,0], feet_ext[i,1], stance_foot_z]))
+        oMr = pin.SE3(R_ctrl_st, np.array([feet_ext[i,2], feet_ext[i,3], stance_foot_z]))
         q_sol, ok, errs = _solve_contact_frame(
             ik, q0, oMl, oMr, q_warm,
             dict(w_reg=0.1 if q_warm is not None else 0.0,
@@ -424,7 +462,7 @@ def run_ik_trajectory(ik: G1IK, q_srb: np.ndarray, feet_ext: np.ndarray,
                  w_foot_vel=0.1 if use_ipopt else 0.0,
                  floor_z=stance_foot_z if use_ipopt else -1000.0,
                  foot_hard=use_ipopt,
-                 foot_yaw_tol=foot_yaw_tol,
+                 free_foot_yaw=ff_yaw,   # rigid to target, or flat-sole/free-yaw
                  dt=float(_dt_arr[i])))
         if not ok and errs[-1] > 1e-3:
             print(f"  [warn] stance frame {i}: IK did not converge (err={errs[-1]:.2e})")
@@ -448,13 +486,19 @@ def run_ik_trajectory(ik: G1IK, q_srb: np.ndarray, feet_ext: np.ndarray,
                       warmstart_min_drop=-1.0)
     if arm_defaults is not None:
         q0_td[19:] = arm_defaults[19:]
-    oMl_td = pin.SE3(np.eye(3), np.array([feet_ext[flight_end, 0], feet_ext[flight_end, 1], landing_foot_z]))
-    oMr_td = pin.SE3(np.eye(3), np.array([feet_ext[flight_end, 2], feet_ext[flight_end, 3], landing_foot_z]))
+    # Landing feet align to the SRB body yaw at touchdown (control frame), held across
+    # the landing phase.  R_ctrl_td flat + body-heading; identity (forward) when off.
+    R_ctrl_td = _ctrl_frame_R(_srb_body_yaw(q_srb[flight_end])) if ctrl_align else np.eye(3)
+    if ctrl_align:
+        print(f"  [pipeline] landing feet aligned to body yaw "
+              f"{np.degrees(_srb_body_yaw(q_srb[flight_end])):+.1f}deg (control frame)")
+    oMl_td = pin.SE3(R_ctrl_td, np.array([feet_ext[flight_end, 0], feet_ext[flight_end, 1], landing_foot_z]))
+    oMr_td = pin.SE3(R_ctrl_td, np.array([feet_ext[flight_end, 2], feet_ext[flight_end, 3], landing_foot_z]))
     q_td, ok_td, errs_td = ik.solve(q0_td, oMl_td, oMr_td,
                                      q_prev=q0_td, w_reg=0.1, w_sym=2.0,
                                      floor_z=landing_foot_z if use_ipopt else -1000.0,
                                      foot_hard=use_ipopt,
-                                     foot_yaw_tol=foot_yaw_tol,
+                                     free_foot_yaw=ff_yaw,   # rigid to target, or flat-sole/free-yaw
                                      q_dot_max=0.0)
     if not ok_td and errs_td[-1] > 1e-3:
         print(f"  [warn] touchdown frame {flight_end}: IK did not converge (err={errs_td[-1]:.2e})")
@@ -541,14 +585,17 @@ def run_ik_trajectory(ik: G1IK, q_srb: np.ndarray, feet_ext: np.ndarray,
     p_l_prev = ik.data.oMf[ik.l_foot_id].translation.copy()
     p_r_prev = ik.data.oMf[ik.r_foot_id].translation.copy()
 
+    # Landing feet stay pinned to the touchdown control frame (R_ctrl_td: flat + the SRB
+    # body yaw at touchdown), held across the whole landing phase — the foot does not
+    # re-choose or skid its heading after planting.
     for j, i in enumerate(range(flight_end + 1, N + 1)):
         # warmstart_min_drop=-1 forces q_warm joints to always be used (avoids
         # standing_config fallback which uses wrong-sign hip_pitch at near-standing height).
         q0 = _build_q0(ik, q_srb[i], q_warm, warmstart_min_drop=-1.0)
         if arm_defaults is not None:
             q0[19:] = arm_defaults[19:]
-        oMl = pin.SE3(np.eye(3), np.array([feet_ext[i,0], feet_ext[i,1], landing_foot_z]))
-        oMr = pin.SE3(np.eye(3), np.array([feet_ext[i,2], feet_ext[i,3], landing_foot_z]))
+        oMl = pin.SE3(R_ctrl_td, np.array([feet_ext[i,0], feet_ext[i,1], landing_foot_z]))
+        oMr = pin.SE3(R_ctrl_td, np.array([feet_ext[i,2], feet_ext[i,3], landing_foot_z]))
         q_sol, ok, errs = _solve_contact_frame(
             ik, q0, oMl, oMr, q_warm,
             dict(w_reg=0.1,
@@ -557,7 +604,7 @@ def run_ik_trajectory(ik: G1IK, q_srb: np.ndarray, feet_ext: np.ndarray,
                  w_sym=2.0,
                  floor_z=landing_foot_z if use_ipopt else -1000.0,
                  foot_hard=use_ipopt,
-                 foot_yaw_tol=foot_yaw_tol,
+                 free_foot_yaw=ff_yaw,   # rigid to target, or flat-sole/free-yaw
                  dt=float(_dt_arr[i])))
         if not ok and errs[-1] > 1e-3:
             print(f"  [warn] landing frame {i}: IK did not converge (err={errs[-1]:.2e})")
@@ -1201,10 +1248,15 @@ if __name__ == "__main__":
                         help="Skip the MuJoCo visualizer (useful for non-interactive runs)")
     parser.add_argument("--plot-states",  action="store_true",
                         help="Save an SRB state trajectory plot (srb_states.png)")
-    parser.add_argument("--foot-yaw-tol", type=float, default=0.0,
-                        help="Allowed foot yaw about vertical [rad] during contact IK "
-                             "(foot stays flat, twists in place; default 0.0 = rigid). "
-                             "e.g. 0.26 ≈ 15°")
+    parser.add_argument("--control-frame", action="store_true", default=False,
+                        help="Force contact feet rigidly aligned to the SRB body heading "
+                             "Rz(body_yaw) — a straight 90deg feet turn (overrides the "
+                             "per-config constraints.control_frame flag).")
+    parser.add_argument("--free-foot-yaw", action="store_true", default=False,
+                        help="Force flat-sole/free-yaw contact feet — foot yaw is a free DOF "
+                             "in the solve (overrides the per-config constraints.free_foot_yaw "
+                             "flag). Use for motions where the body yaws while planted, e.g. a "
+                             "twist.")
 
     args = parser.parse_args()
 
@@ -1219,10 +1271,21 @@ if __name__ == "__main__":
         _results_dir   = os.path.join(_REPO_ROOT, _cfg_mod.config.save_dir.lstrip("./"))
         _stance_ground_z = _cfg_mod.config.constraints.stance_ground_z
         _reject_self_collision = _cfg_mod.config.solver.reject_self_collision
+        _control_frame = getattr(_cfg_mod.config.constraints, "control_frame", False)
+        _free_foot_yaw = getattr(_cfg_mod.config.constraints, "free_foot_yaw", False)
     except Exception:
         _results_dir     = _RESULTS_DEFAULT
         _stance_ground_z = 0.0
         _reject_self_collision = False
+        _control_frame = False
+        _free_foot_yaw = False
+    # CLI flags force each on regardless of the config default.
+    _control_frame = _control_frame or args.control_frame
+    _free_foot_yaw = _free_foot_yaw or args.free_foot_yaw
+    if _control_frame:
+        print("[pipeline] Contact feet: rigid to body heading Rz(yaw) (control_frame=True)")
+    if _free_foot_yaw:
+        print("[pipeline] Contact feet: flat-sole, free yaw (free_foot_yaw=True)")
     times, q_srb, feet_ext, stance_end, flight_end = load_srb_results(_results_dir)
 
     # 3. IK — export into a config-specific subdirectory so configs don't overwrite each other
@@ -1246,7 +1309,8 @@ if __name__ == "__main__":
                                   tuck_opt=_tuck_opt,
                                   reject_self_collision=_reject_self_collision,
                                   times=times,
-                                  foot_yaw_tol=args.foot_yaw_tol)
+                                  control_frame=_control_frame,
+                                  free_foot_yaw=_free_foot_yaw)
     else:
         q_ik_mj = np.loadtxt(os.path.join(export_dir, "ik_q_mujoco.csv"),
                               delimiter=",", comments="#")

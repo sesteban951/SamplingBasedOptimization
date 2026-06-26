@@ -139,6 +139,15 @@ _landing_gz = cfg.constraints.landing_ground_z
 
 _var_inertia = cfg.solver.variable_inertia
 
+# Twist-axis Izz modulation: free Izz in flight (Ixx/Iyy nominal), uses the same
+# angular-momentum (L) integration path as variable_inertia but with a different
+# inertia source.  _use_L selects that path for either mode.
+_izz_mod   = bool(getattr(cfg.solver, "izz_modulation", False))
+_izz_range = float(getattr(cfg.solver, "izz_modulation_range", 0.10))
+if _var_inertia and _izz_mod:
+    raise ValueError("variable_inertia and izz_modulation are mutually exclusive.")
+_use_L = _var_inertia or _izz_mod
+
 _TUCK_SYM_NPZ = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "ik", "results", "inertia_tuck_sym.npz",
@@ -208,6 +217,10 @@ x_goal_ca = ca.DM(x_goal)
 
 print("[dbg] creating SRB_Aerial...", flush=True)
 srb = SRB_Aerial(cfg.costs)
+# Nominal principal inertias (diagonal) — used by the izz_modulation twist model.
+_Ixx_nom = float(np.array(srb.I)[0, 0])
+_Iyy_nom = float(np.array(srb.I)[1, 1])
+_Izz_nom = float(np.array(srb.I)[2, 2])
 f = srb.f_disc
 nq = srb.nq
 nv = srb.nv
@@ -336,6 +349,15 @@ M_R = opti.variable(3, N)
 # t=0: legs extended (liftoff/touchdown); t=1: fully tucked.
 # Inertia I(t) and foot positions foot(t) are derived from tuck via polynomial fits,
 # ensuring physical consistency between the aerial configuration and body inertia.
+# Both variable_inertia (leg tuck) and izz_modulation (free Izz) integrate the body
+# angular momentum L = I·ω and recover ω = I(k)⁻¹ L.  They differ only in the inertia
+# SOURCE; everything below is expressed through the node-indexed diagonal _Idiag_at(k).
+if _use_L:
+    # Angular momentum L (body frame) — auxiliary variable (avoids ca.solve).
+    #   Dynamics: L_{k+1} = L_k + dt·R_BWᵀ M   (M=0 in flight → L conserved).
+    #   Coupling: I_mat(k) @ ω_k = L_k          (applied after the loop).
+    L_var = opti.variable(3, N + 1)
+
 if _var_inertia:
     tuck_flight = opti.variable(N_flight + 1)   # one scalar per flight node
     opti.subject_to(opti.bounded(0.0, tuck_flight, 1.0))
@@ -345,10 +367,6 @@ if _var_inertia:
         _dt_max = cfg.solver.max_tuck_dot * dt_nom
         for k in range(N_flight):
             opti.subject_to(opti.bounded(-_dt_max, tuck_flight[k + 1] - tuck_flight[k], _dt_max))
-    # Angular momentum L = I·ω in body frame (auxiliary variable — avoids ca.solve).
-    # Dynamics: L_{k+1} = L_k + dt*M_net_B  (linear, enforced in dynamics loop).
-    # Coupling: I_mat(tuck_k) @ w_k = L_k   (bilinear, enforced after loop).
-    L_var = opti.variable(3, N + 1)
 
     def _tuck_at(k):
         """CasADi tuck expression at trajectory node k (0 outside flight)."""
@@ -356,19 +374,43 @@ if _var_inertia:
             return tuck_flight[k - stance_end]
         return ca.DM(0.0)
 
+    def _Idiag_at(k):
+        """Diagonal inertia [Ixx,Iyy,Izz] at node k from the leg-tuck model."""
+        I_mat = _I_mat_from_tuck(_tuck_at(k))
+        return ca.vertcat(I_mat[0, 0], I_mat[1, 1], I_mat[2, 2])
+
+elif _izz_mod:
+    # Free Izz per flight node in nominal·[1-range, 1+range]; Ixx/Iyy stay nominal.
+    # First & last flight nodes pinned to nominal Izz so ω is continuous into/out of
+    # the constant-inertia stance/landing (no ω jump at liftoff/touchdown).
+    izz_flight = opti.variable(N_flight + 1)
+    opti.subject_to(opti.bounded(_Izz_nom * (1.0 - _izz_range),
+                                 izz_flight, _Izz_nom * (1.0 + _izz_range)))
+    opti.subject_to(izz_flight[0] == _Izz_nom)
+    opti.subject_to(izz_flight[N_flight] == _Izz_nom)
+    if cfg.solver.max_tuck_dot is not None:
+        _dizz_max = cfg.solver.max_tuck_dot * _Izz_nom * dt_nom
+        for k in range(N_flight):
+            opti.subject_to(opti.bounded(-_dizz_max, izz_flight[k + 1] - izz_flight[k], _dizz_max))
+
+    def _izz_at(k):
+        """CasADi Izz expression at node k (nominal outside flight)."""
+        if stance_end <= k <= flight_end:
+            return izz_flight[k - stance_end]
+        return ca.DM(_Izz_nom)
+
+    def _Idiag_at(k):
+        """Diagonal inertia [Ixx,Iyy,Izz] at node k — only Izz varies."""
+        return ca.vertcat(ca.DM(_Ixx_nom), ca.DM(_Iyy_nom), _izz_at(k))
+
+if _use_L:
     def _I_mat_at(k):
-        return _I_mat_from_tuck(_tuck_at(k))
+        return ca.diag(_Idiag_at(k))
 
-    def _w_from_L(L, tuck_sym):
-        """ω = I(tuck)⁻¹ L.  I is diagonal so no ca.solve — just element-wise divide."""
-        I_mat = _I_mat_from_tuck(tuck_sym)
-        return ca.vertcat(L[0] / I_mat[0, 0],
-                          L[1] / I_mat[1, 1],
-                          L[2] / I_mat[2, 2])
-
-    def _f_var(p, q, v, L, tuck_sym, F_net_W, M_total):
-        """Continuous variable-inertia SRB derivatives [ṗ, q̇, v̇, L̇]."""
-        w      = _w_from_L(L, tuck_sym)
+    def _f_var(p, q, v, L, Idiag, F_net_W, M_total):
+        """Continuous SRB derivatives [ṗ, q̇, v̇, L̇] with diagonal inertia Idiag.
+        ω = I⁻¹ L is element-wise (I diagonal) — no ca.solve."""
+        w      = ca.vertcat(L[0] / Idiag[0], L[1] / Idiag[1], L[2] / Idiag[2])
         R_BW   = kin.quat_to_rot_matrix_ca(q)
         q_dot  = 0.5 * kin.quat_mult_ca(q, ca.vertcat(0, w))
         p_dot  = v
@@ -419,6 +461,29 @@ opti.subject_to(X[7:13, N] <= x_goal_ca[7:13] + epsilon)
 q_err_terminal = kin.quat_diff_ca(X[3:7, N], ca.DM(quat_goal))
 log_err_terminal = kin.quat_log_ca(q_err_terminal)
 opti.subject_to(ca.sumsqr(log_err_terminal) <= epsilon**2)
+
+# Touchdown twist-progress: pin the orientation at touchdown to the SLERP keyframe at
+# `touchdown_twist_frac` of the maneuver, so the body finishes (1-frac) of the twist
+# in the air and the landing only settles.  The mid/terminal anchors keep the path
+# monotonic so this fraction is unambiguous (no 360->0 wrap).  Twist maneuvers only.
+_td_frac = cfg.constraints.touchdown_twist_frac
+if _td_frac is not None:
+    _td_tol     = cfg.constraints.touchdown_twist_tol
+    quat_td_ref = ca.DM(interp.sample_piecewise_slerp(float(_td_frac), quat_slerp_keyframes))
+    q_err_td    = kin.quat_diff_ca(X[3:7, flight_end], quat_td_ref)
+    opti.subject_to(ca.sumsqr(kin.quat_log_ca(q_err_td)) <= _td_tol**2)
+
+    # Hard midpoint anchor: orientation anchors are mod-360 ambiguous, so with only the
+    # 0% (initial), 85% (touchdown) and 100% (terminal) anchors the 0->85% gap exceeds
+    # 180 deg and the solver can satisfy them by OVERSHOOTING then unwinding on the
+    # ground.  Pinning the flight midpoint to SLERP(0.5) makes every consecutive anchor
+    # gap < 180 deg, fixing the winding direction → a monotonic twist, no overshoot.
+    _k_mid       = stance_end + N_flight // 2
+    quat_mid_ref = ca.DM(interp.sample_piecewise_slerp(0.5, quat_slerp_keyframes))
+    q_err_mid    = kin.quat_diff_ca(X[3:7, _k_mid], quat_mid_ref)
+    opti.subject_to(ca.sumsqr(kin.quat_log_ca(q_err_mid)) <= _td_tol**2)
+    print(f"[dbg] twist anchors: 50% (mid) + {100*_td_frac:.0f}% (touchdown) of maneuver "
+          f"(tol={_td_tol:.3f} rad)", flush=True)
 
 # kinematic limits
 L_max = cfg.constraints.L_max
@@ -549,20 +614,20 @@ for k in range(N):
         opti.subject_to(ca.sumsqr(r_R) >= L_min**2)
 
     # dynamics
-    if _var_inertia:
-        # RK4 integration of [p, q, v, L] with variable inertia.
+    if _use_L:
+        # RK4 integration of [p, q, v, L] with node-varying diagonal inertia.
         # I is diagonal so ω = I⁻¹L is element-wise — no ca.solve needed.
-        # Tuck is treated as ZOH over the interval (value at node k).
+        # Inertia is treated as ZOH over the interval (value at node k).
         # w_{k+1} is pinned by the I@w=L coupling constraint applied after the loop.
         p_k = X[0:3, k]; q_k = X[3:7, k]; v_k = X[7:10, k]
         L_k = L_var[:, k]
-        tuck_k  = _tuck_at(k)
+        Id_k    = _Idiag_at(k)
         F_net_W = F_total + ca.vertcat(0.0, 0.0, -srb.m * srb.g)
 
-        p1, q1, v1, L1 = _f_var(p_k,                  q_k,                  v_k,                  L_k,                  tuck_k, F_net_W, M_total)
-        p2, q2, v2, L2 = _f_var(p_k + 0.5*dt_k*p1,   q_k + 0.5*dt_k*q1,   v_k + 0.5*dt_k*v1,   L_k + 0.5*dt_k*L1,   tuck_k, F_net_W, M_total)
-        p3, q3, v3, L3 = _f_var(p_k + 0.5*dt_k*p2,   q_k + 0.5*dt_k*q2,   v_k + 0.5*dt_k*v2,   L_k + 0.5*dt_k*L2,   tuck_k, F_net_W, M_total)
-        p4, q4, v4, L4 = _f_var(p_k + dt_k*p3,        q_k + dt_k*q3,        v_k + dt_k*v3,        L_k + dt_k*L3,        tuck_k, F_net_W, M_total)
+        p1, q1, v1, L1 = _f_var(p_k,                  q_k,                  v_k,                  L_k,                  Id_k, F_net_W, M_total)
+        p2, q2, v2, L2 = _f_var(p_k + 0.5*dt_k*p1,   q_k + 0.5*dt_k*q1,   v_k + 0.5*dt_k*v1,   L_k + 0.5*dt_k*L1,   Id_k, F_net_W, M_total)
+        p3, q3, v3, L3 = _f_var(p_k + 0.5*dt_k*p2,   q_k + 0.5*dt_k*q2,   v_k + 0.5*dt_k*v2,   L_k + 0.5*dt_k*L2,   Id_k, F_net_W, M_total)
+        p4, q4, v4, L4 = _f_var(p_k + dt_k*p3,        q_k + dt_k*q3,        v_k + dt_k*v3,        L_k + dt_k*L3,        Id_k, F_net_W, M_total)
 
         p_next = p_k + (dt_k / 6.0) * (p1 + 2*p2 + 2*p3 + p4)
         q_next = q_k + (dt_k / 6.0) * (q1 + 2*q2 + 2*q3 + q4)
@@ -596,8 +661,9 @@ if cfg.constraints.L_extension_min > 0:
     opti.subject_to(ca.sumsqr(r_R_td) >= L_ext2)
 
 # L = I·ω coupling: bilinear constraint tying angular momentum, inertia, and
-# angular velocity at every node.  Inertia is derived from the tuck polynomial.
-if _var_inertia:
+# angular velocity at every node.  Inertia from the tuck polynomial (var_inertia) or
+# the free-Izz model (izz_modulation); both expressed via _I_mat_at(k).
+if _use_L:
     for k in range(N + 1):
         opti.subject_to(_I_mat_at(k) @ X[10:13, k] == L_var[:, k])
 
@@ -743,6 +809,18 @@ if _c_pz == 0.0 and not cfg.constraints.workspace_pz_2d:
         rp_sq_allowed = rp_max**2 + alpha_rp * p_err_sq
         opti.subject_to(roll_k**2 + pitch_k**2 <= rp_sq_allowed)
 
+# stance orientation constraint — hard roll²+pitch² cap during the pre-jump phase.
+# None = off.  Independent of the landing modes above.
+if cfg.constraints.stance_rp_max is not None:
+    rp_max_st = cfg.constraints.stance_rp_max
+    for k in range(0, stance_end):
+        q_k = X[3:7, k]
+        roll_k = ca.atan2(2.0 * (q_k[0] * q_k[1] + q_k[2] * q_k[3]),
+                          1.0 - 2.0 * (q_k[1]**2 + q_k[2]**2))
+        sinp_k  = 2.0 * (q_k[0] * q_k[2] - q_k[3] * q_k[1])
+        pitch_k = ca.asin(ca.fmin(ca.fmax(sinp_k, -1.0), 1.0))
+        opti.subject_to(roll_k**2 + pitch_k**2 <= rp_max_st**2)
+
 print("[dbg] objective...", flush=True)
 ##############################################################
 # Objective Function
@@ -776,10 +854,11 @@ for k in range(N):
     if k < stance_end:
         x_ref_k = None
     elif k < flight_end:
-        if _var_inertia:
-            # Variable-inertia flight: angular momentum L = I·ω is conserved,
-            # so ω ∝ 1/I(tuck).  Don't track a constant-rate SLERP reference —
-            # it fights physics.  Terminal constraint + L-dynamics drive the flip.
+        if _use_L:
+            # L-integration flight (var_inertia OR izz_modulation): angular momentum
+            # is conserved and ω ∝ 1/I(t).  Don't track a constant-rate SLERP reference
+            # — it fights physics and forces a uniform rate.  Terminal constraint +
+            # Q_flip_mid + L-dynamics drive the (possibly non-uniform) rotation.
             x_ref_k = None
         else:
             alpha = (k - stance_end + 1) / N_flight
@@ -951,6 +1030,17 @@ if _var_inertia:
             w_ref = omega_ref_body[j] / float(T_flight_nom / N_flight)
             L_guess[:, k] = I_nom_mat @ w_ref
     opti.set_initial(L_var, L_guess)
+elif _izz_mod:
+    # Izz seeded at nominal (uniform-rate warm start); L from nominal I @ ω_ref.
+    I_nom_mat = np.array(srb.I)
+    opti.set_initial(izz_flight, _Izz_nom)
+    L_guess = np.zeros((3, N + 1))
+    for k in range(N + 1):
+        if stance_end <= k < flight_end:
+            j = min(k - stance_end, N_flight - 1)
+            w_ref = omega_ref_body[j] / float(T_flight_nom / N_flight)
+            L_guess[:, k] = I_nom_mat @ w_ref
+    opti.set_initial(L_var, L_guess)
 
 ##############################################################
 # Solve
@@ -984,6 +1074,15 @@ if _var_inertia:
         I_var_sol[1, k] = float(I_np[1, 1]) + float(np.polyval(_poly_Iyy, t_k)) - _Iyy0
         I_var_sol[2, k] = float(I_np[2, 2]) + float(np.polyval(_poly_Izz, t_k)) - _Izz0
         # off-diagonals = 0 (diagonal-only; bilateral symmetry)
+elif _izz_mod:
+    izz_sol   = np.array(sol.value(izz_flight)).flatten()    # (N_flight+1,)
+    L_var_sol = np.array(sol.value(L_var))                   # (3, N+1)
+    # Full-trajectory inertia: Ixx/Iyy nominal, Izz from the free profile.
+    I_var_sol = np.zeros((6, N + 1))
+    I_var_sol[0, :] = _Ixx_nom
+    I_var_sol[1, :] = _Iyy_nom
+    for k in range(N + 1):
+        I_var_sol[2, k] = float(izz_sol[k - stance_end]) if stance_end <= k <= flight_end else _Izz_nom
 T_stance_sol = float(sol.value(T_stance))
 T_flight_sol = float(sol.value(T_flight))
 T_land_sol = float(sol.value(T_land))
@@ -1117,5 +1216,10 @@ if _var_inertia:
         foot_aerial[fi, 5] = float(np.polyval(_poly_fR[2], t_k))
     np.savetxt(save_dir + "aerial_foot_pos.csv", foot_aerial, delimiter=",",
                header="fLx,fLy,fLz,fRx,fRy,fRz pelvis-frame (N_flight+1 rows)")
+elif _izz_mod:
+    np.savetxt(save_dir + "I_opt.csv", I_var_sol.T, delimiter=",",
+               header="Ixx,Iyy,Izz,Ixy,Ixz,Iyz (N+1 rows, body-frame kg·m²)")
+    np.savetxt(save_dir + "izz_opt.csv", izz_sol, delimiter=",",
+               header="free Izz at each flight node (N_flight+1 values, kg·m²)")
 
 print(f"\nSaved results to {save_dir}")
